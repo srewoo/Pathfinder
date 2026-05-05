@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Pathfinder",
   "version": "1.0.0",
-  "description": "Pathfinder — AI Autonomous QA Engineer in your browser. Crawls help docs, explores your app, learns flows, generates and executes tests automatically.",
+  "description": "AI QA engineer in your browser. Crawls docs, explores your app, learns flows, generates and runs tests automatically.",
   "permissions": [
     "activeTab",
     "sidePanel",
