@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pathfinder — Privacy Policy</title>
+  <style>
+    :root {
+      --bg: #0f0f14;
+      --surface: #16161f;
+      --card: #1e1e2a;
+      --border: #2a2a3a;
+      --primary: #7c3aed;
+      --primary-light: #a78bfa;
+      --accent: #10b981;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      padding-bottom: 60px;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #1a1030 0%, #0f0f14 60%);
+      border-bottom: 1px solid var(--border);
+      padding: 48px 24px 40px;
+      text-align: center;
+    }
+    .logo {
+      display: inline-flex; align-items: center; gap: 10px; margin-bottom: 16px;
+    }
+    .logo-icon {
+      width: 40px; height: 40px; background: var(--primary);
+      border-radius: 10px; display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+    }
+    .logo-text { font-size: 24px; font-weight: 700; }
+    .hero h1 { font-size: 26px; font-weight: 700; margin-bottom: 8px; }
+    .hero h1 span { color: var(--primary-light); }
+    .hero p { font-size: 14px; color: var(--muted); }
+
+    .container { max-width: 700px; margin: 0 auto; padding: 40px 24px 0; }
+
+    .updated {
+      font-size: 12px; color: var(--muted);
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 14px;
+      display: inline-block; margin-bottom: 32px;
+    }
+
+    .highlight-box {
+      border-radius: 12px; padding: 20px 24px;
+      margin-bottom: 32px;
+      background: rgba(16,185,129,.07);
+      border: 1px solid rgba(16,185,129,.2);
+    }
+    .highlight-box h2 {
+      font-size: 15px; font-weight: 700; color: #34d399;
+      margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+    }
+    .highlight-box ul {
+      list-style: none; padding: 0;
+    }
+    .highlight-box ul li {
+      font-size: 13px; color: var(--muted);
+      padding: 4px 0; display: flex; align-items: flex-start; gap: 8px;
+    }
+    .highlight-box ul li::before {
+      content: '✓'; color: #34d399; font-weight: 700; flex-shrink: 0;
+    }
+
+    h2.section-heading {
+      font-size: 16px; font-weight: 700;
+      color: var(--text); margin: 32px 0 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    h2.section-heading span { color: var(--primary-light); margin-right: 8px; }
+
+    p { font-size: 14px; color: var(--muted); margin-bottom: 12px; }
+
+    .data-table {
+      width: 100%; border-collapse: collapse;
+      font-size: 13px; margin-bottom: 24px;
+      border-radius: 10px; overflow: hidden;
+    }
+    .data-table th {
+      background: var(--card); color: var(--text);
+      font-weight: 600; text-align: left;
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+    }
+    .data-table td {
+      padding: 10px 14px; color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .data-table tr:last-child td { border-bottom: none; }
+    .data-table tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+    .badge {
+      display: inline-block; font-size: 10px; font-weight: 700;
+      padding: 2px 7px; border-radius: 999px;
+    }
+    .badge-local  { background: rgba(16,185,129,.15); color: #34d399; }
+    .badge-ext    { background: rgba(59,130,246,.15);  color: #60a5fa; }
+    .badge-never  { background: rgba(239,68,68,.12);   color: #f87171; }
+
+    .contact-box {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px 20px; margin-top: 8px;
+      font-size: 13px; color: var(--muted);
+    }
+
+    .page-footer {
+      text-align: center; padding: 32px 24px 0;
+      font-size: 12px; color: #4a5568;
+      border-top: 1px solid var(--border); margin-top: 40px;
+    }
+    .page-footer a { color: var(--primary-light); text-decoration: none; }
+    .page-footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="logo">
+    <div class="logo-icon">🐛</div>
+    <span class="logo-text">pathfinder</span>
+  </div>
+  <h1><span>Privacy Policy</span></h1>
+  <p>Plain English, no legalese. We respect your data.</p>
+</div>
+
+<div class="container">
+
+  <div class="updated">Last updated: March 2026 &nbsp;·&nbsp; Version 1.0.0</div>
+
+  <!-- Short summary -->
+  <div class="highlight-box">
+    <h2>🔒 The short version</h2>
+    <ul>
+      <li>All data stays in your browser. Nothing is sent to pathfinder servers — there are none.</li>
+      <li>Your API keys are stored locally in Chrome's encrypted storage, never transmitted to us.</li>
+      <li>Crawled content, vectors, flows, and test results are stored in your browser's IndexedDB.</li>
+      <li>AI calls go directly from your browser to your chosen provider (OpenAI / Anthropic / Google).</li>
+      <li>The <code style="font-size:11px;background:rgba(0,0,0,.3);padding:1px 5px;border-radius:3px">debugger</code> permission is used only during Explore to capture live page screenshots via CDP — it is detached immediately when exploration ends and no data leaves your device.</li>
+      <li>The <code style="font-size:11px;background:rgba(0,0,0,.3);padding:1px 5px;border-radius:3px">cookies</code> permission is used to restore your authenticated session for test runs — cookies are never sent to pathfinder or any third party.</li>
+      <li>We collect zero analytics, zero telemetry, and zero personal data.</li>
+    </ul>
+  </div>
+
+  <!-- 1 -->
+  <h2 class="section-heading"><span>1.</span> Who we are</h2>
+  <p>pathfinder is a Chrome browser extension that acts as an AI-powered QA engineer. It is a standalone client-side tool. There is no pathfinder server, cloud service, or backend.</p>
+
+  <!-- 2 -->
+  <h2 class="section-heading"><span>2.</span> What data is stored and where</h2>
+
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Data</th>
+        <th>Where stored</th>
+        <th>Leaves your device?</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>API key (OpenAI / Anthropic / Google)</td>
+        <td>Chrome <code>storage.local</code> (encrypted by Chrome)</td>
+        <td><span class="badge badge-ext">Sent to your provider only</span></td>
+      </tr>
+      <tr>
+        <td>Crawled page text &amp; embeddings</td>
+        <td>Browser IndexedDB</td>
+        <td><span class="badge badge-local">Local only</span></td>
+      </tr>
+      <tr>
+        <td>AI-learned user flows</td>
+        <td>Browser IndexedDB</td>
+        <td><span class="badge badge-local">Local only</span></td>
+      </tr>
+      <tr>
+        <td>Generated test cases</td>
+        <td>Browser IndexedDB</td>
+        <td><span class="badge badge-local">Local only</span></td>
+      </tr>
+      <tr>
+        <td>Test results &amp; screenshots</td>
+        <td>Browser IndexedDB</td>
+        <td><span class="badge badge-local">Local only</span></td>
+      </tr>
+      <tr>
+        <td>Interaction graph (from Explore)</td>
+        <td>Browser IndexedDB</td>
+        <td><span class="badge badge-local">Local only</span></td>
+      </tr>
+      <tr>
+        <td>Extension preferences &amp; theme</td>
+        <td>Chrome <code>storage.local</code></td>
+        <td><span class="badge badge-local">Local only</span></td>
+      </tr>
+      <tr>
+        <td>Personal information</td>
+        <td>—</td>
+        <td><span class="badge badge-never">Never collected</span></td>
+      </tr>
+      <tr>
+        <td>Analytics / crash reports / telemetry</td>
+        <td>—</td>
+        <td><span class="badge badge-never">Never collected</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- 3 -->
+  <h2 class="section-heading"><span>3.</span> Third-party AI providers</h2>
+  <p>When you use AI features (Explore, Flow Learning, Test Generation), pathfinder sends prompts directly from your browser to your configured provider:</p>
+  <ul style="list-style:none;padding:0;margin-bottom:16px">
+    <li style="font-size:13px;color:var(--muted);padding:4px 0">• <strong style="color:var(--text)">OpenAI</strong> — subject to <a href="https://openai.com/privacy" target="_blank" style="color:var(--primary-light)">OpenAI's privacy policy</a></li>
+    <li style="font-size:13px;color:var(--muted);padding:4px 0">• <strong style="color:var(--text)">Anthropic</strong> — subject to <a href="https://www.anthropic.com/privacy" target="_blank" style="color:var(--primary-light)">Anthropic's privacy policy</a></li>
+    <li style="font-size:13px;color:var(--muted);padding:4px 0">• <strong style="color:var(--text)">Google AI</strong> — subject to <a href="https://policies.google.com/privacy" target="_blank" style="color:var(--primary-light)">Google's privacy policy</a></li>
+  </ul>
+  <p>pathfinder does <strong>not</strong> proxy, log, or inspect these requests. The call goes directly from your browser to the provider using your own API key.</p>
+  <p>If you use the <strong>Local (Free)</strong> embedding mode, no data is sent to any external service — the model runs entirely in your browser via ONNX Runtime.</p>
+
+  <!-- 4 -->
+  <h2 class="section-heading"><span>4.</span> Website crawling</h2>
+  <p>When you crawl a website, pathfinder's service worker makes HTTP GET requests to the pages you specify. These requests:</p>
+  <ul style="list-style:disc;padding-left:20px;margin-bottom:16px">
+    <li style="font-size:13px;color:var(--muted);margin-bottom:6px">Use a <code>User-Agent</code> header identifying pathfinder (<code>pathfinder/1.0</code>)</li>
+    <li style="font-size:13px;color:var(--muted);margin-bottom:6px">Use your existing browser session (cookies, login state)</li>
+    <li style="font-size:13px;color:var(--muted);margin-bottom:6px">Are rate-limited (200 ms between batches) to avoid overloading servers</li>
+  </ul>
+  <p>The crawled text content is stored locally in IndexedDB. It is never uploaded anywhere.</p>
+
+  <!-- 5 -->
+  <h2 class="section-heading"><span>5.</span> Permissions explained</h2>
+  <table class="data-table">
+    <thead>
+      <tr><th>Permission</th><th>Why it's needed</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>activeTab</code></td>
+        <td>To read the current page's URL and title so the extension knows which page to explore or test</td>
+      </tr>
+      <tr>
+        <td><code>tabs</code></td>
+        <td>To navigate tabs during test execution, monitor page loads, and detect URL changes after actions</td>
+      </tr>
+      <tr>
+        <td><code>scripting</code></td>
+        <td>To execute scripts inside the active tab — used to read the DOM, interact with elements, and verify authentication state during test runs</td>
+      </tr>
+      <tr>
+        <td><code>debugger</code></td>
+        <td>To attach Chrome DevTools Protocol (CDP) to a tab for live screencasting during Explore mode. This is used <strong>only</strong> while you run Explore — no page content is stored or transmitted beyond your device. The debugger is detached as soon as exploration ends.</td>
+      </tr>
+      <tr>
+        <td><code>cookies</code></td>
+        <td>To capture your existing browser session cookies and re-inject them before test execution, so tests run as an authenticated user. Cookies are read locally and never transmitted to any third party.</td>
+      </tr>
+      <tr>
+        <td><code>storage</code></td>
+        <td>To save your API key, preferences, and theme settings locally in Chrome's encrypted storage</td>
+      </tr>
+      <tr>
+        <td><code>sidePanel</code></td>
+        <td>To display the pathfinder UI in Chrome's side panel</td>
+      </tr>
+      <tr>
+        <td><code>alarms</code></td>
+        <td>To keep the service worker alive during long-running crawl and exploration jobs</td>
+      </tr>
+      <tr>
+        <td><code>host_permissions: &lt;all_urls&gt;</code></td>
+        <td>To crawl any help or docs site you specify, and to run tests against any web app. You control which URL is crawled or tested — pathfinder does not initiate any requests on its own.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- 6 -->
+  <h2 class="section-heading"><span>6.</span> Data deletion</h2>
+  <p>All locally stored data (crawled documents, vectors, flows, test cases, results) can be deleted at any time:</p>
+  <p style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 16px;font-size:13px">
+    Open pathfinder → <strong>⚙ Settings</strong> → <strong style="color:#ef4444">Clear All Data</strong>
+  </p>
+  <p>Uninstalling the extension also removes all locally stored data.</p>
+
+  <!-- 7 -->
+  <h2 class="section-heading"><span>7.</span> Changes to this policy</h2>
+  <p>If this policy changes, the "Last updated" date at the top will be updated. We will not make changes that reduce your privacy without clear notice in the extension's changelog.</p>
+
+  <!-- 8 -->
+  <h2 class="section-heading"><span>8.</span> Contact</h2>
+  <div class="contact-box">
+    Questions about privacy? Open an issue on the project repository or contact the maintainer via the Chrome Web Store listing.
+  </div>
+
+</div>
+
+<div class="page-footer">
+  pathfinder v1.0.0 &nbsp;·&nbsp; All data stays in your browser &nbsp;·&nbsp;
+  <a href="help.html">Help</a>
+</div>
+
+</body>
+</html>

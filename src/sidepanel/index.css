@@ -1,0 +1,136 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Dark theme (default) ──────────────────────────────────────────────── */
+:root {
+  --surface:        #0d0d14;
+  --surface-1:      #111118;
+  --surface-2:      #16161f;
+  --surface-3:      #1a1a25;
+  --border:         #1e1e2e;
+  --border-light:   #2a2a3d;
+
+  --primary:        #7c3aed;
+  --primary-hover:  #6d28d9;
+  --primary-light:  #8b5cf6;
+  --primary-dim:    rgba(124, 58, 237, 0.15);
+
+  --success:        #10b981;
+  --success-dim:    rgba(16, 185, 129, 0.15);
+  --error:          #ef4444;
+  --error-dim:      rgba(239, 68, 68, 0.15);
+  --warning:        #f59e0b;
+  --warning-dim:    rgba(245, 158, 11, 0.15);
+  --info:           #3b82f6;
+  --info-dim:       rgba(59, 130, 246, 0.15);
+
+  --text-primary:   #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted:     #475569;
+  --text-code:      #a78bfa;
+
+  --scrollbar-thumb:       #2a2a3d;
+  --scrollbar-thumb-hover: #3a3a55;
+}
+
+/* ─── Light theme ────────────────────────────────────────────────────────── */
+.light {
+  --surface:        #f5f7fa;
+  --surface-1:      #ffffff;
+  --surface-2:      #f1f5f9;
+  --surface-3:      #e8edf5;
+  --border:         #e2e8f0;
+  --border-light:   #cbd5e1;
+
+  --primary:        #7c3aed;
+  --primary-hover:  #6d28d9;
+  --primary-light:  #8b5cf6;
+  --primary-dim:    rgba(124, 58, 237, 0.10);
+
+  --success:        #059669;
+  --success-dim:    rgba(5, 150, 105, 0.12);
+  --error:          #dc2626;
+  --error-dim:      rgba(220, 38, 38, 0.12);
+  --warning:        #d97706;
+  --warning-dim:    rgba(217, 119, 6, 0.12);
+  --info:           #2563eb;
+  --info-dim:       rgba(37, 99, 235, 0.12);
+
+  --text-primary:   #0f172a;
+  --text-secondary: #475569;
+  --text-muted:     #94a3b8;
+  --text-code:      #7c3aed;
+
+  --scrollbar-thumb:       #cbd5e1;
+  --scrollbar-thumb-hover: #94a3b8;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background-color: var(--surface);
+    color: var(--text-primary);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+  }
+
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    opacity: 0.5;
+  }
+}
+
+@layer utilities {
+  .text-2xs {
+    font-size: 0.65rem;
+    line-height: 1rem;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+}
+
+@keyframes loading {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(150%); }
+  100% { transform: translateX(-100%); }
+}

@@ -1,0 +1,50 @@
+name: 'Pathfinder'
+description: 'Run exported Pathfinder test plans against your app and surface results in the Checks UI.'
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  plans:
+    description: 'Path to exported plans JSON'
+    required: true
+  browser:
+    description: 'chromium | firefox | webkit'
+    required: false
+    default: 'chromium'
+  base-url:
+    description: 'Base URL for tests that lack a startUrl'
+    required: false
+  concurrency:
+    description: 'Parallel workers'
+    required: false
+    default: '2'
+  shard:
+    description: 'Run a single shard, e.g. 1/4'
+    required: false
+  retries:
+    description: 'Retry failing tests N times'
+    required: false
+    default: '0'
+  config:
+    description: 'Path to pathfinder.config.{mjs,js,json}'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install pathfinder CLI
+      shell: bash
+      run: npm install -g @pathfinder/cli@latest
+    - name: Run pathfinder
+      shell: bash
+      run: |
+        pathfinder run \
+          ${{ inputs.config && format('--config "{0}"', inputs.config) || '' }} \
+          --plans "${{ inputs.plans }}" \
+          --browser "${{ inputs.browser }}" \
+          --concurrency "${{ inputs.concurrency }}" \
+          --retries "${{ inputs.retries }}" \
+          ${{ inputs.shard && format('--shard "{0}"', inputs.shard) || '' }} \
+          ${{ inputs.base-url && format('--base-url "{0}"', inputs.base-url) || '' }} \
+          --reporter html,junit,json,github,console

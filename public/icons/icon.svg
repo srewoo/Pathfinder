@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <!-- Background — purple/indigo gradient matching brand -->
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+
+  <!-- Soft glow behind compass -->
+  <circle cx="64" cy="64" r="42" fill="url(#glow)" opacity="0.55"/>
+
+  <!-- Outer compass ring -->
+  <circle cx="64" cy="64" r="38" fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.85" stroke-width="2"/>
+  <circle cx="64" cy="64" r="32" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="1"/>
+
+  <!-- Cardinal tick marks (N, E, S, W — longer than diagonals) -->
+  <g stroke="#FFFFFF" stroke-linecap="round">
+    <line x1="64" y1="22"  x2="64" y2="30"  stroke-width="3"/>
+    <line x1="64" y1="98"  x2="64" y2="106" stroke-width="3"/>
+    <line x1="22" y1="64"  x2="30" y2="64"  stroke-width="3"/>
+    <line x1="98" y1="64"  x2="106" y2="64" stroke-width="3"/>
+  </g>
+
+  <!-- Diagonal tick marks (NE, NW, SE, SW) — shorter -->
+  <g stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="1.5" stroke-linecap="round">
+    <line x1="34.5" y1="34.5" x2="39.5" y2="39.5"/>
+    <line x1="93.5" y1="34.5" x2="88.5" y2="39.5"/>
+    <line x1="34.5" y1="93.5" x2="39.5" y2="88.5"/>
+    <line x1="93.5" y1="93.5" x2="88.5" y2="88.5"/>
+  </g>
+
+  <!-- Dotted exploration trail behind the needle (hints at app exploration) -->
+  <g fill="#FFFFFF" fill-opacity="0.45">
+    <circle cx="46" cy="80" r="1.7"/>
+    <circle cx="52" cy="86" r="1.7"/>
+    <circle cx="60" cy="88" r="1.7"/>
+    <circle cx="68" cy="84" r="1.7"/>
+    <circle cx="76" cy="82" r="1.7"/>
+  </g>
+
+  <!-- Compass needle — north pointer (magenta/pink for discovery) -->
+  <path d="M64 24 L72 64 L64 60 L56 64 Z" fill="url(#north)"/>
+  <!-- South pointer (white) -->
+  <path d="M64 104 L56 64 L64 68 L72 64 Z" fill="#FFFFFF" fill-opacity="0.92"/>
+
+  <!-- Center pivot -->
+  <circle cx="64" cy="64" r="5" fill="#FFFFFF"/>
+  <circle cx="64" cy="64" r="2.4" fill="#7C3AED"/>
+
+  <!-- "N" label, small -->
+  <text x="64" y="18" text-anchor="middle"
+        font-family="-apple-system, Segoe UI, sans-serif"
+        font-size="10" font-weight="700" fill="#FFFFFF" fill-opacity="0.85">N</text>
+
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#4F46E5"/>
+      <stop offset="55%"  stop-color="#7C3AED"/>
+      <stop offset="100%" stop-color="#A855F7"/>
+    </linearGradient>
+
+    <!-- Soft inner glow -->
+    <radialGradient id="glow" cx="64" cy="64" r="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- North pointer gradient — pink → magenta -->
+    <linearGradient id="north" x1="64" y1="24" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#F472B6"/>
+      <stop offset="100%" stop-color="#EC4899"/>
+    </linearGradient>
+  </defs>
+</svg>

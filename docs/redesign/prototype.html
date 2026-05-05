@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Pathfinder — redesign prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root {
+    --ink: #1a1a1a;
+    --paper: #fbfaf6;
+    --line: #2b2b2b;
+    --accent: #e85d3a;
+    --good: #3a7a3a;
+    --warn: #b8860b;
+    --muted: #6b6b6b;
+  }
+  html, body { background: var(--paper); color: var(--ink); font-family: 'Inter', system-ui, sans-serif; }
+  .hand { font-family: 'Kalam', cursive; }
+  .sketch { border: 1.5px solid var(--line); border-radius: 6px; position: relative; background: #fff; }
+  .sketch::after {
+    content: ''; position: absolute; inset: 3px; border: 1px dashed rgba(0,0,0,.08);
+    border-radius: 4px; pointer-events: none;
+  }
+  .sketch-soft { border: 1px solid #d8d4c7; border-radius: 6px; background: #fff; }
+  .pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; }
+  .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+  .dot.ok { background: var(--good); }
+  .dot.fail { background: var(--accent); }
+  .dot.pend { background: var(--warn); }
+  .dot.idle { background: #bbb; }
+  .scribble { text-decoration: underline; text-decoration-style: wavy; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+  .tab { padding: 6px 10px; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; }
+  .tab.active { background: var(--paper); border-color: var(--line); font-weight: 600; }
+  .kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; border: 1px solid #ccc; border-bottom-width: 2px; padding: 1px 5px; border-radius: 4px; background: #f5f3ec; }
+  .row:hover { background: #f5f3ec; }
+  .progress-bar { height: 6px; background: #eee; border-radius: 3px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #f4a261); transition: width .3s; }
+  .arrow { stroke: var(--line); stroke-width: 1.5; fill: none; }
+  details summary { cursor: pointer; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  .grid-map { display: grid; grid-template-columns: 260px 1fr 360px; gap: 16px; }
+  .surface-toggle button { padding: 6px 14px; border: 1px solid var(--line); font-size: 13px; background: #fff; }
+  .surface-toggle button.active { background: var(--ink); color: var(--paper); }
+  .surface-toggle button:first-child { border-radius: 6px 0 0 6px; border-right: none; }
+  .surface-toggle button:last-child { border-radius: 0 6px 6px 0; }
+  .node-row { padding: 6px 8px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .node-row.selected { background: #fff3ee; border-left: 3px solid var(--accent); padding-left: 5px; }
+  .check-item { padding: 8px 10px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
+  .check-item:hover { border-color: #e0dccd; background: #faf8f2; }
+  .timeline-event { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #e0dccd; font-size: 12px; }
+  .timeline-event:last-child { border-bottom: none; }
+  .ts { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 52px; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .pulsing { animation: pulse 1.4s ease-in-out infinite; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<header class="max-w-[1280px] mx-auto px-6 pt-6 pb-4 flex items-end justify-between">
+  <div>
+    <div class="hand text-3xl leading-none">Pathfinder <span class="text-[color:var(--accent)]">v2</span></div>
+    <div class="text-sm text-[color:var(--muted)] mt-1">Ground-up redesign — IA + App Map prototype</div>
+  </div>
+  <div class="surface-toggle flex">
+    <button id="btn-panel" class="active" onclick="setSurface('panel')">Side panel</button>
+    <button id="btn-workspace" onclick="setSurface('workspace')">Workspace (full tab)</button>
+    <button id="btn-monkey" onclick="setSurface('monkey')">Monkey mode</button>
+  </div>
+</header>
+
+<main class="max-w-[1280px] mx-auto px-6 pb-16">
+
+<!-- ============================= SIDE PANEL ============================= -->
+<section id="surface-panel" class="surface">
+  <div class="text-xs uppercase tracking-wider text-[color:var(--muted)] mb-2">Surface 1 — persistent side panel (~420px wide, always on)</div>
+  <div class="flex gap-8 items-start">
+
+    <!-- the panel itself -->
+    <div class="sketch w-[420px] p-4" style="min-height: 680px;">
+      <!-- session header -->
+      <div class="flex items-center justify-between mb-3">
+        <div class="hand text-xl">pathfinder</div>
+        <div class="flex gap-1">
+          <span class="pill"><span class="dot ok"></span> engine up</span>
+          <span class="pill">v0.4</span>
+        </div>
+      </div>
+
+      <!-- single input -->
+      <label class="text-xs text-[color:var(--muted)] uppercase tracking-wider">Target</label>
+      <div class="sketch-soft flex items-center gap-2 px-2 py-1 mt-1 mb-3">
+        <span class="text-xs text-[color:var(--muted)]">https://</span>
+        <input class="flex-1 bg-transparent text-sm py-1 outline-none" value="app.acme.com/dashboard" />
+        <button class="text-xs pill">auth</button>
+      </div>
+
+      <!-- mode -->
+      <div class="flex gap-1 mb-4">
+        <button class="flex-1 sketch-soft py-2 text-xs font-medium" style="background:#fff3ee;border-color:var(--accent);">Explore &amp; test</button>
+        <button class="flex-1 sketch-soft py-2 text-xs">Monkey</button>
+        <button class="flex-1 sketch-soft py-2 text-xs">Targeted</button>
+      </div>
+
+      <!-- live session -->
+      <div class="sketch-soft p-3 mb-4" style="background:#faf8f2;">
+        <div class="flex justify-between items-center mb-2">
+          <div class="text-xs font-semibold uppercase tracking-wider">Live session</div>
+          <div class="flex gap-1">
+            <button class="pill" title="pause">II</button>
+            <button class="pill" title="stop">■</button>
+          </div>
+        </div>
+
+        <div class="text-xs text-[color:var(--muted)] mb-1">Phase 2 of 4 &middot; Mapping app</div>
+        <div class="progress-bar mb-3"><div class="progress-fill" style="width:38%"></div></div>
+
+        <div class="space-y-1 text-xs">
+          <div class="flex justify-between"><span><span class="dot ok"></span> Crawl docs</span><span class="text-[color:var(--muted)]">14s &middot; 12 pages</span></div>
+          <div class="flex justify-between"><span><span class="dot pend pulsing"></span> Map app</span><span class="text-[color:var(--muted)]">1m 42s &middot; 31 routes</span></div>
+          <div class="flex justify-between text-[color:var(--muted)]"><span><span class="dot idle"></span> Draft checks</span><span>queued</span></div>
+          <div class="flex justify-between text-[color:var(--muted)]"><span><span class="dot idle"></span> Run &amp; analyse</span><span>queued</span></div>
+        </div>
+
+        <div class="mt-3 text-[11px] text-[color:var(--muted)]">
+          Budget <span class="hand text-[color:var(--ink)]">8m 18s</span> / 15m left &middot; ~$0.31 spent
+        </div>
+      </div>
+
+      <!-- quick jumps -->
+      <div class="text-xs uppercase tracking-wider text-[color:var(--muted)] mb-2">Jump to</div>
+      <div class="space-y-1">
+        <div class="row sketch-soft px-3 py-2 flex justify-between items-center cursor-pointer" onclick="setSurface('workspace')">
+          <span class="text-sm">App map</span>
+          <span class="text-xs text-[color:var(--muted)]">31 nodes</span>
+        </div>
+        <div class="row sketch-soft px-3 py-2 flex justify-between items-center cursor-pointer" onclick="setSurface('workspace')">
+          <span class="text-sm">Checks</span>
+          <span class="text-xs text-[color:var(--muted)]">0 / 0 drafted</span>
+        </div>
+        <div class="row sketch-soft px-3 py-2 flex justify-between items-center cursor-pointer" onclick="setSurface('workspace')">
+          <span class="text-sm">Runs</span>
+          <span class="text-xs text-[color:var(--muted)]">no runs yet</span>
+        </div>
+      </div>
+
+      <!-- last finding -->
+      <div class="mt-5 sketch-soft p-3" style="border-left: 3px solid var(--accent);">
+        <div class="text-[10px] uppercase tracking-wider text-[color:var(--accent)] font-semibold mb-1">Finding &middot; 6s ago</div>
+        <div class="text-sm">Modal <span class="hand">"Invite teammate"</span> has no keyboard dismiss.</div>
+        <div class="mt-2 flex gap-2">
+          <button class="pill">add as check</button>
+          <button class="pill">show in map</button>
+          <button class="pill">dismiss</button>
+        </div>
+      </div>
+
+      <!-- dev drawer hint -->
+      <div class="mt-5 text-[11px] text-[color:var(--muted)] text-center">
+        <span class="kbd">⌘K</span> commands &middot; <span class="kbd">⌘.</span> developer drawer
+      </div>
+    </div>
+
+    <!-- annotations -->
+    <div class="flex-1 space-y-4 pt-2 hand text-[15px]">
+      <div>
+        <div class="text-[color:var(--accent)] text-xl">one input, not six tabs</div>
+        <div class="text-sm font-sans text-[color:var(--muted)] mt-1">URL + optional auth. Engine silently does crawl / explore / flow extraction. No "which tab do I start in?" decision.</div>
+      </div>
+      <div>
+        <div class="text-[color:var(--accent)] text-xl">pausable pipeline</div>
+        <div class="text-sm font-sans text-[color:var(--muted)] mt-1">Every phase is an event-sourced worker you can pause, resume, or rewind. Budget &amp; cost visible always — fixes the "it just timed out after 5 minutes" trust problem.</div>
+      </div>
+      <div>
+        <div class="text-[color:var(--accent)] text-xl">findings stream, not a results tab</div>
+        <div class="text-sm font-sans text-[color:var(--muted)] mt-1">Interesting observations bubble up during the session; user converts them to checks with one click.</div>
+      </div>
+      <div>
+        <div class="text-[color:var(--accent)] text-xl">three concepts only</div>
+        <div class="text-sm font-sans text-[color:var(--muted)] mt-1">App map &middot; Checks &middot; Runs. Knowledge, flows, graph, analysis — all collapsed into these. Developer drawer for power-user internals.</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============================= WORKSPACE ============================= -->
+<section id="surface-workspace" class="surface hidden">
+  <div class="text-xs uppercase tracking-wider text-[color:var(--muted)] mb-2">Surface 2 — full-tab workspace (opened on demand from the panel)</div>
+
+  <div class="sketch p-5" style="background:#fff;">
+
+    <!-- top bar -->
+    <div class="flex items-center justify-between mb-4 pb-3 border-b border-dashed">
+      <div class="flex items-center gap-3">
+        <div class="hand text-xl">app.acme.com/dashboard</div>
+        <span class="pill"><span class="dot ok"></span> mapped 31 routes</span>
+        <span class="pill">auth: demo@acme.com</span>
+      </div>
+      <div class="flex gap-2 items-center text-sm">
+        <div class="tab active">Map</div>
+        <div class="tab" onclick="alert('prototype — clicking would swap the center pane')">Checks</div>
+        <div class="tab" onclick="alert('prototype')">Runs</div>
+        <div class="tab" onclick="alert('prototype')">Settings</div>
+      </div>
+    </div>
+
+    <div class="grid-map">
+
+      <!-- left rail: nodes -->
+      <aside class="sketch-soft p-3" style="max-height:620px;overflow:auto;">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-xs uppercase tracking-wider text-[color:var(--muted)]">Nodes</div>
+          <input placeholder="filter…" class="text-xs px-2 py-1 border rounded w-24" />
+        </div>
+
+        <div class="mb-3">
+          <div class="text-[11px] hand text-[color:var(--muted)] mb-1">auth</div>
+          <div class="node-row"><span class="dot ok"></span> /login <span class="ml-auto text-[11px] text-[color:var(--muted)]">4 checks</span></div>
+          <div class="node-row"><span class="dot ok"></span> /forgot-password <span class="ml-auto text-[11px] text-[color:var(--muted)]">2</span></div>
+          <div class="node-row"><span class="dot idle"></span> /signup <span class="ml-auto text-[11px] text-[color:var(--muted)]">—</span></div>
+        </div>
+
+        <div class="mb-3">
+          <div class="text-[11px] hand text-[color:var(--muted)] mb-1">dashboard</div>
+          <div class="node-row selected" onclick="event.stopPropagation()"><span class="dot fail"></span> /dashboard <span class="ml-auto text-[11px] text-[color:var(--accent)] font-semibold">1 fail</span></div>
+          <div class="node-row"><span class="dot ok"></span> /dashboard/settings <span class="ml-auto text-[11px] text-[color:var(--muted)]">5</span></div>
+          <div class="node-row"><span class="dot pend"></span> modal: Invite teammate <span class="ml-auto text-[11px] text-[color:var(--muted)]">draft</span></div>
+          <div class="node-row"><span class="dot idle"></span> iframe: stripe-billing <span class="ml-auto text-[11px] text-[color:var(--muted)]">—</span></div>
+        </div>
+
+        <div class="mb-3">
+          <div class="text-[11px] hand text-[color:var(--muted)] mb-1">teams</div>
+          <div class="node-row"><span class="dot ok"></span> /teams <span class="ml-auto text-[11px] text-[color:var(--muted)]">3</span></div>
+          <div class="node-row"><span class="dot ok"></span> /teams/:id <span class="ml-auto text-[11px] text-[color:var(--muted)]">7</span></div>
+          <div class="node-row"><span class="dot ok"></span> /teams/:id/members <span class="ml-auto text-[11px] text-[color:var(--muted)]">4</span></div>
+        </div>
+
+        <div>
+          <div class="text-[11px] hand text-[color:var(--muted)] mb-1">billing</div>
+          <div class="node-row"><span class="dot ok"></span> /billing <span class="ml-auto text-[11px] text-[color:var(--muted)]">2</span></div>
+          <div class="node-row"><span class="dot pend"></span> /billing/invoices <span class="ml-auto text-[11px] text-[color:var(--muted)]">drafting</span></div>
+        </div>
+
+        <div class="mt-4 text-[11px] text-[color:var(--muted)] hand">+ 18 more nodes, expand groups</div>
+      </aside>
+
+      <!-- center: node detail -->
+      <section>
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <div class="text-xs text-[color:var(--muted)]">node &middot; route</div>
+            <div class="hand text-2xl">/dashboard</div>
+          </div>
+          <div class="flex gap-2">
+            <button class="pill">watch</button>
+            <button class="pill">run checks</button>
+            <button class="pill">monkey this node</button>
+          </div>
+        </div>
+
+        <!-- capability strip -->
+        <div class="sketch-soft p-3 mb-4">
+          <div class="text-xs uppercase tracking-wider text-[color:var(--muted)] mb-2">Capabilities discovered</div>
+          <div class="grid grid-cols-2 gap-2 text-sm">
+            <div class="flex items-center gap-2"><span class="dot ok"></span> header &middot; search input <span class="text-[11px] text-[color:var(--muted)]">(debounced)</span></div>
+            <div class="flex items-center gap-2"><span class="dot ok"></span> sidebar &middot; collapse toggle</div>
+            <div class="flex items-center gap-2"><span class="dot ok"></span> table &middot; sort by column</div>
+            <div class="flex items-center gap-2"><span class="dot ok"></span> table &middot; row hover preview</div>
+            <div class="flex items-center gap-2"><span class="dot pend"></span> button &middot; "Invite teammate" → modal</div>
+            <div class="flex items-center gap-2"><span class="dot idle"></span> iframe &middot; stripe-billing (deferred)</div>
+          </div>
+          <div class="mt-2 text-[11px] text-[color:var(--muted)]">11 interactive elements &middot; 2 hover-revealed &middot; 1 shadow-DOM boundary &middot; 1 iframe</div>
+        </div>
+
+        <!-- checks on this node -->
+        <div class="sketch-soft p-3 mb-4">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-xs uppercase tracking-wider text-[color:var(--muted)]">Checks on this node (6)</div>
+            <button class="pill">+ new check</button>
+          </div>
+          <div class="check-item flex items-center gap-2">
+            <span class="dot ok"></span>
+            <span class="text-sm flex-1">Dashboard loads with user's last-viewed team selected</span>
+            <span class="text-[11px] text-[color:var(--muted)]">passing &middot; 2h</span>
+          </div>
+          <div class="check-item flex items-center gap-2">
+            <span class="dot ok"></span>
+            <span class="text-sm flex-1">Search debounces and returns results within 400ms</span>
+            <span class="text-[11px] text-[color:var(--muted)]">passing</span>
+          </div>
+          <div class="check-item flex items-center gap-2">
+            <span class="dot fail"></span>
+            <span class="text-sm flex-1"><span class="scribble">Invite teammate modal closes on Escape key</span></span>
+            <span class="text-[11px] text-[color:var(--accent)] font-semibold">failing &middot; 6s</span>
+          </div>
+          <div class="check-item flex items-center gap-2">
+            <span class="dot ok"></span>
+            <span class="text-sm flex-1">Sort by "Last active" persists across reload</span>
+            <span class="text-[11px] text-[color:var(--muted)]">passing</span>
+          </div>
+          <div class="check-item flex items-center gap-2">
+            <span class="dot pend"></span>
+            <span class="text-sm flex-1">Row hover preview shows team metadata within 200ms</span>
+            <span class="text-[11px] text-[color:var(--muted)]">draft &middot; review</span>
+          </div>
+          <div class="check-item flex items-center gap-2">
+            <span class="dot pend"></span>
+            <span class="text-sm flex-1">Stripe billing iframe loads without CSP errors</span>
+            <span class="text-[11px] text-[color:var(--muted)]">draft</span>
+          </div>
+        </div>
+
+        <!-- map viz placeholder -->
+        <div class="sketch-soft p-3 relative" style="height: 180px; background: repeating-linear-gradient(45deg,#fff,#fff 10px,#faf8f2 10px,#faf8f2 20px);">
+          <div class="absolute top-2 left-3 text-xs uppercase tracking-wider text-[color:var(--muted)]">Neighbourhood</div>
+          <svg viewBox="0 0 500 160" class="w-full h-full">
+            <g class="arrow">
+              <line x1="80" y1="80" x2="180" y2="80" marker-end="url(#a)"/>
+              <line x1="220" y1="80" x2="320" y2="40" marker-end="url(#a)"/>
+              <line x1="220" y1="80" x2="320" y2="120" marker-end="url(#a)"/>
+              <line x1="360" y1="40" x2="440" y2="40" marker-end="url(#a)"/>
+            </g>
+            <defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2b2b2b"/></marker></defs>
+            <g font-family="Kalam" font-size="13">
+              <rect x="30" y="65" width="50" height="30" fill="#fff" stroke="#2b2b2b"/><text x="40" y="85">login</text>
+              <rect x="180" y="65" width="50" height="30" fill="#fff3ee" stroke="#e85d3a" stroke-width="2"/><text x="186" y="85">dash</text>
+              <rect x="320" y="25" width="50" height="30" fill="#fff" stroke="#2b2b2b"/><text x="326" y="45">teams</text>
+              <rect x="320" y="105" width="50" height="30" fill="#fff" stroke="#2b2b2b" stroke-dasharray="3 3"/><text x="326" y="125">modal</text>
+              <rect x="440" y="25" width="50" height="30" fill="#fff" stroke="#2b2b2b"/><text x="446" y="45">team</text>
+            </g>
+          </svg>
+        </div>
+      </section>
+
+      <!-- right: live runs / findings -->
+      <aside class="sketch-soft p-3" style="max-height:620px;overflow:auto;">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-xs uppercase tracking-wider text-[color:var(--muted)]">Runs on this node</div>
+          <button class="pill">run now</button>
+        </div>
+
+        <div class="mb-4 sketch-soft p-3" style="border-left:3px solid var(--accent);background:#fff6f1;">
+          <div class="text-[10px] uppercase tracking-wider text-[color:var(--accent)] font-semibold">Likely root cause</div>
+          <div class="text-sm mt-1">Modal's <code class="text-[12px] bg-white px-1 rounded">keydown</code> handler was removed in the last 8 commits. Escape is captured by body but not dispatched to modal.</div>
+          <div class="mt-2 flex gap-2">
+            <button class="pill">open trace</button>
+            <button class="pill">diff vs green</button>
+            <button class="pill">propose fix</button>
+          </div>
+        </div>
+
+        <div class="text-xs uppercase tracking-wider text-[color:var(--muted)] mb-2">Timeline</div>
+        <div>
+          <div class="timeline-event"><span class="ts">00:00</span><span>navigate → /dashboard</span></div>
+          <div class="timeline-event"><span class="ts">00:01</span><span>a11y tree captured (142 nodes)</span></div>
+          <div class="timeline-event"><span class="ts">00:02</span><span>hover &middot; row[0] → preview shown in 180ms ✓</span></div>
+          <div class="timeline-event"><span class="ts">00:04</span><span>click &middot; "Invite teammate" → modal opened</span></div>
+          <div class="timeline-event"><span class="ts">00:04</span><span>a11y: <code>aria-modal=true</code>, focus trapped ✓</span></div>
+          <div class="timeline-event"><span class="ts">00:05</span><span class="text-[color:var(--accent)]">Escape pressed → modal NOT dismissed ✗</span></div>
+          <div class="timeline-event"><span class="ts">00:05</span><span>screenshot diff vs baseline: 0.4% (modal still visible)</span></div>
+          <div class="timeline-event"><span class="ts">00:06</span><span>HAR: no request fired</span></div>
+          <div class="timeline-event"><span class="ts">00:07</span><span>check failed &middot; recorded replay</span></div>
+        </div>
+
+        <div class="mt-4 text-[11px] text-[color:var(--muted)]">
+          all observations appended to session log #4218<br/>
+          graph, HAR, a11y, screenshots are <em>projections</em> of this log
+        </div>
+      </aside>
+
+    </div>
+
+  </div>
+</section>
+
+<!-- ============================= MONKEY MODE ============================= -->
+<section id="surface-monkey" class="surface hidden">
+  <div class="text-xs uppercase tracking-wider text-[color:var(--muted)] mb-2">Surface 3 — exploratory / monkey mode</div>
+
+  <div class="grid grid-cols-2 gap-6">
+
+    <!-- config -->
+    <div class="sketch p-5">
+      <div class="hand text-2xl mb-1">go explore</div>
+      <div class="text-sm text-[color:var(--muted)] mb-4">Point it at a URL. It'll wander, interact with everything, and log anything that smells wrong.</div>
+
+      <label class="text-xs uppercase tracking-wider text-[color:var(--muted)]">URL</label>
+      <div class="sketch-soft px-2 py-1 mt-1 mb-3 text-sm">app.acme.com/dashboard</div>
+
+      <label class="text-xs uppercase tracking-wider text-[color:var(--muted)]">Budget</label>
+      <div class="flex gap-2 mt-1 mb-3">
+        <button class="pill">5 min</button>
+        <button class="pill" style="background:#fff3ee;border-color:var(--accent);">20 min</button>
+        <button class="pill">1 hour</button>
+        <button class="pill">until done</button>
+      </div>
+
+      <label class="text-xs uppercase tracking-wider text-[color:var(--muted)]">Aggression</label>
+      <div class="mt-1 mb-3">
+        <input type="range" min="1" max="5" value="3" class="w-full" />
+        <div class="flex justify-between text-[11px] text-[color:var(--muted)]">
+          <span>careful</span><span>curious</span><span>chaos</span>
+        </div>
+      </div>
+
+      <label class="text-xs uppercase tracking-wider text-[color:var(--muted)]">Off-limits</label>
+      <div class="flex gap-1 flex-wrap mt-1 mb-3">
+        <span class="pill">delete team</span>
+        <span class="pill">cancel plan</span>
+        <span class="pill">/admin/*</span>
+        <span class="pill">+ add</span>
+      </div>
+
+      <label class="text-xs uppercase tracking-wider text-[color:var(--muted)]">Look for</label>
+      <div class="grid grid-cols-2 gap-1 mt-1 mb-4 text-sm">
+        <label><input type="checkbox" checked /> console errors</label>
+        <label><input type="checkbox" checked /> 4xx / 5xx responses</label>
+        <label><input type="checkbox" checked /> a11y violations</label>
+        <label><input type="checkbox" checked /> focus traps</label>
+        <label><input type="checkbox" checked /> layout shifts</label>
+        <label><input type="checkbox" checked /> slow interactions</label>
+        <label><input type="checkbox" /> CSP / mixed content</label>
+        <label><input type="checkbox" /> broken images</label>
+      </div>
+
+      <button class="w-full sketch-soft py-3 hand text-lg" style="background:var(--ink);color:var(--paper);">let it loose →</button>
+
+      <div class="mt-3 text-[11px] text-[color:var(--muted)]">Auto-converts high-signal findings into draft checks. You review at the end.</div>
+    </div>
+
+    <!-- live monkey -->
+    <div class="sketch p-5">
+      <div class="flex items-center justify-between mb-3">
+        <div class="hand text-2xl">live</div>
+        <span class="pill"><span class="dot pend pulsing"></span> wandering &middot; 4m 12s</span>
+      </div>
+
+      <div class="sketch-soft p-2 mb-3 text-[12px] font-mono" style="height:170px;overflow:auto;background:#1a1a1a;color:#c7c0a8;">
+<div>[04:10] hover → sidebar.nav[3]  reveals tooltip "Recent activity"</div>
+<div>[04:11] click → btn "Invite"  opens modal (aria-modal, focus trapped)</div>
+<div>[04:12] shadow-dom pierce → custom-input#email  typing pathfinder+1@x.io</div>
+<div>[04:13] iframe[stripe] → descend context, enumerate fields</div>
+<div>[04:13] toggle switch[notifications]  state: off→on  201 PATCH /prefs</div>
+<div>[04:14] escape key → modal should close  <span style="color:#e85d3a">FINDING: stayed open</span></div>
+<div>[04:14] hover → row[0] for 600ms  preview card rendered in 182ms ✓</div>
+<div>[04:15] drag → sidebar resize handle  <span style="color:#e85d3a">FINDING: cursor stuck on drag</span></div>
+<div>[04:16] scroll → table body  virtualized list recycles ok</div>
+<div>[04:16] click → ".btn-more" (3rd)  dropdown, arrow keys navigate</div>
+      </div>
+
+      <div class="text-xs uppercase tracking-wider text-[color:var(--muted)] mb-2">Findings so far (7)</div>
+      <div class="space-y-1 text-sm">
+        <div class="check-item flex items-center gap-2"><span class="dot fail"></span><span class="flex-1">Modal ignores Escape</span><button class="pill">save</button></div>
+        <div class="check-item flex items-center gap-2"><span class="dot fail"></span><span class="flex-1">Cursor style leaks after sidebar resize</span><button class="pill">save</button></div>
+        <div class="check-item flex items-center gap-2"><span class="dot pend"></span><span class="flex-1">Tooltip has 1200ms delay (inconsistent w/ rest)</span><button class="pill">save</button></div>
+        <div class="check-item flex items-center gap-2"><span class="dot pend"></span><span class="flex-1">Form submit without email → silent no-op</span><button class="pill">save</button></div>
+        <div class="check-item flex items-center gap-2"><span class="dot pend"></span><span class="flex-1">Stripe iframe: 2 console warnings</span><button class="pill">save</button></div>
+        <div class="check-item flex items-center gap-2"><span class="dot ok"></span><span class="flex-1">Toggle persists across reload</span><span class="text-[11px] text-[color:var(--muted)]">evidence-only</span></div>
+        <div class="check-item flex items-center gap-2"><span class="dot ok"></span><span class="flex-1">Focus trap works in all modals</span><span class="text-[11px] text-[color:var(--muted)]">evidence-only</span></div>
+      </div>
+
+      <div class="mt-4 flex gap-2">
+        <button class="pill">pause</button>
+        <button class="pill">finish &amp; summarise</button>
+        <button class="pill">watch live tab</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- coverage & engine notes -->
+  <div class="mt-6 grid grid-cols-2 gap-6">
+    <div class="sketch p-5">
+      <div class="hand text-xl mb-3">coverage model — five axes</div>
+      <div class="space-y-3 text-sm">
+        <div>
+          <div class="font-semibold">1. Structural</div>
+          <div class="text-[color:var(--muted)]">Every interactive element visited at least once. BFS over CDP accessibility tree + DOM, priority by a11y role and viewport visibility. Shadow DOM pierced. iframes descended. Hover-revealed elements captured via synthetic mouseMoved sweeps.</div>
+        </div>
+        <div>
+          <div class="font-semibold">2. State</div>
+          <div class="text-[color:var(--muted)]">DOM-signature hashing after each interaction; when hash is new, the state is added to the map. Keeps the graph small and guarantees we exercise distinct states (open/closed modals, toggled switches, sorted tables).</div>
+        </div>
+        <div>
+          <div class="font-semibold">3. Data</div>
+          <div class="text-[color:var(--muted)]">Form fuzzing driven by constraint inference: HTML5 attrs + pattern/min/max + placeholder hints + Zod-style schemas inferred from API contracts (if present). Always generates boundary, empty, unicode, and injection-ish inputs.</div>
+        </div>
+        <div>
+          <div class="font-semibold">4. Flow</div>
+          <div class="text-[color:var(--muted)]">Sequences from graph traversal plus LLM-proposed scenarios ("what would a user do next?"). Sequences are replayable and de-duped by canonical path.</div>
+        </div>
+        <div>
+          <div class="font-semibold">5. Regression</div>
+          <div class="text-[color:var(--muted)]">Every run diffs against last-green baseline per node (HAR, a11y tree, visual, console, timings). Anomalies become findings automatically.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sketch p-5">
+      <div class="hand text-xl mb-3">how it actually handles tricky UI</div>
+      <table class="text-sm w-full">
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">modals</td><td class="text-[color:var(--muted)]">detect via <code>aria-modal</code>, <code>role=dialog</code>, z-index + body scroll-lock. Test Escape, outside-click, close button. Focus-trap probe.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">iframes</td><td class="text-[color:var(--muted)]">enumerate via <code>Target.attachToTarget</code>; run agent recursively in each same-origin frame. Cross-origin: assert boundary + load success + CSP only.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">shadow DOM</td><td class="text-[color:var(--muted)]"><code>DOM.getDocument(pierce:true)</code>. Treat shadow roots as normal subtrees. Works for design-system web components.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">toggles / switches</td><td class="text-[color:var(--muted)]">distinguish from checkboxes via <code>role=switch</code> / <code>aria-checked</code>. Capture network side-effects on toggle. Test both directions + persistence across reload.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">hovers</td><td class="text-[color:var(--muted)]"><code>Input.dispatchMouseEvent</code> mouseMoved with dwell. Watch for DOM mutations + tooltip-like elements appearing. Measure delay + dismissal.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">drag / resize</td><td class="text-[color:var(--muted)]">sequenced mousedown → move steps → mouseup. Detect handles via cursor style + <code>draggable</code>.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">virtualised lists</td><td class="text-[color:var(--muted)]">scroll with waits; fingerprint row keys not indices. Avoid infinite scroll traps with a visited-set.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">uploads / files</td><td class="text-[color:var(--muted)]"><code>Page.handleFileChooser</code> with synthetic files from a sandboxed fixture set.</td></tr>
+        <tr class="border-b border-dashed"><td class="py-2 pr-3 font-semibold">auth / SSO</td><td class="text-[color:var(--muted)]">session snapshot (cookies + storage) captured once per run. Never replay credentials through the UI after first login.</td></tr>
+        <tr><td class="py-2 pr-3 font-semibold">spa routing</td><td class="text-[color:var(--muted)]">listen on <code>Page.frameNavigated</code> + History API hooks; treat URL+DOM-hash as the node key.</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- engine architecture -->
+  <div class="mt-6 sketch p-5">
+    <div class="hand text-xl mb-3">engine architecture (fresh build — no jirashastra, no enggxmcp)</div>
+    <div class="grid grid-cols-3 gap-4 text-sm">
+      <div class="sketch-soft p-3">
+        <div class="font-semibold mb-1">1. Event log (source of truth)</div>
+        <div class="text-[color:var(--muted)]">Append-only <code>Observation</code> events in IndexedDB + optional SQLite mirror in a local sidecar. Everything is a projection: map, graph, flows, HAR view, a11y view.</div>
+      </div>
+      <div class="sketch-soft p-3">
+        <div class="font-semibold mb-1">2. Capability workers</div>
+        <div class="text-[color:var(--muted)]">Crawler, explorer, executor, analyser are peers on the log. Run concurrently. Each is pausable/resumable. No "pipeline stage" coupling.</div>
+      </div>
+      <div class="sketch-soft p-3">
+        <div class="font-semibold mb-1">3. Deterministic shell</div>
+        <div class="text-[color:var(--muted)]">AI proposes. Rules layer validates, dedupes, and gates irreversible actions (delete, pay, send). Nothing destructive ships without a check evaluated deterministically.</div>
+      </div>
+      <div class="sketch-soft p-3">
+        <div class="font-semibold mb-1">4. Local-first sidecar</div>
+        <div class="text-[color:var(--muted)]">Tiny native host (Go or Node) for SQLite, vector store, and long-running agent loops. Talks to extension over native messaging. No external MCP dependency — purpose-built protocol, just JSON-RPC.</div>
+      </div>
+      <div class="sketch-soft p-3">
+        <div class="font-semibold mb-1">5. CDP-only automation</div>
+        <div class="text-[color:var(--muted)]">All interaction is CDP (not content-script clicks). Gives us shadow DOM piercing, iframe descent, input simulation fidelity, HAR, a11y tree, trace events, screenshots — in one surface.</div>
+      </div>
+      <div class="sketch-soft p-3">
+        <div class="font-semibold mb-1">6. Model router</div>
+        <div class="text-[color:var(--muted)]">Haiku for map/hover probes (cheap, fast). Sonnet for flow &amp; check generation. Opus for root-cause analysis. Budget-aware; degrades under cost cap.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="max-w-[1280px] mx-auto px-6 pb-10 text-[11px] text-[color:var(--muted)]">
+  Prototype only &middot; Pathfinder v2 redesign &middot; not wired to the engine &middot; click the surface toggles at the top
+</footer>
+
+<script>
+  function setSurface(name) {
+    document.querySelectorAll('.surface').forEach(el => el.classList.add('hidden'));
+    document.getElementById('surface-' + name).classList.remove('hidden');
+    ['panel','workspace','monkey'].forEach(n => {
+      document.getElementById('btn-' + n).classList.toggle('active', n === name);
+    });
+    window.scrollTo({top:0, behavior:'smooth'});
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+.bgn-floating-icon {
+  position: fixed !important;
+  bottom: 20px !important;
+  right: 20px !important;
+  width: 48px !important;
+  height: 48px !important;
+  border-radius: 50% !important;
+  background: linear-gradient(135deg, #7c3aed, #4f46e5) !important;
+  box-shadow: 0 4px 20px rgba(124, 58, 237, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+  cursor: pointer !important;
+  z-index: 2147483647 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border: 2px solid rgba(255, 255, 255, 0.15) !important;
+  transition: box-shadow 0.2s ease, transform 0.1s ease !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.bgn-floating-icon:hover {
+  box-shadow: 0 6px 28px rgba(124, 58, 237, 0.7), 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+  transform: scale(1.05) !important;
+}
+
+.bgn-floating-icon:active {
+  transform: scale(0.96) !important;
+}
+
+.bgn-tooltip {
+  position: absolute !important;
+  bottom: 56px !important;
+  right: 0 !important;
+  background: #1e1e2e !important;
+  color: #e2e8f0 !important;
+  font-size: 12px !important;
+  font-family: system-ui, sans-serif !important;
+  padding: 8px 12px !important;
+  border-radius: 8px !important;
+  white-space: nowrap !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+  border: 1px solid #2a2a3d !important;
+  pointer-events: none !important;
+  z-index: 2147483647 !important;
+  max-width: 240px !important;
+  white-space: normal !important;
+}
+
+.bgn-tooltip::after {
+  content: '' !important;
+  position: absolute !important;
+  top: 100% !important;
+  right: 16px !important;
+  border: 6px solid transparent !important;
+  border-top-color: #1e1e2e !important;
+}

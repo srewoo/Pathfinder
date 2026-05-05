@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pathfinder — Help</title>
+  <style>
+    :root {
+      --bg: #0f0f14;
+      --surface: #16161f;
+      --card: #1e1e2a;
+      --card-2: #232333;
+      --border: #2a2a3a;
+      --primary: #7c3aed;
+      --primary-light: #a78bfa;
+      --accent: #10b981;
+      --warn: #f59e0b;
+      --info: #3b82f6;
+      --pink: #ec4899;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --faint: #4a5568;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 0 0 60px;
+    }
+
+    a { color: var(--primary-light); }
+
+    code {
+      font-family: 'JetBrains Mono', Menlo, monospace;
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: var(--primary-light);
+    }
+    pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', Menlo, monospace;
+      font-size: 12px;
+      color: var(--text);
+      margin: 8px 0;
+    }
+    pre code { background: none; border: 0; padding: 0; color: var(--text); }
+
+    /* ── Hero ── */
+    .hero {
+      background: linear-gradient(135deg, #1a1030 0%, #0f0f14 60%);
+      border-bottom: 1px solid var(--border);
+      padding: 48px 24px 40px;
+      text-align: center;
+    }
+    .logo { display: inline-flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .logo-icon {
+      width: 40px; height: 40px;
+      background: var(--primary);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+    }
+    .logo-text { font-size: 24px; font-weight: 700; color: var(--text); }
+    .hero h1 { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
+    .hero h1 span { color: var(--primary-light); }
+    .hero p { font-size: 15px; color: var(--muted); max-width: 580px; margin: 0 auto; }
+
+    /* ── Layout ── */
+    .container { max-width: 820px; margin: 0 auto; padding: 40px 24px 0; }
+    .section { margin-bottom: 56px; }
+    .section-title {
+      font-size: 11px; font-weight: 700; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--primary-light);
+      margin-bottom: 20px; display: flex; align-items: center; gap: 8px;
+    }
+    .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .section h2 { font-size: 20px; font-weight: 700; margin: 0 0 8px; }
+    .section p { color: var(--muted); font-size: 14px; }
+
+    /* ── Two-mode banner ── */
+    .modes {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    }
+    @media (max-width: 540px) { .modes { grid-template-columns: 1fr; } }
+    .mode {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 18px;
+    }
+    .mode h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+    .mode .mode-emoji { font-size: 18px; }
+    .mode p { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+    .mode ul { font-size: 12px; color: var(--muted); padding-left: 18px; }
+    .mode ul li { margin-bottom: 3px; }
+
+    /* ── Flowchart ── */
+    .flow { display: flex; flex-direction: column; gap: 0; align-items: center; width: 100%; }
+
+    .flow-step {
+      width: 100%; max-width: 560px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      display: flex; align-items: flex-start; gap: 16px;
+      position: relative;
+    }
+    .flow-step:hover { border-color: var(--primary); }
+
+    .step-num {
+      width: 32px; height: 32px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 700;
+      flex-shrink: 0; margin-top: 1px;
+    }
+    .step-body h3 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .step-body p  { font-size: 13px; color: var(--muted); }
+
+    .flow-arrow { width: 2px; height: 28px; background: var(--border); position: relative; }
+    .flow-arrow::after {
+      content: ''; position: absolute; bottom: -1px; left: 50%; transform: translateX(-50%);
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 7px solid var(--border);
+    }
+
+    .c-purple { background: rgba(124,58,237,.15); color: #a78bfa; }
+    .c-green  { background: rgba(16,185,129,.15); color: #34d399; }
+    .c-blue   { background: rgba(59,130,246,.15); color: #60a5fa; }
+    .c-amber  { background: rgba(245,158,11,.15); color: #fbbf24; }
+    .c-pink   { background: rgba(236,72,153,.15); color: #f472b6; }
+    .c-cyan   { background: rgba(6,182,212,.15); color: #67e8f9; }
+
+    /* ── Cards / grid ── */
+    .steps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 540px) { .steps-grid { grid-template-columns: 1fr; } }
+
+    .step-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px;
+    }
+    .step-card .tab-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; font-weight: 600; letter-spacing: .04em;
+      padding: 3px 8px; border-radius: 999px; margin-bottom: 10px;
+    }
+    .step-card h3 { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+    .step-card p  { font-size: 12px; color: var(--muted); }
+    .step-card ul { font-size: 12px; color: var(--muted); padding-left: 16px; margin-top: 6px; }
+    .step-card ul li { margin-bottom: 3px; }
+
+    .mini-flow { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+    .mini-node { font-size: 11px; padding: 4px 10px; border-radius: 6px; font-weight: 500; white-space: nowrap; }
+    .mini-arrow { color: var(--faint); font-size: 12px; }
+
+    /* ── Callout box ── */
+    .callout {
+      border-radius: 10px; padding: 14px 16px;
+      font-size: 13px; display: flex; gap: 12px; align-items: flex-start;
+      margin-bottom: 14px;
+    }
+    .callout-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+    .callout.tip  { background: rgba(16,185,129,.08); border: 1px solid rgba(16,185,129,.2); }
+    .callout.warn { background: rgba(245,158,11,.08);  border: 1px solid rgba(245,158,11,.2); }
+    .callout.info { background: rgba(59,130,246,.08);  border: 1px solid rgba(59,130,246,.2); }
+    .callout.danger { background: rgba(236,72,153,.08); border: 1px solid rgba(236,72,153,.2); }
+    .callout strong { display: block; font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+
+    /* ── Connect flow ── */
+    .connect-flow { display: flex; flex-direction: column; align-items: center; gap: 0; }
+    .connect-row { display: flex; align-items: center; gap: 0; width: 100%; justify-content: center; flex-wrap: wrap; }
+    .connect-box {
+      padding: 10px 18px; border-radius: 8px;
+      font-size: 12px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--card);
+      text-align: center; min-width: 120px; margin: 4px;
+    }
+    .connect-h-arrow { width: 30px; height: 2px; background: var(--border); position: relative; flex-shrink: 0; }
+    .connect-h-arrow::after {
+      content: ''; position: absolute; right: -1px; top: 50%; transform: translateY(-50%);
+      border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+      border-left: 7px solid var(--border);
+    }
+    .connect-v-arrow { width: 2px; height: 24px; background: var(--border); position: relative; margin: 0 auto; }
+    .connect-v-arrow::after {
+      content: ''; position: absolute; bottom: -1px; left: 50%; transform: translateX(-50%);
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 7px solid var(--border);
+    }
+
+    /* ── Tools table ── */
+    .tools-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+    @media (max-width: 540px) { .tools-grid { grid-template-columns: 1fr; } }
+    .tool-item {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px;
+    }
+    .tool-item .tool-name { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--primary-light); font-weight: 600; }
+    .tool-item .tool-desc { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+    /* ── Cost table ── */
+    table.cost {
+      width: 100%; border-collapse: collapse; font-size: 12px;
+      background: var(--card); border-radius: 10px; overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    table.cost th, table.cost td {
+      padding: 10px 12px; text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    table.cost th { background: var(--card-2); font-weight: 600; color: var(--primary-light); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    table.cost tr:last-child td { border-bottom: none; }
+    table.cost td.num { font-family: 'JetBrains Mono', monospace; color: var(--text); }
+
+    /* ── TOC ── */
+    .toc {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 18px; margin-bottom: 24px;
+    }
+    .toc h4 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--primary-light); margin-bottom: 8px; }
+    .toc ol { padding-left: 20px; font-size: 13px; color: var(--muted); }
+    .toc ol li { margin-bottom: 4px; }
+    .toc a { text-decoration: none; }
+    .toc a:hover { text-decoration: underline; }
+
+    /* ── Footer ── */
+    .page-footer {
+      text-align: center; padding: 32px 24px;
+      font-size: 12px; color: var(--faint);
+      border-top: 1px solid var(--border); margin-top: 40px;
+    }
+    .page-footer a { color: var(--primary-light); text-decoration: none; }
+    .page-footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<!-- ── Hero ── -->
+<div class="hero">
+  <div class="logo">
+    <div class="logo-icon">🧭</div>
+    <span class="logo-text">Pathfinder</span>
+  </div>
+  <h1>How to use <span>Pathfinder</span></h1>
+  <p>Your AI-powered QA engineer. Crawl docs, explore your app, learn flows, and generate &amp; execute tests — from a Chrome side panel or via a Model Context Protocol server.</p>
+</div>
+
+<div class="container">
+
+  <!-- ── TOC ── -->
+  <div class="toc">
+    <h4>On this page</h4>
+    <ol>
+      <li><a href="#modes">Two ways to use Pathfinder</a></li>
+      <li><a href="#quickstart">Quick start (browser extension)</a></li>
+      <li><a href="#tabs">Tab-by-tab guide</a></li>
+      <li><a href="#advanced">Advanced features</a></li>
+      <li><a href="#mcp">MCP server — for AI agents</a></li>
+      <li><a href="#mcp-tools">Full MCP tool reference</a></li>
+      <li><a href="#cost">Cost &amp; model selection</a></li>
+      <li><a href="#faq">FAQ</a></li>
+    </ol>
+  </div>
+
+  <!-- ── Two Modes ── -->
+  <div class="section" id="modes">
+    <h2>Two ways to use Pathfinder</h2>
+    <p style="margin-bottom:18px">Pathfinder ships in two flavors. Use one or both — they share the same engine.</p>
+    <div class="modes">
+      <div class="mode">
+        <h3><span class="mode-emoji">🧩</span> Browser extension</h3>
+        <p>Side-panel UI in Chrome. Install once, point at any web app, click through the tabs. Best for hands-on QA work and ad-hoc exploration.</p>
+        <ul>
+          <li>Visual side panel with tabs</li>
+          <li>Live exploration with screenshots</li>
+          <li>One-click test generation &amp; runs</li>
+          <li>Self-healing selector retries</li>
+          <li>All data stays in your browser</li>
+        </ul>
+      </div>
+      <div class="mode">
+        <h3><span class="mode-emoji">🤖</span> MCP server</h3>
+        <p>Standalone Node.js process exposing 20+ tools over the Model Context Protocol. Lets Claude Desktop, Cursor, Cline, or any custom AI agent drive Pathfinder programmatically — no browser required.</p>
+        <ul>
+          <li>Headless Playwright execution</li>
+          <li>MySQL-backed knowledge &amp; results</li>
+          <li>Auth via captured Playwright sessions</li>
+          <li>20+ tools: crawl, explore, run, analyze</li>
+          <li>Designed for agentic workflows</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Quick Start ── -->
+  <div class="section" id="quickstart">
+    <div class="section-title">Quick Start (Browser extension — 3 steps)</div>
+    <div class="flow">
+
+      <div class="flow-step">
+        <div class="step-num c-purple">1</div>
+        <div class="step-body">
+          <h3>Set up your AI</h3>
+          <p>Click the <strong>⚙ Settings</strong> icon → choose your provider (OpenAI / Anthropic / Google) and paste an API key. Defaults to the latest models — <strong>GPT-5</strong>, <strong>Claude Sonnet 4.6</strong>, or <strong>Gemini 3 Pro</strong>.</p>
+          <div class="mini-flow" style="margin-top:8px">
+            <span class="mini-node c-purple">⚙ Settings</span>
+            <span class="mini-arrow">→</span>
+            <span class="mini-node c-blue">Provider</span>
+            <span class="mini-arrow">→</span>
+            <span class="mini-node c-green">Save key</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-arrow"></div>
+
+      <div class="flow-step">
+        <div class="step-num c-blue">2</div>
+        <div class="step-body">
+          <h3>Crawl your documentation</h3>
+          <p>Go to the <strong>Knowledge</strong> tab → paste your help/docs URL → click <strong>Crawl</strong>. Pathfinder reads every page, embeds the content, and builds a vector knowledge base used to ground test generation.</p>
+        </div>
+      </div>
+
+      <div class="flow-arrow"></div>
+
+      <div class="flow-step">
+        <div class="step-num c-green">3</div>
+        <div class="step-body">
+          <h3>Explore → Learn flows → Generate &amp; run tests</h3>
+          <p>Open the page you want to test → <strong>Explore</strong> tab → <strong>Start Exploration</strong>. AI navigates your app and builds a page graph. Then <strong>Learn Flows from Exploration</strong> extracts user journeys. Finally, <strong>Generate</strong> in the Tests tab to write executable cases.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── How it connects ── -->
+  <div class="section">
+    <div class="section-title">How the pieces connect</div>
+    <div class="callout info">
+      <div class="callout-icon">💡</div>
+      <div>
+        <strong>Pipeline thinking</strong>
+        Knowledge crawl + app exploration → flow extraction → test generation → execution → results &amp; analysis. Each tab is one stage. Most stages can be exported and re-imported, so you can crawl in one environment and run tests in another.
+      </div>
+    </div>
+
+    <div class="connect-flow">
+      <div class="connect-row">
+        <div class="connect-box" style="border-color:#7c3aed;color:#a78bfa">📚 Docs</div>
+        <div class="connect-h-arrow"></div>
+        <div class="connect-box" style="border-color:#3b82f6;color:#60a5fa">🌐 Knowledge</div>
+        <div class="connect-h-arrow"></div>
+        <div class="connect-box" style="border-color:#f59e0b;color:#fbbf24">🔍 Explore</div>
+      </div>
+      <div class="connect-v-arrow" style="align-self:flex-end;margin-right:60px"></div>
+      <div class="connect-row" style="justify-content:flex-end;padding-right:60px">
+        <div class="connect-box" style="border-color:#06b6d4;color:#67e8f9">🛡 Analysis</div>
+        <div class="connect-h-arrow" style="transform:rotate(180deg)"></div>
+        <div class="connect-box" style="border-color:#10b981;color:#34d399">✅ Results</div>
+        <div class="connect-h-arrow" style="transform:rotate(180deg)"></div>
+        <div class="connect-box" style="border-color:#ec4899;color:#f472b6">🧪 Tests</div>
+        <div class="connect-h-arrow" style="transform:rotate(180deg)"></div>
+        <div class="connect-box" style="border-color:#8b5cf6;color:#c4b5fd">📋 Flows</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Tab guide ── -->
+  <div class="section" id="tabs">
+    <div class="section-title">Tab-by-tab guide</div>
+    <div class="steps-grid">
+
+      <div class="step-card">
+        <div class="tab-badge c-blue">📚 Knowledge</div>
+        <h3>Build your RAG knowledge base</h3>
+        <p>Paste the root URL of your help site or docs. Pathfinder crawls every linked page, extracts text, and stores embeddings.</p>
+        <ul>
+          <li>Up to 1,500 pages per crawl</li>
+          <li>Re-crawl is incremental — unchanged pages skipped via content hash</li>
+          <li>IVF vector index for fast similarity search</li>
+          <li>Export &amp; import the KB for sharing</li>
+          <li>Optional local embeddings (free, on-device MiniLM)</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-amber">🔍 Explore</div>
+        <h3>Map your app autonomously</h3>
+        <p>Set depth (1–5), or flip on <strong>Single page only</strong> to scan just the active tab URL. Hit <strong>Start Exploration</strong>. Pathfinder clicks visible elements, opens modals, captures forms, fields, wizards, data tables, API calls, and accessibility issues.</p>
+        <ul>
+          <li><strong>Single page only</strong> toggle — scope to current URL, no link following</li>
+          <li>Up to 1,500 elements detected, 75 click targets per page</li>
+          <li>6-minute per-page time budget</li>
+          <li>Walks shadow DOM &amp; same-origin iframes</li>
+          <li>Auth-wall detection — aborts if session expires mid-run</li>
+          <li>Export &amp; import the page graph</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge" style="background:rgba(139,92,246,.15);color:#c4b5fd">📋 Flows</div>
+        <h3>AI-learned user journeys</h3>
+        <p>After exploring, click <strong>Learn Flows from Exploration</strong>. Pathfinder partitions the graph by sub-app (e.g. <code>/admin</code> vs <code>/learner</code>), runs LLM extraction in parallel, and merges the results.</p>
+        <ul>
+          <li>Hard guarantee: <strong>≥ 2 flows per page</strong>, no page missed</li>
+          <li>Auto-generated coverage fillers for under-represented pages</li>
+          <li>Multi-step wizard awareness (Next Step / Continue)</li>
+          <li>Bulk select + <strong>Generate (N)</strong> or <strong>Generate All</strong></li>
+          <li>Bulk delete (selected or all)</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-pink">🧪 Tests</div>
+        <h3>Generate &amp; run test cases</h3>
+        <p>Click <strong>Generate</strong> on any flow. AI writes positive, negative &amp; edge-case tests grounded in observed form fields. Constraint-based boundary tests (max-length+1, required-empty, format violations) are added deterministically.</p>
+        <ul>
+          <li>Test personalities — Balanced, Strict, Exploratory, Custom</li>
+          <li>Planning modes — pre-plan or live interactive replan</li>
+          <li>Self-healing selectors with retry &amp; replan</li>
+          <li>One-line tests — paste &amp; expand manual checks</li>
+          <li>CSV bulk import / export</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-green">📊 Results</div>
+        <h3>Pass / fail with evidence</h3>
+        <p>Per-step status, screenshots on failure, healing attempts, network requests, and full error messages. Export as JSON, HTML, or JUnit XML for CI integration.</p>
+        <ul>
+          <li>Step-by-step trace with timing</li>
+          <li>Screenshots on failure</li>
+          <li>JUnit XML for CI pipelines</li>
+          <li>Slack / Linear / Jira webhook integrations</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-cyan">🛡 Analysis</div>
+        <h3>Coverage, accessibility, contracts</h3>
+        <p>Three on-demand analyses on top of your captured data:</p>
+        <ul>
+          <li><strong>API Coverage</strong> — which endpoints are tested vs untested (uses HAR from CDP)</li>
+          <li><strong>Accessibility</strong> — WCAG audit of the active tab via the CDP a11y tree</li>
+          <li><strong>API Contracts</strong> — validate captured responses against an OpenAPI spec</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-purple">⚙ Settings</div>
+        <h3>Provider, models, behavior</h3>
+        <ul>
+          <li><strong>AI Provider</strong> — OpenAI, Anthropic, or Google AI</li>
+          <li><strong>Model</strong> — GPT-5 / GPT-5-mini / Claude Sonnet 4.6 / Opus 4.7 / Gemini 3 Pro</li>
+          <li><strong>Embedding Model</strong> — provider default or local on-device</li>
+          <li><strong>Agent mode</strong> — AI-ranked clicks during explore</li>
+          <li><strong>Planning mode</strong> — auto / preplan / interactive</li>
+          <li><strong>Test concurrency</strong> — parallel test execution</li>
+          <li><strong>Webhook URL</strong> — Slack / Linear / Jira notifications</li>
+          <li><strong>Image describer</strong> — vision model for screenshot understanding (off by default)</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge" style="background:rgba(124,58,237,.15);color:#a78bfa">🧱 Execution Presets</div>
+        <h3>Reusable run profiles</h3>
+        <p>Save named presets bundling planning mode, target origin, headers, and storage state. Apply a preset before "Run All" to switch between staging / prod / sandbox in one click.</p>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Advanced ── -->
+  <div class="section" id="advanced">
+    <div class="section-title">Advanced features</div>
+
+    <div class="callout tip">
+      <div class="callout-icon">🧭</div>
+      <div>
+        <strong>Single-page exploration</strong>
+        Toggle "Single page only" in Explore to scan just the current tab URL. Useful for capturing a single complex form (e.g. a wizard) without following links across the rest of the app.
+      </div>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-icon">⚠️</div>
+      <div>
+        <strong>Aggressive / destructive exploration (opt-in)</strong>
+        By default, buttons labelled <em>Delete / Remove / Logout / Cancel subscription</em> are skipped to protect your data. To capture destructive flows on a sandbox account, send <code>includeDangerous: true</code> in the START_EXPLORATION message (or wire a UI toggle if you've added one).
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">🔁</div>
+      <div>
+        <strong>Re-explore a single page</strong>
+        On the page graph, click the refresh icon next to any node to re-scan that page only — useful when you've changed a form and want fresh field metadata without re-running the full crawl.
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">📦</div>
+      <div>
+        <strong>Export &amp; import everything</strong>
+        Knowledge base, exploration graph, and learned flows can each be exported to JSON and imported back into another browser, environment, or teammate's install. Keys are scoped to <code>pathfinder_*</code> in <code>chrome.storage.local</code>; flows live in IndexedDB <code>pathfinder_db</code>.
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-icon">🛡</div>
+      <div>
+        <strong>Test personalities</strong>
+        Pick a personality in Settings to bias the LLM toward different test styles: <em>Balanced</em> (default), <em>Strict</em> (tight bounds + many negatives), <em>Exploratory</em> (creative edge cases), or <em>Custom</em> (your own free-text prompt).
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MCP setup ── -->
+  <div class="section" id="mcp">
+    <h2>MCP server — for AI agents</h2>
+    <p style="margin-bottom:14px">The MCP package lets external AI agents call Pathfinder's engine over the Model Context Protocol. It runs as a local Node.js process and exposes 20+ tools.</p>
+
+    <div class="callout info">
+      <div class="callout-icon">🤖</div>
+      <div>
+        <strong>What "MCP" means</strong>
+        Model Context Protocol is an open standard from Anthropic that lets AI agents call tools running on your machine. Once Pathfinder MCP is configured, any MCP-compatible client (Claude Desktop, Cursor, Cline, custom Python/TS agents) can crawl docs, explore apps, run tests, and read results — without you opening a browser.
+      </div>
+    </div>
+
+    <h3 style="font-size:15px;margin:18px 0 8px">1. One-time setup</h3>
+    <pre><code># From the Pathfinder repo root
+cd MCP
+
+# Install Playwright + dependencies
+npm run setup
+
+# Start MySQL (used for KB + results)
+docker run -d \
+  --name pathfinder-mysql \
+  -e MYSQL_ROOT_PASSWORD=pathfinder \
+  -e MYSQL_DATABASE=pathfinder \
+  -e MYSQL_USER=pathfinder \
+  -e MYSQL_PASSWORD=pathfinder \
+  -p 3307:3306 \
+  mysql:8.0
+
+# Configure .env
+cat > .env &lt;&lt;'EOF'
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3307
+MYSQL_USER=pathfinder
+MYSQL_PASSWORD=pathfinder
+MYSQL_DATABASE=pathfinder
+EOF
+
+# Build
+npm run build</code></pre>
+
+    <h3 style="font-size:15px;margin:18px 0 8px">2. Wire up your MCP client</h3>
+
+    <p style="font-size:13px;color:var(--muted);margin-bottom:6px"><strong>Claude Desktop</strong> — edit <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>:</p>
+    <pre><code>{
+  "mcpServers": {
+    "pathfinder": {
+      "command": "node",
+      "args": ["--env-file=.env", "/absolute/path/to/Pathfinder/MCP/dist/index.js"],
+      "cwd": "/absolute/path/to/Pathfinder/MCP"
+    }
+  }
+}</code></pre>
+
+    <p style="font-size:13px;color:var(--muted);margin:14px 0 6px"><strong>Cursor</strong> — Settings → MCP → Add new server, point to the same command.</p>
+    <p style="font-size:13px;color:var(--muted);margin:8px 0 6px"><strong>Cline / custom agents</strong> — register the server in your client's MCP config; it speaks stdio JSON-RPC out of the box.</p>
+
+    <h3 style="font-size:15px;margin:18px 0 8px">3. Try it from your agent</h3>
+    <p style="font-size:13px;color:var(--muted)">Once registered, ask the AI: <em>"Use Pathfinder to crawl https://docs.example.com, then explore https://app.example.com, learn flows, and run smoke tests headless."</em> The agent will chain <code>crawl_knowledge</code> → <code>explore_app</code> → <code>learn_flows</code> → <code>run_one_liners</code> automatically.</p>
+  </div>
+
+  <!-- ── MCP tools reference ── -->
+  <div class="section" id="mcp-tools">
+    <div class="section-title">Full MCP tool reference (20 tools)</div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:8px 0 8px">Test execution</h3>
+    <div class="tools-grid">
+      <div class="tool-item">
+        <div class="tool-name">run_one_liners</div>
+        <div class="tool-desc">Expand and execute one-liner test descriptions against a target app. Returns HTML report.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">run_csv</div>
+        <div class="tool-desc">Run or expand tests from CSV (one per line, or with title/type/context/start_url headers).</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">expand_tests</div>
+        <div class="tool-desc">Expand one-liners into detailed steps without executing.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">cancel_operation</div>
+        <div class="tool-desc">Cancel an ongoing crawl, explore, run, or all of them.</div>
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 8px">Knowledge base</h3>
+    <div class="tools-grid">
+      <div class="tool-item">
+        <div class="tool-name">crawl_knowledge</div>
+        <div class="tool-desc">Crawl a docs site (depth + max_pages) into the RAG knowledge base.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">export_knowledge</div>
+        <div class="tool-desc">Export the KB as JSON (file_path or inline).</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">import_knowledge</div>
+        <div class="tool-desc">Replace the current KB with a previously exported snapshot.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">clear_knowledge</div>
+        <div class="tool-desc">Wipe the KB. Use before re-crawling or switching projects.</div>
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 8px">App exploration</h3>
+    <div class="tools-grid">
+      <div class="tool-item">
+        <div class="tool-name">explore_app</div>
+        <div class="tool-desc">Headless Playwright explore — maps pages, forms, modals, navigation. Supports storage_state_path for auth.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">export_explore</div>
+        <div class="tool-desc">Export the page interaction graph as JSON.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">import_explore</div>
+        <div class="tool-desc">Import a previously exported graph — run tests against any environment using exploration from another.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">clear_explore</div>
+        <div class="tool-desc">Wipe the exploration graph.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">get_graph</div>
+        <div class="tool-desc">Return the current graph in human-readable format.</div>
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 8px">Flows &amp; results</h3>
+    <div class="tools-grid">
+      <div class="tool-item">
+        <div class="tool-name">learn_flows</div>
+        <div class="tool-desc">Extract user workflows from the exploration graph using AI.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">get_flows</div>
+        <div class="tool-desc">List all learned flows.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">get_results</div>
+        <div class="tool-desc">Fetch test run results + HTML report for a specific run_id.</div>
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 8px">Authentication</h3>
+    <div class="tools-grid">
+      <div class="tool-item">
+        <div class="tool-name">capture_auth</div>
+        <div class="tool-desc">Open a real browser so you can log in manually; saves cookies+localStorage to a JSON file for headless reuse.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">import_chrome_cookies</div>
+        <div class="tool-desc">Read cookies from your existing Chrome / Brave / Arc profile into a Playwright storage state file.</div>
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 8px">Agent memory &amp; introspection</h3>
+    <div class="tools-grid">
+      <div class="tool-item">
+        <div class="tool-name">remember</div>
+        <div class="tool-desc">Store a persistent memory (selector heal, step pattern, tenant quirk, timing profile, test outcome).</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">recall</div>
+        <div class="tool-desc">Search persistent memories by keyword or category.</div>
+      </div>
+      <div class="tool-item">
+        <div class="tool-name">pathfinder_version</div>
+        <div class="tool-desc">Return server, protocol, and per-tool schema versions for client/server drift detection.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Cost ── -->
+  <div class="section" id="cost">
+    <h2>Cost &amp; model selection</h2>
+    <p style="margin-bottom:14px">Approximate per-flow and per-test-run costs for a mid-sized site (≈240 flows / 1,440 generated tests, weekly runs):</p>
+    <table class="cost">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>In $/1M</th>
+          <th>Out $/1M</th>
+          <th>Generation</th>
+          <th>4× weekly run</th>
+          <th>Total / month</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-5-mini</td><td class="num">0.25</td><td class="num">2</td><td class="num">~$2.5</td><td class="num">~$25</td><td class="num">~$28</td></tr>
+        <tr><td>GPT-5</td><td class="num">1.25</td><td class="num">10</td><td class="num">~$12</td><td class="num">~$140</td><td class="num">~$150</td></tr>
+        <tr><td>Gemini 3 Pro</td><td class="num">2</td><td class="num">10</td><td class="num">~$15</td><td class="num">~$165</td><td class="num">~$180</td></tr>
+        <tr><td>Claude Sonnet 4.6</td><td class="num">3</td><td class="num">15</td><td class="num">~$26</td><td class="num">~$230</td><td class="num">~$255</td></tr>
+        <tr><td>Claude Opus 4.7</td><td class="num">15</td><td class="num">75</td><td class="num">~$130</td><td class="num">~$1,120</td><td class="num">~$1,250</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:12px;color:var(--muted);margin-top:8px">Levers that change the bill: <code>planningMode: 'preplan'</code> drops execution cost ~70%; <code>useLocalEmbeddings: true</code> zeros embedding spend; <code>describeImages: true</code> adds 2–4× via vision calls. Constraint-based tests (up to 25 per flow) cost zero.</p>
+  </div>
+
+  <!-- ── FAQ ── -->
+  <div class="section" id="faq">
+    <div class="section-title">Common questions</div>
+
+    <div class="callout tip">
+      <div class="callout-icon">✅</div>
+      <div>
+        <strong>Do I need an API key?</strong>
+        Yes for chat-driven steps (explore agent mode, flow learning, test generation, planning). Embeddings can be local (free) by enabling <em>Local (Free)</em> in Settings — Pathfinder uses on-device <code>all-MiniLM-L6-v2</code> for those.
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">🔄</div>
+      <div>
+        <strong>Can I re-crawl after content updates?</strong>
+        Yes — Pathfinder hashes each page's content. Unchanged pages are skipped instantly; only updated pages are re-embedded. Re-crawls of large doc sites usually finish in seconds.
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-icon">🛑</div>
+      <div>
+        <strong>What happens if my session expires mid-explore?</strong>
+        Pathfinder detects URLs matching <code>/login</code>, <code>/signin</code>, <code>/auth</code>, <code>/sso</code>, <code>/oauth</code>, <code>/session</code>. If it gets bounced to one of these mid-run, it aborts immediately with a clear message instead of looping on the login form. Sign back in and re-run.
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">🌐</div>
+      <div>
+        <strong>Will it crawl pages behind a login?</strong>
+        <strong>Browser extension</strong> uses your live browser session — log in first, then start the crawl/explore. <strong>MCP server</strong> uses a Playwright <code>storage_state_path</code> JSON; capture it once via <code>capture_auth</code> or <code>import_chrome_cookies</code>, then point every run at it.
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-icon">🔧</div>
+      <div>
+        <strong>Why does Chrome show "Pathfinder started debugging this browser"?</strong>
+        During Explore, Pathfinder attaches the Chrome DevTools Protocol (CDP) to capture HAR entries, accessibility-tree audits, and live screenshots. The debugger detaches the moment exploration finishes. No page data leaves your device.
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-icon">📤</div>
+      <div>
+        <strong>How do I share work with my team?</strong>
+        Use the export/import buttons in Knowledge, Explore (graph), and Flows. Each exports a self-contained JSON your teammate can import into a fresh install. The MCP equivalents are <code>export_knowledge</code> / <code>export_explore</code>.
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">🧹</div>
+      <div>
+        <strong>How do I reset everything?</strong>
+        Browser: open the Explore tab → Delete (clears graph + flows only; KB and tests are kept). For a full wipe, uninstall the extension and reinstall — storage keys live under <code>pathfinder_*</code> in <code>chrome.storage.local</code> and IndexedDB <code>pathfinder_db</code>. MCP: <code>clear_knowledge</code> + <code>clear_explore</code>.
+      </div>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<div class="page-footer">
+  Pathfinder v1.0.0 &nbsp;·&nbsp;
+  All data stays in your browser (or your local MCP process) &nbsp;·&nbsp;
+  <a href="privacypolicy.html">Privacy Policy</a>
+</div>
+
+</body>
+</html>

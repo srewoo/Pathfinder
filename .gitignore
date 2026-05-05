@@ -1,0 +1,106 @@
+# ─── Dependencies ────────────────────────────────────────────────────────
+node_modules/
+**/node_modules/
+.pnp/
+.pnp.js
+.yarn/
+
+# ─── Build output ────────────────────────────────────────────────────────
+dist/
+build/
+out/
+**/dist/
+**/build/
+*.tsbuildinfo
+.vite/
+.turbo/
+.next/
+.cache/
+
+# Extension release archives
+releases/
+*.zip
+!cli/templates/*.zip
+*.crx
+*.pem
+
+# ─── Environment & secrets ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.local
+secrets.json
+auth-state.json
+storage-state*.json
+*.cookies.json
+**/credentials.json
+**/serviceAccount*.json
+
+# ─── Logs ────────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# ─── Test artifacts ──────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+playwright/.cache/
+.vitest-cache/
+__snapshots__/*.snap.tmp
+**/test-output/
+**/.cypress/
+
+# ─── MCP package — runtime data ──────────────────────────────────────────
+MCP/data/
+MCP/.mysql-data/
+MCP/screenshots/
+MCP/sessions/
+MCP/tmp/
+
+# Local DB snapshots and Playwright sessions captured by capture_auth
+MCP/auth/
+MCP/storage-states/
+
+# ─── IDE / Editor ────────────────────────────────────────────────────────
+.idea/
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.history/
+
+# ─── OS junk ─────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ─── AI / agent scratch ──────────────────────────────────────────────────
+.claude/
+.qodo/
+.agent/
+.cursor/
+.aider*
+
+# ─── Generated assets ────────────────────────────────────────────────────
+# Locally rasterized icon variants (regenerated from icon.svg)
+# Keep public/icons/* checked in; this is for any ad-hoc renders.
+*.icon-tmp.png
+
+# ─── Misc ────────────────────────────────────────────────────────────────
+*.tgz
+.eslintcache
+.stylelintcache
+.parcel-cache
