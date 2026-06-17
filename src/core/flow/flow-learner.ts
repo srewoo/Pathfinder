@@ -10,7 +10,10 @@ import type {
 import { PROMPTS } from '../ai/prompt-templates';
 import { serializeGraphForFlowLearning, loadGraph } from '../explorer/interaction-graph';
 import { searchByText, formatSearchResults } from '../knowledge/vector-search';
-import { saveFlow, getAllFlows } from './flow-store';
+import { saveFlow, updateFlow, getAllFlows } from './flow-store';
+import { enumerateSkeletons, dedupeBySignature } from './skeleton-enumerator';
+import { groundFlows } from './flow-grounding';
+import { reconcileFlows, staleMark, reviveMark } from './flow-reconciler';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('flow-learner');
@@ -146,29 +149,53 @@ export async function learnFlows(aiClient: AIClientInterface): Promise<Flow[]> {
   // collapsing legitimate parallel flows.
   let deduped = allParsed;
 
+  // ── Graph-first skeleton backbone (Phase 1) ───────────────────────────
+  // The interaction graph IS the universe of possible flows. Enumerate it
+  // deterministically (navigation journeys, forms + negative paths, modals,
+  // feature tabs, table row-actions) so completeness is a graph property —
+  // not something the non-deterministic LLM call has to remember every time.
+  // The LLM flows above stay FIRST in dedup order so the richest version of
+  // any duplicated journey wins; skeletons fill the long tail the LLM drops.
+  if (graph) {
+    const skeletons = enumerateSkeletons(graph);
+    const beforeMerge = deduped.length;
+    deduped = dedupeBySignature([...deduped, ...skeletons]);
+    log.info(`Graph backbone: enumerated ${skeletons.length} deterministic skeletons; ${deduped.length - beforeMerge} survived structural dedup against ${beforeMerge} LLM flows`);
+  }
+
   // ── Coverage safety net ───────────────────────────────────────────────
-  // For every page in the graph, ensure at least 2 flows reference it.
-  // The LLM is instructed to do this, but it can still skip pages on large
-  // sites. We synthesize deterministic gap-fillers (navigate-and-inspect +
-  // primary-action) for any page that's under-represented.
+  // For every page in the graph, ensure at least 2 flows reference it. The
+  // skeletons above cover most pages; this backstops any page still under-
+  // represented (e.g. nav-only pages with no edges, forms, or tabs).
   if (graph) {
     const filler = synthesizeCoverageFillers(graph, deduped);
     if (filler.length > 0) {
       log.info(`Coverage net: synthesized ${filler.length} gap-filler flows for under-covered pages`);
-      deduped = [...deduped, ...filler];
+      deduped = dedupeBySignature([...deduped, ...filler]);
     }
   }
 
-  // Idempotency: skip flows whose name already exists so re-running "Learn
-  // Flows" tops up new flows instead of piling duplicates.
-  const normName = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const existingNames = new Set((await getAllFlows().catch(() => [])).map((f) => normName(f.name)));
+  // ── Per-flow knowledge grounding (Phase 2) ────────────────────────────
+  // Ground EACH flow against the docs about ITS feature (one batched embed +
+  // in-memory vector search). Flows that match documentation gain
+  // `knowledgeRefs` and are promoted to 'hybrid'. Never blocks learning.
+  try {
+    deduped = await groundFlows(deduped, (texts) => aiClient.embed(texts));
+  } catch (err) {
+    log.warn('Per-flow grounding failed — saving flows without knowledge refs', err);
+  }
+
+  // ── Reconcile against stored flows (Phase 3) ──────────────────────────
+  // Identity is the step SIGNATURE, not the name. A structurally-identical
+  // flow updates the existing record in place (keeping its flowId so already-
+  // generated test cases stay linked); a flow whose signature vanished is
+  // marked stale (reversible), not deleted.
+  const existing = await getAllFlows().catch(() => [] as Flow[]);
+  const plan = reconcileFlows(deduped, existing);
+  const nowIso = new Date().toISOString();
 
   const saved: Flow[] = [];
-  let skipped = 0;
-  for (const flowData of deduped) {
-    if (existingNames.has(normName(flowData.name))) { skipped++; continue; }
-    existingNames.add(normName(flowData.name));
+  for (const flowData of plan.toCreate) {
     try {
       const startDetails = inferFlowStartDetails(graph, flowData);
       const flow = await saveFlow({
@@ -178,6 +205,9 @@ export async function learnFlows(aiClient: AIClientInterface): Promise<Flow[]> {
         startUrl: startDetails?.url,
         startUrlInference: startDetails?.inference,
         source: flowData.source ?? 'hybrid',
+        coverageType: flowData.coverageType,
+        knowledgeRefs: flowData.knowledgeRefs,
+        signature: flowData.signature,
       });
       saved.push(flow);
     } catch (err) {
@@ -185,7 +215,22 @@ export async function learnFlows(aiClient: AIClientInterface): Promise<Flow[]> {
     }
   }
 
-  log.info(`Learned ${saved.length} new flows (${skipped} already existed)`);
+  for (const { flowId, patch } of plan.toUpdate) {
+    try {
+      // A reappearing signature is, by definition, no longer stale.
+      const updated = await updateFlow(flowId, { ...patch, ...reviveMark() });
+      if (updated) saved.push(updated);
+    } catch (err) {
+      log.error('Failed to update flow', { flowId, err });
+    }
+  }
+  for (const flowId of plan.toMarkStale) {
+    await updateFlow(flowId, staleMark(nowIso)).catch((err) => log.error('Failed to mark flow stale', { flowId, err }));
+  }
+
+  log.info(
+    `Reconciled flows: ${plan.toCreate.length} created, ${plan.toUpdate.length} updated, ${plan.toRevive.length} revived, ${plan.toMarkStale.length} marked stale`
+  );
   return saved;
 }
 

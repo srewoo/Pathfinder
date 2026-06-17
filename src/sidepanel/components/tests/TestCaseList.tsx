@@ -1,22 +1,21 @@
 import { useState } from 'react';
-import { Play, Trash2, ChevronDown, ChevronRight, Wand2, RefreshCw } from 'lucide-react';
+import { Play, Trash2, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import type { TestCase, Flow } from '../../../storage/schemas';
 import { Badge } from '../shared/Badge';
 import { StatusIndicator } from '../shared/StatusIndicator';
 import { Button } from '../shared/Button';
+import { StepConfidenceDot, StepConfidenceLegend } from '../shared/StepConfidence';
 import { RetryTestModal } from './RetryTestModal';
 import type { LiveStepResult } from '../../stores/test-store';
 
 interface TestCaseListProps {
   testCases: TestCase[];
-  flows: Flow[];
   selectedTestIds: string[];
   runningTestIds: string[];
   liveStepResults: Record<string, LiveStepResult[]>;
   onRun: (id: string) => void;
   onDelete: (id: string) => void;
   onRegenerate: (id: string, context: string) => void;
-  onGenerate: (flowId: string) => void;
   onToggleSelection: (id: string) => void;
   onSelectAll: () => void;
   onSelectFailed: () => void;
@@ -26,14 +25,12 @@ interface TestCaseListProps {
 
 export function TestCaseList({
   testCases,
-  flows,
   selectedTestIds,
   runningTestIds,
   liveStepResults,
   onRun,
   onDelete,
   onRegenerate,
-  onGenerate,
   onToggleSelection,
   onSelectAll,
   onSelectFailed,
@@ -51,12 +48,12 @@ export function TestCaseList({
       return next;
     });
 
-  if (testCases.length === 0 && flows.length === 0) {
+  if (testCases.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-center">
         <p className="text-xs text-text-secondary font-medium">No test cases yet</p>
         <p className="text-2xs text-text-muted mt-1">
-          Run exploration → Learn Flows → Generate Tests
+          Generate them from the Flows tab, or add a one-line check above
         </p>
       </div>
     );
@@ -64,30 +61,6 @@ export function TestCaseList({
 
   return (
     <div className="space-y-3">
-      {flows.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-2xs font-medium text-text-muted uppercase tracking-wide">
-            Generate from Flows
-          </p>
-          {flows.map((flow) => (
-            <div
-              key={flow.flowId}
-              className="flex items-center justify-between p-2 bg-surface-2 border border-border rounded-lg"
-            >
-              <span className="text-xs text-text-primary truncate">{flow.name}</span>
-              <Button
-                variant="ghost"
-                size="xs"
-                icon={<Wand2 size={10} />}
-                onClick={() => onGenerate(flow.flowId)}
-              >
-                Generate
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
-
       {testCases.length > 0 && (
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
@@ -256,14 +229,26 @@ export function TestCaseList({
                     )}
 
                     {tc.steps && tc.steps.length > 0 && (
-                      <ol className="mt-2 space-y-0.5">
-                        {tc.steps.map((step, i) => (
-                          <li key={i} className="text-2xs text-text-muted flex gap-1.5">
-                            <span className="text-primary-light font-mono">{i + 1}.</span>
-                            <span>{step}</span>
-                          </li>
-                        ))}
-                      </ol>
+                      <>
+                        {tc.stepConfidence && tc.stepConfidence.length > 0 && (
+                          <div className="mt-2">
+                            <StepConfidenceLegend confidences={tc.stepConfidence} />
+                          </div>
+                        )}
+                        <ol className="mt-1.5 space-y-0.5">
+                          {tc.steps.map((step, i) => (
+                            <li key={i} className="text-2xs text-text-muted flex gap-1.5 items-start">
+                              <span className="text-primary-light font-mono">{i + 1}.</span>
+                              {tc.stepConfidence?.[i] && (
+                                <span className="mt-[3px]">
+                                  <StepConfidenceDot confidence={tc.stepConfidence[i]} />
+                                </span>
+                              )}
+                              <span>{step}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </>
                     )}
                   </div>
                 )}

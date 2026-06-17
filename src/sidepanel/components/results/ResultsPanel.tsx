@@ -1,10 +1,11 @@
 import React from 'react';
-import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film } from 'lucide-react';
+import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film, Shield, ArrowRight } from 'lucide-react';
 import { TestReport } from './TestReport';
 import { TestDashboard } from './TestDashboard';
 import { ExecutionTimeline } from './ExecutionTimeline';
 import { Button } from '../shared/Button';
 import { useTestStore } from '../../stores/test-store';
+import { useNavigationStore } from '../../stores/navigation-store';
 import { generateHtmlReport, generateJUnitXml } from '../../../utils/html-reporter';
 import { generateJsonReport } from '../../../utils/report-exporter';
 
@@ -12,6 +13,7 @@ type ViewMode = 'results' | 'timeline' | 'dashboard';
 
 export function ResultsPanel() {
   const store = useTestStore();
+  const goTo = useNavigationStore((s) => s.setActiveTab);
   const [viewMode, setViewMode] = React.useState<ViewMode>('results');
 
   React.useEffect(() => {
@@ -125,6 +127,21 @@ export function ResultsPanel() {
           <div className="text-2xs text-text-muted">Total</div>
         </div>
       </div>
+
+      {/* Hand-off to the final stage — coverage/contract analysis of this run */}
+      <button
+        type="button"
+        onClick={() => goTo('analysis')}
+        className="flex items-center justify-between gap-2 px-2.5 py-2 bg-surface-2 border border-border rounded-lg hover:border-border-light transition-colors text-left"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <Shield size={12} className="text-primary-light flex-shrink-0" />
+          <span className="text-xs text-text-primary truncate">Analyze API coverage, accessibility & contracts</span>
+        </span>
+        <span className="flex items-center gap-1 text-2xs text-text-muted flex-shrink-0">
+          Analysis <ArrowRight size={11} />
+        </span>
+      </button>
 
       {/* View mode tabs */}
       <div className="flex gap-1 bg-surface-2 p-0.5 rounded-lg border border-border">

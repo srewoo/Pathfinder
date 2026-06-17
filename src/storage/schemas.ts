@@ -329,6 +329,31 @@ export interface StartUrlInference {
   reason: string;
 }
 
+/**
+ * Test-design coverage category a flow targets. Drives the Phase-2 coverage
+ * matrix (a feature isn't "covered" until its happy + relevant negative paths
+ * exist) and lets test generation map a flow to a TestCase.type.
+ */
+export type FlowCoverageType =
+  | 'happy'        // primary success path
+  | 'validation'   // required-field / format validation error path
+  | 'boundary'     // min/max/length/pattern edge values
+  | 'empty'        // empty / no-data state
+  | 'navigation'   // multi-hop journey between pages
+  | 'exploratory'; // open a feature/tab/modal and verify it renders
+
+/** A documentation chunk a flow was grounded against (Phase-2 per-flow RAG). */
+export interface KnowledgeRef {
+  /** Source document URL. */
+  url: string;
+  /** Section / heading the chunk came from, if known. */
+  section?: string;
+  /** Hybrid retrieval score (semantic + keyword), 0–1. */
+  score: number;
+  /** Short snippet of the grounding text (truncated). */
+  snippet?: string;
+}
+
 export interface Flow {
   flowId: string;
   name: string;
@@ -339,6 +364,26 @@ export interface Flow {
   /** Why pathfinder picked this start URL from exploration data. */
   startUrlInference?: StartUrlInference;
   source: 'exploration' | 'documentation' | 'hybrid';
+  /** Test-design coverage category this flow targets (Phase-2 coverage matrix). */
+  coverageType?: FlowCoverageType;
+  /** Documentation chunks this flow was grounded against (Phase-2 per-flow RAG). */
+  knowledgeRefs?: KnowledgeRef[];
+  /**
+   * Stable, content-derived identity (hash of the step signature). Used to
+   * reconcile flows across re-learns: a flow whose signature already exists is
+   * updated in place (keeping its flowId, so linked test cases stay attached)
+   * rather than duplicated. (Phase-3 reconcile.)
+   */
+  signature?: string;
+  /**
+   * Set when a re-learn no longer produces this flow's signature — i.e. the
+   * feature it covered appears to have been removed from the app. Reversible:
+   * cleared automatically if the flow reappears on a later re-learn. User- and
+   * documentation-authored flows are never marked stale.
+   */
+  stale?: boolean;
+  /** ISO timestamp when this flow was first marked stale. */
+  staleSince?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -376,6 +421,17 @@ export interface AuthCookie {
   expirationDate?: number;
 }
 
+/**
+ * Per-step provenance — how trustworthy a generated step is, surfaced in the UI
+ * so users can see which steps are high-fidelity vs. which to review.
+ *  - grounded:     built from a DOM selector (or explored URL) captured during
+ *                  exploration — highest fidelity.
+ *  - doc_asserted: an assertion whose expected outcome is grounded in crawled docs.
+ *  - inferred:     AI-suggested; the selector is validated against the live page
+ *                  and self-healed at run time, but wasn't captured up front.
+ */
+export type StepConfidence = 'grounded' | 'doc_asserted' | 'inferred';
+
 export interface TestCase {
   id: string;
   title: string;
@@ -384,6 +440,8 @@ export interface TestCase {
   sourceFlowId?: string;
   source: 'generated' | 'user';
   steps?: string[];
+  /** Provenance per step, aligned by index with `steps`. Optional — absent for legacy/user tests. */
+  stepConfidence?: StepConfidence[];
   executionPresetId?: string;
   executionPresetName?: string;
   personaLabel?: string;

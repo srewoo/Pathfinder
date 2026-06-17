@@ -12,6 +12,8 @@ import { deriveConstraintTests, saveConstraintTests, serializeFieldConstraints }
 import { getPersonality, createCustomPersonality, applyPersonalityToPrompt } from './test-personality';
 import type { TestPersonality } from './test-personality';
 import { estimateTokens } from '../knowledge/chunker';
+import { saveProjectedTests } from './flow-projection';
+import { confidenceFromText } from './step-confidence';
 
 const log = createLogger('test-generator');
 
@@ -34,6 +36,20 @@ export async function generateTestsForFlow(
   log.info(`Using test personality: ${personality.name} (temp=${personality.temperature}, max=${personality.maxTestsPerFlow})`);
 
   const flowText = serializeFlowForAI(flow);
+
+  // ── Deterministic projection floor (Phase 3) ──────────────────────────
+  // Project the flow into its canonical executable test BEFORE the LLM call,
+  // so at least one runnable test exists for this flow even if generation
+  // below fails or drops it. Its title seeds the dedup set so the LLM won't
+  // emit a duplicate of the same canonical test.
+  const existingTests = await testCaseDB.getByFlowId(flow.flowId);
+  const existingTitles = new Set(
+    existingTests.map((t) => t.title.toLowerCase().replace(/[^a-z0-9]/g, ''))
+  );
+  const projectedTests = await saveProjectedTests(flow, existingTitles).catch((err) => {
+    log.warn('Flow projection failed — continuing with LLM generation only', err);
+    return [] as TestCase[];
+  });
 
   const [knowledgeResults, graph] = await Promise.all([
     searchByText(
@@ -123,15 +139,10 @@ export async function generateTestsForFlow(
   }
 
   const parsed = parseTestsResponse(raw);
-  const saved: TestCase[] = [];
-
-  // Fetch existing tests for this flow to prevent duplicate generation.
-  // Dedup by normalized title — if a test with the same title already exists,
-  // skip it instead of creating a second copy.
-  const existingTests = await testCaseDB.getByFlowId(flow.flowId);
-  const existingTitles = new Set(
-    existingTests.map((t) => t.title.toLowerCase().replace(/[^a-z0-9]/g, ''))
-  );
+  // Seed `saved` with the deterministic projection so it's returned alongside
+  // the LLM tests. `existingTitles` (built above) already includes their
+  // normalized titles, so the loop below won't re-create duplicates.
+  const saved: TestCase[] = [...projectedTests];
 
   for (const t of parsed) {
     const normalizedTitle = t.title.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -141,6 +152,7 @@ export async function generateTestsForFlow(
     }
     existingTitles.add(normalizedTitle);
 
+    const hasKnowledge = knowledgeResults.length > 0 || (flow.knowledgeRefs?.length ?? 0) > 0;
     const testCase: TestCase = {
       id: generateId(),
       title: t.title,
@@ -149,6 +161,7 @@ export async function generateTestsForFlow(
       sourceFlowId: flow.flowId,
       source: 'generated',
       steps: t.steps,
+      stepConfidence: t.steps?.map((s) => confidenceFromText(s, hasKnowledge)),
       startUrl: flow.startUrl,
       status: 'pending',
       createdAt: new Date().toISOString(),
@@ -171,7 +184,8 @@ export async function generateTestsForFlow(
     log.info(`Generated ${constraintTests.length} constraint-based tests for flow "${flow.name}"`);
   }
 
-  log.info(`Generated ${saved.length} total tests (${parsed.length} AI + ${saved.length - parsed.length} constraint) for flow "${flow.name}"`);
+  const constraintCount = saved.length - parsed.length - projectedTests.length;
+  log.info(`Generated ${saved.length} total tests (${projectedTests.length} projected + ${parsed.length} AI + ${constraintCount} constraint) for flow "${flow.name}"`);
   return saved;
 }
 

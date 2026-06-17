@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Header } from './components/layout/Header';
 import { Footer } from './components/layout/Footer';
-import { TabNav, type Tab } from './components/layout/TabNav';
+import { TabNav } from './components/layout/TabNav';
 import { KnowledgePanel } from './components/knowledge/KnowledgePanel';
 import { ExplorerPanel } from './components/explorer/ExplorerPanel';
 import { FlowsPanel } from './components/flows/FlowsPanel';
@@ -12,6 +12,7 @@ import { SettingsPanel } from './components/settings/SettingsPanel';
 import { Modal } from './components/shared/Modal';
 import { OnboardingTour, TOUR_STEPS } from './components/onboarding/OnboardingTour';
 import { useOnboardingStore } from './stores/onboarding-store';
+import { useNavigationStore } from './stores/navigation-store';
 import { useSettingsStore } from './stores/settings-store';
 import { useKnowledgeStore } from './stores/knowledge-store';
 import { useExplorerStore } from './stores/explorer-store';
@@ -19,7 +20,7 @@ import { useTestStore } from './stores/test-store';
 import type { SidebarMessage } from '../messaging/messages';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('knowledge');
+  const { activeTab, setActiveTab } = useNavigationStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const settings = useSettingsStore();

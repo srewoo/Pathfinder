@@ -68,14 +68,12 @@ export function TestPanel() {
 
       <TestCaseList
         testCases={store.testCases}
-        flows={store.flows}
         selectedTestIds={store.selectedTestIds}
         runningTestIds={store.runningTestIds}
         liveStepResults={store.liveStepResults}
         onRun={store.runTest}
         onDelete={store.deleteTestCase}
         onRegenerate={store.regenerateTestCase}
-        onGenerate={store.generateTestsForFlow}
         onToggleSelection={store.toggleSelectedTest}
         onSelectAll={() => store.setSelectedTestIds(store.testCases.map((testCase) => testCase.id))}
         onSelectFailed={() => store.setSelectedTestIds(failedTestIds)}

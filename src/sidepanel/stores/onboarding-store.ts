@@ -7,7 +7,7 @@ import { create } from 'zustand';
 const STORAGE_KEY = 'pathfinder.onboarding.v1';
 
 /** Total number of steps in the tour (keep in sync with TOUR_STEPS). */
-export const TOUR_STEP_COUNT = 6;
+export const TOUR_STEP_COUNT = 7;
 
 function markDone(): void {
   try { localStorage.setItem(STORAGE_KEY, '1'); } catch { /* storage unavailable */ }

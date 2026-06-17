@@ -17,8 +17,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: 'Your AI QA engineer in the browser. It explores your app, learns its flows, then generates and runs end-to-end tests. This quick tour walks through each tab in order.',
   },
   {
-    title: 'Knowledge — index your docs (optional)',
-    body: 'Open your product’s documentation, paste its URL here and crawl. Pathfinder indexes the content so generated tests are grounded in how your product actually works.',
+    title: 'Knowledge — index your docs',
+    body: 'Optional but recommended: paste your product docs URL and crawl. Pathfinder indexes the content so flows and tests are grounded in how your product actually works. No docs? Skip straight to Explore.',
     tab: 'knowledge',
   },
   {
@@ -28,18 +28,23 @@ export const TOUR_STEPS: readonly TourStep[] = [
   },
   {
     title: 'Flows — learn workflows',
-    body: 'Click “Learn Flows” to extract real user workflows (sign-in, create project, …) from the exploration data and your docs.',
+    body: 'Click “Learn Flows from Exploration” to turn the map into real user workflows (sign-in, create project, …), grounded in your docs. Then generate test cases from them — right here.',
     tab: 'flows',
   },
   {
     title: 'Tests — generate & run',
-    body: 'Use the One-Line Runner to type checks in plain English, generate from a learned flow, or import JSON. Then run them — with self-healing selectors and retries.',
+    body: 'Tests generated from flows land here. You can also type one-line checks in plain English or import JSON. Run them with self-healing selectors and retries.',
     tab: 'tests',
   },
   {
     title: 'Results — review & export',
-    body: 'See pass/fail, step-by-step timelines, screenshots, and healing metrics. Export to JUnit XML or HTML for CI. That’s the full loop!',
+    body: 'See pass/fail, step-by-step timelines, screenshots, and healing metrics. Export to JUnit XML or HTML for CI.',
     tab: 'results',
+  },
+  {
+    title: 'Analysis — coverage & quality',
+    body: 'After running tests, dig deeper: which API endpoints are covered, WCAG accessibility issues, and contract validation against your OpenAPI spec. That’s the full loop!',
+    tab: 'analysis',
   },
 ];
 

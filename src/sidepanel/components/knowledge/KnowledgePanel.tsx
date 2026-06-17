@@ -3,10 +3,13 @@ import { Database, Layers } from 'lucide-react';
 import { CrawlForm } from './CrawlForm';
 import { KnowledgeList } from './KnowledgeList';
 import { KnowledgeExportImport } from './KnowledgeExportImport';
+import { NextStepBanner } from '../shared/NextStepBanner';
 import { useKnowledgeStore } from '../../stores/knowledge-store';
+import { useNavigationStore } from '../../stores/navigation-store';
 
 export function KnowledgePanel() {
   const store = useKnowledgeStore();
+  const goTo = useNavigationStore((s) => s.setActiveTab);
 
   useEffect(() => {
     store.loadDocuments();
@@ -17,7 +20,14 @@ export function KnowledgePanel() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xs font-semibold text-text-primary">Knowledge Base</h2>
-          <p className="text-2xs text-text-muted mt-0.5">Crawl help docs to build AI context</p>
+          <p className="text-2xs text-text-muted mt-0.5">
+            Optional — crawl help docs to ground tests.{' '}
+            {store.documents.length === 0 && !store.isCrawling && (
+              <button onClick={() => goTo('explore')} className="text-primary-light hover:underline">
+                Skip to Explore →
+              </button>
+            )}
+          </p>
         </div>
         {store.documents.length > 0 && (
           <div className="flex items-center gap-3">
@@ -34,6 +44,16 @@ export function KnowledgePanel() {
       </div>
 
       <CrawlForm />
+
+      {store.justCompleted && (
+        <NextStepBanner
+          title={`Knowledge indexed — ${store.justCompleted.docCount} docs, ${store.justCompleted.vectorCount} vectors`}
+          detail="Next, map your app so flows and tests are grounded in real pages."
+          ctaLabel="Explore"
+          onContinue={() => { store.dismissCompletion(); goTo('explore'); }}
+          onDismiss={store.dismissCompletion}
+        />
+      )}
 
       <div className="border-t border-border pt-3">
         <KnowledgeExportImport />

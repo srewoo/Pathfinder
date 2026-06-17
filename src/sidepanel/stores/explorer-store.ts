@@ -40,6 +40,8 @@ interface ExplorerState {
   progress: ExplorationProgress | null;
   error: string | null;
   exportImportError: string | null;
+  /** Set when an exploration just finished — drives the "Continue → Flows" hand-off banner. */
+  explorationJustCompleted: boolean;
 
   setDepth: (depth: number) => void;
   setSinglePageOnly: (value: boolean) => void;
@@ -56,6 +58,7 @@ interface ExplorerState {
   loadData: () => Promise<void>;
   setProgress: (progress: ExplorationProgress) => void;
   setExplorationComplete: () => void;
+  dismissExplorationCompletion: () => void;
   setExplorationError: (error: string) => void;
   setReexploreComplete: (url: string) => void;
   setReexploreError: (url: string, error: string) => void;
@@ -79,6 +82,7 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
   progress: null,
   error: null,
   exportImportError: null,
+  explorationJustCompleted: false,
 
   setDepth: (explorationDepth) => set({ explorationDepth }),
 
@@ -93,7 +97,7 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
 
   startExploration: async () => {
     const { explorationDepth, singlePageOnly, singlePageStrict, submitForms, freshRescan } = get();
-    set({ isExploring: true, error: null, progress: null });
+    set({ isExploring: true, error: null, progress: null, explorationJustCompleted: false });
     const resp = await sendToBackground({
       type: 'START_EXPLORATION',
       payload: { depth: explorationDepth, singlePageOnly, singlePageStrict, submitForms, freshRescan },
@@ -187,9 +191,11 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
   setProgress: (progress) => set({ progress }),
 
   setExplorationComplete: () => {
-    set({ isExploring: false, reexploringUrl: null, progress: null });
+    set({ isExploring: false, reexploringUrl: null, progress: null, explorationJustCompleted: true });
     get().loadData();
   },
+
+  dismissExplorationCompletion: () => set({ explorationJustCompleted: false }),
 
   setExplorationError: (error) => set({ isExploring: false, reexploringUrl: null, error }),
 

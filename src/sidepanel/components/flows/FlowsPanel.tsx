@@ -5,17 +5,33 @@ import type { Flow } from '../../../storage/schemas';
 import { Button } from '../shared/Button';
 import { Badge } from '../shared/Badge';
 import { useTestStore } from '../../stores/test-store';
+import { useExplorerStore } from '../../stores/explorer-store';
+import { useNavigationStore } from '../../stores/navigation-store';
 
 export function FlowsPanel() {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [generating, setGenerating] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ mode: 'all' | 'selected'; done: number; total: number } | null>(null);
   const [selectedFlowIds, setSelectedFlowIds] = useState<Set<string>>(new Set());
   const { generateTestsForFlow } = useTestStore();
+  const learnFlows = useExplorerStore((s) => s.learnFlows);
+  const isLearningFlows = useExplorerStore((s) => s.isLearningFlows);
+  const hasGraph = useExplorerStore((s) => Boolean(s.graph));
+  const learnError = useExplorerStore((s) => s.error);
+  const goTo = useNavigationStore((s) => s.setActiveTab);
 
   useEffect(() => {
     loadFlows();
+    // Know whether exploration data exists (gates the Learn Flows CTA).
+    useExplorerStore.getState().loadData();
   }, []);
+
+  // The Learn Flows action lives here now; reload the list when it finishes
+  // (the explorer store clears isLearningFlows when FLOWS_LEARNED arrives).
+  useEffect(() => {
+    if (!isLearningFlows) loadFlows();
+  }, [isLearningFlows]);
 
   const loadFlows = async () => {
     const all = await getAllFlows();
@@ -34,22 +50,25 @@ export function FlowsPanel() {
     setGenerating(null);
   };
 
-  const handleGenerateSelected = async () => {
-    const toGenerate = flows.filter((f) => selectedFlowIds.has(f.flowId));
-    for (const flow of toGenerate) {
-      setGenerating(flow.flowId);
-      await generateTestsForFlow(flow.flowId);
+  const runGeneration = async (mode: 'all' | 'selected', targets: Flow[]) => {
+    if (targets.length === 0) return;
+    setProgress({ mode, done: 0, total: targets.length });
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        setGenerating(targets[i].flowId);
+        await generateTestsForFlow(targets[i].flowId);
+        setProgress((p) => (p ? { ...p, done: i + 1 } : p));
+      }
+    } finally {
+      setGenerating(null);
+      setProgress(null);
     }
-    setGenerating(null);
   };
 
-  const handleGenerateAll = async () => {
-    for (const flow of flows) {
-      setGenerating(flow.flowId);
-      await generateTestsForFlow(flow.flowId);
-    }
-    setGenerating(null);
-  };
+  const handleGenerateSelected = () =>
+    runGeneration('selected', flows.filter((f) => selectedFlowIds.has(f.flowId)));
+
+  const handleGenerateAll = () => runGeneration('all', flows);
 
   const handleDeleteSelected = async () => {
     const ids = Array.from(selectedFlowIds);
@@ -101,14 +120,42 @@ export function FlowsPanel() {
   const allSelected = flows.length > 0 && selectedFlowIds.size === flows.length;
   const someSelected = selectedFlowIds.size > 0 && !allSelected;
 
+  const learnButton = (
+    <Button
+      variant={flows.length === 0 ? 'primary' : 'secondary'}
+      size="xs"
+      loading={isLearningFlows}
+      icon={<GitBranch size={11} />}
+      onClick={learnFlows}
+      disabled={isLearningFlows || !hasGraph}
+      title={hasGraph ? 'Learn user flows from exploration + knowledge' : 'Explore the app first'}
+    >
+      {isLearningFlows ? 'Learning…' : flows.length === 0 ? 'Learn Flows from Exploration' : 'Re-learn Flows'}
+    </Button>
+  );
+
   if (flows.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center flex-1 py-12 text-center px-4">
         <GitBranch size={32} className="text-text-muted mb-3" />
         <p className="text-xs font-medium text-text-secondary">No flows learned yet</p>
-        <p className="text-2xs text-text-muted mt-1">
-          Go to Explore tab → Start Exploration → Learn Flows
-        </p>
+        {hasGraph ? (
+          <>
+            <p className="text-2xs text-text-muted mt-1 mb-3">
+              Exploration data is ready — learn flows in one click. Captures every page, form, modal, and feature tab.
+            </p>
+            {learnButton}
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => goTo('explore')}
+            className="text-2xs text-primary-light hover:underline mt-1"
+          >
+            Go to Explore → Start Exploration first
+          </button>
+        )}
+        {learnError && <p className="text-2xs text-error mt-3 max-w-xs">{learnError}</p>}
       </div>
     );
   }
@@ -116,12 +163,19 @@ export function FlowsPanel() {
   return (
     <div className="flex flex-col gap-3 p-3">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
           <h2 className="text-xs font-semibold text-text-primary">Learned Flows</h2>
-          <p className="text-2xs text-text-muted mt-0.5">{flows.length} flows discovered</p>
+          <p className="text-2xs text-text-muted mt-0.5">{flows.length} flows · generate test cases from them below</p>
         </div>
+        {learnButton}
       </div>
+
+      {learnError && (
+        <div className="p-2.5 bg-error/10 border border-error/20 rounded-lg">
+          <p className="text-xs text-error">{learnError}</p>
+        </div>
+      )}
 
       {/* Bulk action bar */}
       <div className="flex items-center gap-2 bg-surface-2 border border-border rounded-lg px-2.5 py-2 whitespace-nowrap overflow-x-auto">
@@ -148,35 +202,31 @@ export function FlowsPanel() {
         <Button
           variant={selectedFlowIds.size > 0 ? 'success' : 'ghost'}
           size="xs"
-          icon={
-            isGenerating && selectedFlowIds.has(generating!) ? (
-              <Loader2 size={10} className="animate-spin" />
-            ) : (
-              <Wand2 size={10} />
-            )
-          }
+          loading={progress?.mode === 'selected'}
+          icon={<Wand2 size={10} />}
           onClick={handleGenerateSelected}
           disabled={isGenerating || selectedFlowIds.size === 0}
-          title="Generate tests for selected flows"
+          title="Generate test cases for the selected flows"
         >
-          {selectedFlowIds.size > 0 ? `Generate (${selectedFlowIds.size})` : 'Generate Selected'}
+          {progress?.mode === 'selected'
+            ? `Generating ${progress.done}/${progress.total}…`
+            : selectedFlowIds.size > 0
+              ? `Generate Tests (${selectedFlowIds.size})`
+              : 'Generate Tests'}
         </Button>
 
         <Button
           variant="primary"
           size="xs"
-          icon={
-            isGenerating && !selectedFlowIds.has(generating!) ? (
-              <Loader2 size={10} className="animate-spin" />
-            ) : (
-              <Wand2 size={10} />
-            )
-          }
+          loading={progress?.mode === 'all'}
+          icon={<Wand2 size={10} />}
           onClick={handleGenerateAll}
           disabled={isGenerating}
-          title="Generate tests for all flows"
+          title="Generate test cases for all flows"
         >
-          Generate All
+          {progress?.mode === 'all'
+            ? `Generating ${progress.done}/${progress.total}…`
+            : 'Generate All Tests'}
         </Button>
 
         <Button
@@ -187,7 +237,7 @@ export function FlowsPanel() {
           disabled={isGenerating}
           title={selectedFlowIds.size > 0 ? `Delete ${selectedFlowIds.size} selected flow${selectedFlowIds.size === 1 ? '' : 's'}` : 'Delete all flows'}
         >
-          {selectedFlowIds.size > 0 ? `Delete (${selectedFlowIds.size})` : 'Delete All'}
+          {selectedFlowIds.size > 0 ? `Delete Flows (${selectedFlowIds.size})` : 'Delete All Flows'}
         </Button>
       </div>
 

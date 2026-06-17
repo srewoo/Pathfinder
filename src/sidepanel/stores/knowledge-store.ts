@@ -14,6 +14,8 @@ interface KnowledgeState {
   progress: CrawlProgress | null;
   error: string | null;
   exportImportError: string | null;
+  /** Set when a crawl just finished — drives the "Continue → Explore" hand-off banner. */
+  justCompleted: { docCount: number; vectorCount: number } | null;
 
   setCrawlUrl: (url: string) => void;
   startCrawl: () => Promise<void>;
@@ -22,6 +24,7 @@ interface KnowledgeState {
   setProgress: (progress: CrawlProgress) => void;
   setCrawlComplete: (docCount: number, vectorCount: number, skippedCount: number) => void;
   setCrawlError: (error: string) => void;
+  dismissCompletion: () => void;
   exportKnowledgeBase: () => Promise<void>;
   importKnowledgeBase: (file: File) => Promise<void>;
 }
@@ -36,13 +39,14 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   progress: null,
   error: null,
   exportImportError: null,
+  justCompleted: null,
 
   setCrawlUrl: (url) => set({ crawlUrl: url }),
 
   startCrawl: async () => {
     const { crawlUrl } = get();
     if (!crawlUrl) return;
-    set({ isCrawling: true, error: null, progress: null });
+    set({ isCrawling: true, error: null, progress: null, justCompleted: null });
     const resp = await sendToBackground<{ success: boolean; error?: string }>({
       type: 'START_CRAWL',
       payload: { url: crawlUrl },
@@ -67,12 +71,14 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
 
   setProgress: (progress) => set({ progress }),
 
-  setCrawlComplete: (_docCount, vectorCount, _skippedCount) => {
-    set({ isCrawling: false, vectorCount });
+  setCrawlComplete: (docCount, vectorCount, _skippedCount) => {
+    set({ isCrawling: false, vectorCount, justCompleted: { docCount, vectorCount } });
     get().loadDocuments();
   },
 
   setCrawlError: (error) => set({ isCrawling: false, error }),
+
+  dismissCompletion: () => set({ justCompleted: null }),
 
   exportKnowledgeBase: async () => {
     set({ isExporting: true, exportImportError: null });
