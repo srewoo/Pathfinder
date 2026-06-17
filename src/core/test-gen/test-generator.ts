@@ -114,7 +114,9 @@ export async function generateTestsForFlow(
           ),
         },
       ],
-      { temperature: personality.temperature, jsonMode: true }
+      // Generation emits multiple full test cases (steps + data) as JSON — give
+      // it a large budget so reasoning models don't exhaust it before output.
+      { temperature: personality.temperature, jsonMode: true, maxTokens: 8192 }
     );
   } catch (err) {
     throw new Error(`Test generation failed: ${err instanceof Error ? err.message : String(err)}`);

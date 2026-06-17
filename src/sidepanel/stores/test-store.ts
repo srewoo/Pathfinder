@@ -45,6 +45,8 @@ interface TestState {
   loadAll: () => Promise<void>;
   addUserTest: (title: string, description: string, options?: { type?: 'positive' | 'negative' | 'edge'; steps?: string[]; startUrl?: string; executionPresetId?: string }) => Promise<void>;
   deleteTestCase: (id: string) => Promise<void>;
+  /** Delete the given test cases (defaults to the current selection). */
+  deleteTests: (ids?: string[]) => Promise<void>;
   generateTestsForFlow: (flowId: string) => Promise<void>;
   regenerateTestCase: (testCaseId: string, additionalContext: string) => Promise<void>;
   importTests: (tests: unknown[], options?: { runAfterImport?: boolean }) => Promise<void>;
@@ -149,6 +151,23 @@ export const useTestStore = create<TestState>((set, get) => ({
       results: state.results.filter((result) => result.testCaseId !== id),
       runningTestIds: state.runningTestIds.filter((runningId) => runningId !== id),
       selectedTestIds: state.selectedTestIds.filter((selectedId) => selectedId !== id),
+    }));
+  },
+
+  deleteTests: async (ids) => {
+    const idsToDelete = ids ?? get().selectedTestIds;
+    if (idsToDelete.length === 0) return;
+    const idSet = new Set(idsToDelete);
+    // Never delete a test that's mid-run.
+    const running = new Set(get().runningTestIds);
+    const deletable = [...idSet].filter((id) => !running.has(id));
+    if (deletable.length === 0) return;
+    const deletedSet = new Set(deletable);
+    await Promise.all(deletable.map((id) => testCaseDB.delete(id)));
+    set((state) => ({
+      testCases: state.testCases.filter((tc) => !deletedSet.has(tc.id)),
+      results: state.results.filter((result) => !deletedSet.has(result.testCaseId)),
+      selectedTestIds: state.selectedTestIds.filter((selectedId) => !deletedSet.has(selectedId)),
     }));
   },
 

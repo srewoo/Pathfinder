@@ -2,29 +2,52 @@ import type { InteractiveElement, FormField } from '../storage/schemas';
 
 import { walkDOM } from '../utils/dom-walker';
 
+const INTERACTIVE_SELECTOR = [
+  'button:not([disabled])',
+  'a[href]',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[role="button"]:not([disabled])',
+  '[role="link"]',
+  '[role="menuitem"]',
+  '[role="tab"]',
+  '[role="checkbox"]',
+  '[role="radio"]',
+  '[role="switch"]',
+  '[tabindex]:not([tabindex="-1"])',
+  '[role="combobox"]',
+  '[role="listbox"]',
+  '[role="slider"]',
+  '[contenteditable="true"]',
+].join(',');
+
+/**
+ * Heuristic for "div-based buttons" — elements that act clickable but carry no
+ * semantic role/tag (e.g. `<div onclick>` or a `cursor:pointer` widget). Bounded
+ * to leaf-ish containers with short text so it doesn't capture layout wrappers.
+ * Captured elements are tagged with role="button" so they enter the click set.
+ */
+export function isPseudoClickable(el: Element): boolean {
+  const tag = el.tagName.toLowerCase();
+  if (tag !== 'div' && tag !== 'span' && tag !== 'li' && tag !== 'td') return false;
+  // Skip containers — real clickable widgets are leaf-ish.
+  if (el.childElementCount > 2) return false;
+  const text = el.textContent?.trim() ?? '';
+  if (text.length < 1 || text.length > 60) return false;
+  // Cheap signal first.
+  if (el.hasAttribute('onclick')) return true;
+  let cursor = '';
+  try { cursor = getComputedStyle(el as HTMLElement).cursor; } catch { /* detached */ }
+  if (cursor !== 'pointer') return false;
+  // Don't capture wrappers around a real interactive element.
+  try { if (el.querySelector(INTERACTIVE_SELECTOR)) return false; } catch { /* ignore */ }
+  return true;
+}
+
 export function detectInteractiveElements(): InteractiveElement[] {
   const elements: InteractiveElement[] = [];
   const seen = new Set<string>();
-  
-  const INTERACTIVE_SELECTOR = [
-    'button:not([disabled])',
-    'a[href]',
-    'input:not([disabled]):not([type="hidden"])',
-    'select:not([disabled])',
-    'textarea:not([disabled])',
-    '[role="button"]:not([disabled])',
-    '[role="link"]',
-    '[role="menuitem"]',
-    '[role="tab"]',
-    '[role="checkbox"]',
-    '[role="radio"]',
-    '[role="switch"]',
-    '[tabindex]:not([tabindex="-1"])',
-    '[role="combobox"]',
-    '[role="listbox"]',
-    '[role="slider"]',
-    '[contenteditable="true"]',
-  ].join(',');
 
   // Cap raised from 300 → 1500 so dashboards/grids with many widgets get
   // captured. Walker is iterative and de-duped; cost stays linear.
@@ -33,10 +56,12 @@ export function detectInteractiveElements(): InteractiveElement[] {
   walkDOM(document.body, (el) => {
     if (elements.length >= ELEMENT_CAP) return false;
 
-    // Skip matching check for elements inside shadow roots — matches() works differently
+    // Match either a semantic interactive element OR a div-based clickable widget.
+    let pseudoClickable = false;
     try {
       if (!el.matches || !el.matches(INTERACTIVE_SELECTOR)) {
-        return true; // continue to children
+        if (!isPseudoClickable(el)) return true; // continue to children
+        pseudoClickable = true;
       }
     } catch {
       return true; // matches() can throw on detached elements
@@ -75,7 +100,9 @@ export function detectInteractiveElements(): InteractiveElement[] {
         type: (el as HTMLInputElement).type ?? undefined,
         text: el.textContent?.trim().slice(0, 100) ?? undefined,
         ariaLabel: el.getAttribute('aria-label') ?? undefined,
-        role: el.getAttribute('role') ?? undefined,
+        // Synthesise role="button" for div-based clickables so they're treated
+        // as clickable targets downstream.
+        role: el.getAttribute('role') ?? (pseudoClickable ? 'button' : undefined),
         classes: stableClasses.length > 0 ? stableClasses : undefined,
         testId: testId || undefined,
         disabled: isDisabled || undefined,

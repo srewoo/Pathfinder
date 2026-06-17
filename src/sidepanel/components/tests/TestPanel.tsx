@@ -80,6 +80,7 @@ export function TestPanel() {
         onSelectAll={() => store.setSelectedTestIds(store.testCases.map((testCase) => testCase.id))}
         onSelectFailed={() => store.setSelectedTestIds(failedTestIds)}
         onClearSelection={store.clearSelectedTests}
+        onDeleteSelected={() => store.deleteTests()}
       />
     </div>
   );

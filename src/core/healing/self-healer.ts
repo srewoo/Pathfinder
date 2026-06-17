@@ -48,7 +48,14 @@ export async function healStep(
   step: ExecutionStep,
   error: string,
   tabId: number,
-  aiClient: AIClientInterface
+  aiClient: AIClientInterface,
+  /**
+   * Runner used to validate candidate selectors. Defaults to the synthetic
+   * content-script runner, but the executor passes its ACTIVE runner (CDP
+   * trusted events when a CDP session is live) so healing validates selectors
+   * under the same event model the test actually uses.
+   */
+  stepRunner: typeof runStep = runStep
 ): Promise<HealingResult> {
   const originalSelector = step.selector ?? '';
 
@@ -57,7 +64,7 @@ export async function healStep(
   const cachedHeal = getHealedSelector(originalSelector);
   if (cachedHeal) {
     const cachedStep = { ...step, selector: cachedHeal };
-    const cachedResult = await runStep(cachedStep, tabId);
+    const cachedResult = await stepRunner(cachedStep, tabId);
     if (cachedResult.status === 'passed') {
       log.info(`Healed via registry cache: ${cachedHeal}`);
       return makeResult(true, cachedStep, step.order, originalSelector, 'similarity', cachedHeal);
@@ -74,7 +81,7 @@ export async function healStep(
 
   for (const selector of similarSelectors.slice(0, MAX_CANDIDATES_PER_STRATEGY)) {
     const healedStep = { ...step, selector };
-    const result = await runStep(healedStep, tabId);
+    const result = await stepRunner(healedStep, tabId);
 
     if (result.status === 'passed') {
       log.info(`Healed via DOM similarity: ${selector}`);
@@ -90,7 +97,7 @@ export async function healStep(
 
   for (const selector of attrSelectors.slice(0, MAX_CANDIDATES_PER_STRATEGY)) {
     const healedStep = { ...step, selector };
-    const result = await runStep(healedStep, tabId);
+    const result = await stepRunner(healedStep, tabId);
 
     if (result.status === 'passed') {
       log.info(`Healed via attribute selector: ${selector}`);
@@ -113,7 +120,7 @@ export async function healStep(
 
   for (const selector of aiSelectors.slice(0, MAX_CANDIDATES_PER_STRATEGY)) {
     const healedStep = { ...step, selector };
-    const result = await runStep(healedStep, tabId);
+    const result = await stepRunner(healedStep, tabId);
 
     if (result.status === 'passed') {
       log.info(`Healed via AI: ${selector}`);

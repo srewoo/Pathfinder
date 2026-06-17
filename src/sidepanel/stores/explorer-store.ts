@@ -13,8 +13,23 @@ interface ExplorerState {
   graph: InteractionGraph | null;
   flows: Flow[];
   explorationDepth: number;
-  /** When true, exploration is scoped to the current tab URL only — no link following. */
+  /** "Start from this page" — begin at the current tab and crawl outward to depth. */
   singlePageOnly: boolean;
+  /**
+   * Strict single page — scan ONLY the current tab URL and its components
+   * (tabs/modals), with no link following at all (depth 0, 1 page).
+   */
+  singlePageStrict: boolean;
+  /**
+   * When true, the explorer SUBMITS forms with test data (mutates the live app).
+   * Default false — read-only exploration. Opt in only for sandbox accounts.
+   */
+  submitForms: boolean;
+  /**
+   * When true, re-visit pages already in the map (refreshing changed ones) and
+   * prune pages no longer reachable. Default false — incremental (only add new).
+   */
+  freshRescan: boolean;
   isExploring: boolean;
   /** URL of the page currently being re-explored, or null. */
   reexploringUrl: string | null;
@@ -28,6 +43,9 @@ interface ExplorerState {
 
   setDepth: (depth: number) => void;
   setSinglePageOnly: (value: boolean) => void;
+  setSinglePageStrict: (value: boolean) => void;
+  setSubmitForms: (value: boolean) => void;
+  setFreshRescan: (value: boolean) => void;
   startExploration: () => Promise<void>;
   stopExploration: () => Promise<void>;
   reexplorePage: (url: string) => Promise<void>;
@@ -47,8 +65,11 @@ interface ExplorerState {
 export const useExplorerStore = create<ExplorerState>((set, get) => ({
   graph: null,
   flows: [],
-  explorationDepth: 3,
+  explorationDepth: 5,
   singlePageOnly: false,
+  singlePageStrict: false,
+  submitForms: false,
+  freshRescan: false,
   isExploring: false,
   reexploringUrl: null,
   isLearningFlows: false,
@@ -61,14 +82,21 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
 
   setDepth: (explorationDepth) => set({ explorationDepth }),
 
-  setSinglePageOnly: (singlePageOnly) => set({ singlePageOnly }),
+  // The two scoping modes are mutually exclusive.
+  setSinglePageOnly: (singlePageOnly) => set({ singlePageOnly, singlePageStrict: singlePageOnly ? false : get().singlePageStrict }),
+
+  setSinglePageStrict: (singlePageStrict) => set({ singlePageStrict, singlePageOnly: singlePageStrict ? false : get().singlePageOnly }),
+
+  setSubmitForms: (submitForms) => set({ submitForms }),
+
+  setFreshRescan: (freshRescan) => set({ freshRescan }),
 
   startExploration: async () => {
-    const { explorationDepth, singlePageOnly } = get();
+    const { explorationDepth, singlePageOnly, singlePageStrict, submitForms, freshRescan } = get();
     set({ isExploring: true, error: null, progress: null });
     const resp = await sendToBackground({
       type: 'START_EXPLORATION',
-      payload: { depth: explorationDepth, singlePageOnly },
+      payload: { depth: explorationDepth, singlePageOnly, singlePageStrict, submitForms, freshRescan },
     }) as { success: boolean; error?: string } | null;
     if (!resp?.success) {
       set({ isExploring: false, error: resp?.error ?? 'Failed to start exploration' });

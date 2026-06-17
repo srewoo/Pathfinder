@@ -16,6 +16,7 @@ import { generatePostStepAssertion, assertionToStep } from './assertion-generato
 import { ensureAuthenticated, recoverSessionIfExpired } from './auth-manager';
 import { executeConditionalStep, executeLoopStep, executeCaptureValue, resolveStepVariables } from './step-extensions';
 import { loadGraph as loadGraphForTimeout } from '../explorer/interaction-graph';
+import { configureBudget, BudgetExceededError } from '../ai/budget-guard';
 
 const log = createLogger('test-executor');
 
@@ -51,6 +52,18 @@ export interface ExecutionOptions {
   useAIAssertions?: boolean;
   /** AbortSignal to stop the test run early. */
   signal?: AbortSignal;
+  /**
+   * USD spend cap for the whole run. When set, AI calls (planning, healing,
+   * assertions) refuse once the cap is hit, stopping a runaway suite instead
+   * of silently accumulating cost. null/undefined disables enforcement.
+   */
+  budgetUsd?: number | null;
+  /**
+   * Hard per-test wall-clock ceiling in ms. A test exceeding it is aborted and
+   * marked failed, preventing a single hung test from stalling the whole run.
+   * Default 300_000 (5 min).
+   */
+  maxTestDurationMs?: number;
   /**
    * When set, replace the explored app's origin with this target origin at
    * runtime (e.g. switch integration → staging). Rewrites testCase.startUrl
@@ -94,7 +107,9 @@ export async function executeTest(
 
     const result = await attemptExecution(testCase, aiClient, tabId, runId, startedAt, { ...options, cdpActive }, freshPlan, timeoutMultiplier);
 
-    if (result.status === 'passed' || attempt === MAX_TEST_RETRIES) {
+    // Stop on success, after the last attempt, or once aborted (per-test ceiling
+    // / user stop) — don't burn further attempts on a test we've abandoned.
+    if (result.status === 'passed' || attempt === MAX_TEST_RETRIES || options.signal?.aborted) {
       // Attach HAR entries to the result for network-level debugging
       if (cdpActive) {
         const harEntries = await teardownCDPSession(tabId);
@@ -139,6 +154,14 @@ export async function executeAllTests(
   const { concurrency = 1 } = options;
   const runId = generateRunId();
 
+  // Apply the per-run spend cap (no-op when budgetUsd is null/undefined).
+  if (options.budgetUsd !== undefined) {
+    configureBudget({
+      limitUsd: options.budgetUsd,
+      onExceeded: (info) => log.warn(`AI budget cap hit: $${info.spentUsd.toFixed(4)} of $${info.limitUsd?.toFixed(2)} — stopping run.`),
+    });
+  }
+
   const allTests = await testCaseDB.getAll();
   const toRun = selectTestsToRun(allTests, options);
 
@@ -155,6 +178,36 @@ export async function executeAllTests(
   }
 
   return runParallel(toRun, aiClient, { ...options, runId }, effectiveConcurrency);
+}
+
+// ---------------------------------------------------------------------------
+// Run one test with a hard wall-clock ceiling. Combines the run-level signal
+// with a per-test timeout so a single hung test can't stall the whole run.
+// ---------------------------------------------------------------------------
+async function executeTestBounded(
+  testCase: TestCase,
+  aiClient: AIClientInterface,
+  tabId: number,
+  options: ExecutionOptions,
+): Promise<TestResult> {
+  const ceiling = options.maxTestDurationMs ?? 300_000;
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) controller.abort();
+    else options.signal.addEventListener('abort', onParentAbort, { once: true });
+  }
+  const timer = setTimeout(() => {
+    log.warn(`Test "${testCase.title}" exceeded ${ceiling}ms ceiling — aborting.`);
+    controller.abort();
+  }, ceiling);
+
+  try {
+    return await executeTest(testCase, aiClient, tabId, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onParentAbort);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,8 +235,16 @@ async function runSequential(
       try { await navigateTab(tabId, resetUrl); } catch { /* non-fatal */ }
     }
 
-    const result = await executeTest(tc, aiClient, tabId, options);
-    results.push(result);
+    try {
+      const result = await executeTestBounded(tc, aiClient, tabId, options);
+      results.push(result);
+    } catch (err) {
+      if (err instanceof BudgetExceededError) {
+        log.warn(`Budget cap reached — stopping run. Remaining ${tests.length - i - 1} test(s) not executed.`);
+        break;
+      }
+      throw err;
+    }
   }
 
   log.info(`Run complete: ${results.filter((r) => r.status === 'passed').length}/${results.length} passed`);
@@ -225,15 +286,18 @@ async function runParallel(
 
   log.info(`Parallel run: ${tests.length} tests across ${tabIds.length} tabs`);
 
-  // Shared work queue — each worker pops from the front
-  const queue = [...tests];
-  const results: TestResult[] = [];
+  // Shared work queue of (index, test) so results map back to input order
+  // regardless of which worker finishes first.
+  const queue: Array<{ index: number; tc: TestCase }> = tests.map((tc, index) => ({ index, tc }));
+  const resultsByIndex = new Array<TestResult | undefined>(tests.length);
+  let budgetStopped = false;
 
   const workers = tabIds.map(async (tabId) => {
     while (true) {
-      if (options.signal?.aborted) break;
-      const tc = queue.shift();
-      if (!tc) break;
+      if (options.signal?.aborted || budgetStopped) break;
+      const item = queue.shift();
+      if (!item) break;
+      const { index, tc } = item;
 
       const rawResetUrl = tc.startUrl ?? suiteStartUrl;
       const resetUrl = (options.targetOrigin && rawResetUrl && tc.startUrl)
@@ -243,12 +307,21 @@ async function runParallel(
         try { await navigateTab(tabId, resetUrl); } catch { /* non-fatal */ }
       }
 
-      const result = await executeTest(tc, aiClient, tabId, options);
-      results.push(result);
+      try {
+        resultsByIndex[index] = await executeTestBounded(tc, aiClient, tabId, options);
+      } catch (err) {
+        if (err instanceof BudgetExceededError) {
+          log.warn('Budget cap reached — stopping parallel run.');
+          budgetStopped = true;
+          break;
+        }
+        throw err;
+      }
     }
   });
 
   await Promise.all(workers);
+  const results: TestResult[] = resultsByIndex.filter((r): r is TestResult => r !== undefined);
 
   // Clean up extra tabs
   for (const tabId of extraTabIds) {
@@ -443,10 +516,13 @@ async function attemptExecution(
       const failScreenshot = await captureTab(tabId).catch(() => undefined);
 
       log.info(`Step ${step.order} failed — attempting healing for: ${step.selector}`);
-      const healed = await healStep(step, result.error ?? '', tabId, aiClient);
+      // Heal + retry using the SAME runner the test is using (CDP trusted events
+      // when a CDP session is live), so validation matches real execution.
+      const activeRunner = options.cdpActive ? runStepWithCDP : runStep;
+      const healed = await healStep(step, result.error ?? '', tabId, aiClient, activeRunner);
 
       if (healed.success && healed.healedStep) {
-        const retriedResult = await runStep(healed.healedStep, tabId);
+        const retriedResult = await activeRunner(healed.healedStep, tabId);
         result = { ...retriedResult, healingAttempt: healed.attempt };
         if (retriedResult.status === 'passed') {
           log.info(`Healing succeeded via ${healed.attempt.method}: ${healed.attempt.healedSelector}`);
@@ -512,7 +588,10 @@ async function attemptExecution(
     }
   }
 
-  const finalStatus = aborted ? 'failed' : 'passed';
+  // A signal abort (per-test ceiling or user stop) mid-run is a failure, not a
+  // pass-with-skipped-steps.
+  const signalAborted = options.signal?.aborted ?? false;
+  const finalStatus = (aborted || signalAborted) ? 'failed' : 'passed';
   const [screenshot, snapshot] = finalStatus === 'failed'
     ? await Promise.all([
         // Prefer CDP full-page screenshot when available
@@ -535,7 +614,9 @@ async function attemptExecution(
     steps: stepResults,
     screenshot,
     domSnapshot: snapshot?.domCompressed,
-    errorMessage: aborted ? stepResults.findLast((r) => r.error)?.error : undefined,
+    errorMessage: aborted
+      ? stepResults.findLast((r) => r.error)?.error
+      : (signalAborted ? 'Test aborted (per-test time ceiling or run stopped)' : undefined),
     healingAttempts: stepResults.filter((r) => r.healingAttempt).map((r) => r.healingAttempt!),
     runId,
   };

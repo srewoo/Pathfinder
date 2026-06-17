@@ -55,9 +55,12 @@ No backend. No cloud infrastructure. No test scripts. Just a Chrome extension an
 - Autonomous breadth-first exploration of any web application
 - Discovers pages, forms, modals, navigation paths, and interactive elements
 - Captures form field metadata: types, constraints (required, minLength, maxLength, pattern), options, and CSS selectors
-- Records form submission outcomes — success messages, error messages, validation states
+- **Read-only by default** — maps forms and fields without submitting. Form/modal submission (which mutates the live app with test data) is opt-in via `submitForms`; use only against a sandbox account.
+- Records form submission outcomes — success messages, error messages, validation states (when `submitForms` is enabled)
 - Builds an **Interaction Graph** (pages as nodes, navigation as edges) used by all downstream features
-- Configurable depth (1-5 levels), max pages, and per-page exploration budget (90s)
+- Runs in a **dedicated background tab** so your active tab stays usable
+- On a mid-run auth-wall, attempts session recovery via an execution preset instead of aborting
+- Configurable depth (1-5 levels), max pages, and per-page exploration budget (default 90s, configurable)
 
 ### Flow Learning
 - AI-powered extraction of user workflows from exploration data + documentation

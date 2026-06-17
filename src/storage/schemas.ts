@@ -75,6 +75,12 @@ export interface CrawledDocument {
   chunkCount: number;
   /** Hash of extracted text content — used for change detection on re-crawl. */
   contentHash: string;
+  /** HTTP ETag from the last fetch — sent as If-None-Match to get a 304 on re-crawl. */
+  etag?: string;
+  /** HTTP Last-Modified from the last fetch — sent as If-Modified-Since on re-crawl. */
+  lastModified?: string;
+  /** Same-origin outlinks discovered last crawl — keeps BFS complete when a page returns 304 (no body to re-parse). */
+  links?: string[];
 }
 
 /**
@@ -232,6 +238,12 @@ export interface PageNode {
   visitedAt: string;
   elementCount: number;
   /**
+   * Fingerprint of the page's interactive structure (element selectors + form
+   * field signatures). On a fresh re-scan, an unchanged fingerprint lets the
+   * explorer skip the expensive click/modal/form interaction for that page.
+   */
+  structureHash?: string;
+  /**
    * Normalized URL pattern with dynamic segments replaced by `:param`.
    * e.g. "/assets/all-assets-list/asset/:param" — signals this node
    * represents one instance of a parameterized route template.
@@ -263,6 +275,13 @@ export interface PageNode {
   loadTimeMs?: number;
   /** Multi-step wizard/stepper form detected on this page */
   wizardSteps?: WizardStep[];
+  /**
+   * In-page views/tabs discovered on this page — clicks that change only the
+   * URL query/hash (e.g. `?aiFeatureTab=overview`) rather than navigating to a
+   * new page. These represent feature tabs/panels and are surfaced to flow
+   * learning so it can generate a flow per feature.
+   */
+  tabs?: Array<{ label: string; url: string }>;
 }
 
 export interface PageEdge {

@@ -17,6 +17,14 @@ export class OpenAIProvider implements AIClientInterface {
   private readonly baseUrl = 'https://api.openai.com/v1';
   /** Tracks whether this model needs max_tokens (legacy) vs max_completion_tokens (new). */
   private useMaxCompletionTokens = true;
+  /** Whether to send reasoning_effort (stripped if the model rejects it). */
+  private useReasoningEffort = true;
+  /**
+   * Reasoning models bill hidden reasoning tokens against the completion budget,
+   * so a small max_tokens (e.g. 200/512) yields EMPTY content — the reasoning
+   * alone exhausts it. Floor the budget for these models.
+   */
+  private static readonly REASONING_MIN_BUDGET = 16_000;
 
   constructor(
     private readonly apiKey: string,
@@ -26,97 +34,119 @@ export class OpenAIProvider implements AIClientInterface {
 
   async chat(messages: Message[], options: ChatOptions = {}): Promise<string> {
     const { temperature = 0.3, maxTokens = 4096, jsonMode = false, timeoutMs = 60_000 } = options;
+    const reasoning = isReasoningModel(this.model);
 
     const formattedMessages = messages.map((m) => ({ role: m.role, content: formatContentOpenAI(m.content) }));
 
-    const body: Record<string, unknown> = {
-      model: this.model,
-      messages: formattedMessages,
-    };
+    // Run a single completion at the given token budget.
+    const runCompletion = async (tokenBudget: number) => {
+      const body: Record<string, unknown> = {
+        model: this.model,
+        messages: formattedMessages,
+      };
 
-    // Reasoning / "thinking" models (o1, o3, gpt-5.x) only accept the default
-    // temperature (1.0). Sending a custom value yields a 400. Other models
-    // accept the configured temperature normally.
-    if (!isReasoningModel(this.model)) {
-      body['temperature'] = temperature;
-    }
+      // Reasoning / "thinking" models (o1, o3, gpt-5.x) only accept the default
+      // temperature (1.0). Sending a custom value yields a 400.
+      if (!reasoning) {
+        body['temperature'] = temperature;
+      } else if (this.useReasoningEffort) {
+        // Keep reasoning token spend low so it doesn't consume the whole budget
+        // (the cause of empty completions). Stripped on 400 if unsupported.
+        body['reasoning_effort'] = 'low';
+      }
 
-    // Newer models (o1, o3, gpt-5.x) require max_completion_tokens;
-    // older models (gpt-4o, gpt-4-turbo) use max_tokens.
-    // Try the current mode and auto-switch on 400 error.
-    if (this.useMaxCompletionTokens) {
-      body['max_completion_tokens'] = maxTokens;
-    } else {
-      body['max_tokens'] = maxTokens;
-    }
+      // Newer models require max_completion_tokens; older use max_tokens.
+      if (this.useMaxCompletionTokens) {
+        body['max_completion_tokens'] = tokenBudget;
+      } else {
+        body['max_tokens'] = tokenBudget;
+      }
 
-    if (jsonMode) {
-      body['response_format'] = { type: 'json_object' };
-    }
+      if (jsonMode) {
+        body['response_format'] = { type: 'json_object' };
+      }
 
-    let response = await this.fetchChat(body, timeoutMs);
+      let response = await this.fetchChat(body, timeoutMs);
 
-    // Auto-detect: if the model rejects the token parameter, switch and retry once
-    if (response.status === 400) {
-      const errorText = await response.text();
-      if (errorText.includes('max_tokens') && errorText.includes('max_completion_tokens')) {
-        log.info(`Model ${this.model} requires ${this.useMaxCompletionTokens ? 'max_tokens' : 'max_completion_tokens'}, switching`);
-        this.useMaxCompletionTokens = !this.useMaxCompletionTokens;
-        delete body['max_tokens'];
-        delete body['max_completion_tokens'];
-        if (this.useMaxCompletionTokens) {
-          body['max_completion_tokens'] = maxTokens;
+      // Auto-detect rejected params: switch token field / strip temperature /
+      // strip reasoning_effort, then retry the same request once per param.
+      while (response.status === 400) {
+        const errorText = await response.text();
+        if (errorText.includes('max_tokens') && errorText.includes('max_completion_tokens')) {
+          log.info(`Model ${this.model} requires ${this.useMaxCompletionTokens ? 'max_tokens' : 'max_completion_tokens'}, switching`);
+          this.useMaxCompletionTokens = !this.useMaxCompletionTokens;
+          delete body['max_tokens'];
+          delete body['max_completion_tokens'];
+          body[this.useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens'] = tokenBudget;
+        } else if (errorText.includes("'temperature'") || errorText.toLowerCase().includes('temperature is not supported')) {
+          log.info(`Model ${this.model} rejected temperature; retrying without it`);
+          delete body['temperature'];
+        } else if (errorText.includes('reasoning_effort')) {
+          log.info(`Model ${this.model} rejected reasoning_effort; retrying without it`);
+          this.useReasoningEffort = false;
+          delete body['reasoning_effort'];
         } else {
-          body['max_tokens'] = maxTokens;
+          throw new Error(`OpenAI API error 400: ${errorText}`);
         }
         response = await this.fetchChat(body, timeoutMs);
-      } else if (errorText.includes("'temperature'") || errorText.toLowerCase().includes('temperature is not supported')) {
-        // Some reasoning models reject any temperature param entirely. Strip and retry.
-        log.info(`Model ${this.model} rejected temperature; retrying without it`);
-        delete body['temperature'];
-        response = await this.fetchChat(body, timeoutMs);
-      } else {
-        throw new Error(`OpenAI API error 400: ${errorText}`);
+      }
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`OpenAI API error ${response.status}: ${error}`);
+      }
+
+      const data = await response.json() as {
+        choices: Array<{
+          message: { content: string | null; refusal?: string | null };
+          finish_reason: string;
+        }>;
+        usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      };
+
+      const choice = data.choices?.[0];
+      if (!choice) {
+        log.error('OpenAI returned no choices', { data });
+        throw new Error('OpenAI returned no choices in response');
+      }
+      if (choice.message?.refusal) {
+        throw new Error(`OpenAI refused the request: ${choice.message.refusal}`);
+      }
+
+      return { content: choice.message?.content ?? null, finishReason: choice.finish_reason, usage: data.usage };
+    };
+
+    // Reasoning models bill reasoning tokens against the budget, so floor it —
+    // a 200/512-token request would otherwise return empty content every time.
+    const firstBudget = reasoning ? Math.max(maxTokens, OpenAIProvider.REASONING_MIN_BUDGET) : maxTokens;
+    let result = await runCompletion(firstBudget);
+
+    // Empty content + finish_reason=length means the budget was exhausted before
+    // any visible output. Retry once with a much larger budget.
+    if (!result.content && result.finishReason === 'length') {
+      const ceiling = reasoning ? 64_000 : 16_384;
+      const bumped = Math.min(Math.max(firstBudget * 2, 32_000), ceiling);
+      if (bumped > firstBudget) {
+        log.warn(`OpenAI returned empty content (finish_reason=length) at ${firstBudget} tokens — retrying with ${bumped}.`);
+        result = await runCompletion(bumped);
       }
     }
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`OpenAI API error ${response.status}: ${error}`);
-    }
-
-    const data = await response.json() as {
-      choices: Array<{
-        message: { content: string | null; refusal?: string | null };
-        finish_reason: string;
-      }>;
-      usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-    };
-
-    const choice = data.choices?.[0];
-    if (!choice) {
-      log.error('OpenAI returned no choices', { data });
-      throw new Error('OpenAI returned no choices in response');
-    }
-
-    // Handle refusals (content moderation)
-    if (choice.message?.refusal) {
-      throw new Error(`OpenAI refused the request: ${choice.message.refusal}`);
-    }
-
-    // Handle truncation — the model hit the token limit before finishing
-    if (choice.finish_reason === 'length') {
+    if (result.finishReason === 'length' && result.content) {
       log.warn('OpenAI response truncated (finish_reason=length), returning partial content');
     }
 
-    const content = choice.message?.content;
-    if (!content) {
-      log.error('OpenAI returned empty content', { finish_reason: choice.finish_reason, model: this.model, usage: data.usage });
-      throw new Error(`OpenAI returned empty content (finish_reason=${choice.finish_reason}). Model may need a higher max_tokens or the prompt may be too large.`);
+    if (!result.content) {
+      const usage = result.usage ? ` (completion_tokens=${result.usage.completion_tokens}, prompt_tokens=${result.usage.prompt_tokens})` : '';
+      log.error(`OpenAI returned empty content — model=${this.model} finish_reason=${result.finishReason}${usage}`);
+      throw new Error(
+        `OpenAI returned empty content (finish_reason=${result.finishReason}) from ${this.model}${usage}. ` +
+        `If this is a reasoning model, the prompt may be too large for its reasoning budget — try a smaller scope or a non-reasoning model (e.g. gpt-4o).`
+      );
     }
 
-    log.debug('Chat completed', { model: this.model, usage: data.usage });
-    return content;
+    log.debug('Chat completed', { model: this.model, usage: result.usage });
+    return result.content;
   }
 
   private fetchChat(body: Record<string, unknown>, timeoutMs: number): Promise<Response> {

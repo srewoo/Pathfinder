@@ -96,6 +96,17 @@ export function removeNode(graph: InteractionGraph, url: string): void {
   graph.updatedAt = new Date().toISOString();
 }
 
+/**
+ * Remove nodes whose URL is NOT in `keepUrls` (pages not re-seen during a fresh
+ * re-scan — i.e. deleted/unreachable). Returns the removed URLs. Edges touching
+ * removed nodes are dropped too. Caller should snapshot first for reversibility.
+ */
+export function pruneStaleNodes(graph: InteractionGraph, keepUrls: Set<string>): string[] {
+  const stale = graph.nodes.filter((n) => !keepUrls.has(n.url)).map((n) => n.url);
+  for (const url of stale) removeNode(graph, url);
+  return stale;
+}
+
 /** Get a node by URL in O(1). */
 export function getNode(url: string): PageNode | undefined {
   return nodeIndex.get(url);
@@ -289,7 +300,8 @@ export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
     (n.formFields && n.formFields.length > 0) ||
     (n.modals && n.modals.length > 0) ||
     (n.formOutcomes && n.formOutcomes.length > 0) ||
-    (n.dataTables && n.dataTables.length > 0);
+    (n.dataTables && n.dataTables.length > 0) ||
+    (n.tabs && n.tabs.length > 0);
 
   const actionable = graph.nodes.filter(isActionable);
   const navOnly = graph.nodes.filter((n) => !isActionable(n));
@@ -301,6 +313,10 @@ export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
       lines.push(`\n#### ${node.title || node.url}${pageTypeTag} [${node.url}]`);
       if (node.breadcrumb) lines.push(`  Breadcrumb: ${node.breadcrumb}`);
       if (node.headings && node.headings.length > 0) lines.push(`  Headings: ${node.headings.join(' | ')}`);
+      if (node.tabs && node.tabs.length > 0) {
+        lines.push(`  In-page feature tabs/views (${node.tabs.length} — generate a flow that opens and verifies each):`);
+        for (const t of node.tabs) lines.push(`    · "${t.label}" → ${t.url}`);
+      }
 
       if (node.dataTables && node.dataTables.length > 0) {
         lines.push(`  Data tables/lists (${node.dataTables.length}):`);

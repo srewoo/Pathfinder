@@ -1,14 +1,16 @@
 import React from 'react';
-import { Bug, Settings, Sun, Moon } from 'lucide-react';
+import { Bug, Settings, Sun, Moon, HelpCircle } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settings-store';
 
 interface HeaderProps {
   onSettingsClick: () => void;
+  /** Replay the first-run guided tour. */
+  onHelpClick?: () => void;
 }
 
 const providerLabel = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google' };
 
-export function Header({ onSettingsClick }: HeaderProps) {
+export function Header({ onSettingsClick, onHelpClick }: HeaderProps) {
   const { provider, apiKey, theme, setTheme } = useSettingsStore();
   const hasKey = Boolean(apiKey);
   const isLight = theme === 'light';
@@ -46,6 +48,17 @@ export function Header({ onSettingsClick }: HeaderProps) {
         >
           {isLight ? <Moon size={13} /> : <Sun size={13} />}
         </button>
+
+        {onHelpClick && (
+          <button
+            onClick={onHelpClick}
+            className="p-1 rounded-md text-text-muted hover:text-text-primary hover:bg-surface-3 transition-colors"
+            title="Replay getting-started tour"
+            aria-label="Replay getting-started tour"
+          >
+            <HelpCircle size={13} />
+          </button>
+        )}
 
         <button
           onClick={onSettingsClick}

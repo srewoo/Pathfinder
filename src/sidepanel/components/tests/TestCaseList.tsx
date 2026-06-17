@@ -21,6 +21,7 @@ interface TestCaseListProps {
   onSelectAll: () => void;
   onSelectFailed: () => void;
   onClearSelection: () => void;
+  onDeleteSelected: () => void;
 }
 
 export function TestCaseList({
@@ -37,9 +38,11 @@ export function TestCaseList({
   onSelectAll,
   onSelectFailed,
   onClearSelection,
+  onDeleteSelected,
 }: TestCaseListProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [regenerateTarget, setRegenerateTarget] = useState<{id: string, name: string} | null>(null);
+  const [confirmingBulkDelete, setConfirmingBulkDelete] = useState(false);
 
   const toggle = (id: string) =>
     setExpanded((prev) => {
@@ -102,11 +105,38 @@ export function TestCaseList({
               <Button
                 variant="ghost"
                 size="xs"
-                onClick={onClearSelection}
+                onClick={() => { onClearSelection(); setConfirmingBulkDelete(false); }}
                 disabled={selectedTestIds.length === 0}
               >
                 Clear
               </Button>
+              {confirmingBulkDelete ? (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="text-error hover:text-error"
+                    icon={<Trash2 size={10} />}
+                    onClick={() => { onDeleteSelected(); setConfirmingBulkDelete(false); }}
+                  >
+                    Confirm delete {selectedTestIds.length}
+                  </Button>
+                  <Button variant="ghost" size="xs" onClick={() => setConfirmingBulkDelete(false)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="text-error hover:text-error"
+                  icon={<Trash2 size={10} />}
+                  onClick={() => setConfirmingBulkDelete(true)}
+                  disabled={selectedTestIds.length === 0}
+                >
+                  Delete
+                </Button>
+              )}
             </div>
           </div>
           {testCases.map((tc) => {

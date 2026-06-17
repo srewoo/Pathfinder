@@ -47,18 +47,47 @@ vi.mock('../../src/core/executor/action-runner', () => ({
   navigateTab: vi.fn().mockResolvedValue(undefined),
 }));
 
+// Neutralize CDP — these tests exercise the synthetic-runner path. initCDPSession
+// returns false so executeTest uses runStep (mocked above).
+vi.mock('../../src/core/cdp/cdp-action-runner', () => ({
+  initCDPSession: vi.fn().mockResolvedValue(false),
+  teardownCDPSession: vi.fn().mockResolvedValue([]),
+  runStepWithCDP: vi.fn(),
+  getAXContext: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../src/core/cdp/cdp-client', () => ({
+  captureFullPageScreenshot: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../src/core/explorer/interaction-graph', () => ({
+  loadGraph: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('../../src/core/healing/self-healer', () => ({
   healStep: vi.fn(),
+  registerHealedSelector: vi.fn(),
+}));
+
+vi.mock('../../src/core/executor/auth-manager', () => ({
+  ensureAuthenticated: vi.fn().mockResolvedValue({ authenticated: true, method: 'none' }),
+  recoverSessionIfExpired: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock('../../src/utils/screenshot', () => ({
   captureTab: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Mock chrome.tabs.get for getCurrentTabUrl
+// Mock chrome.tabs for getCurrentTabUrl, parallel tab pool, and the module-load
+// onRemoved listener registered by cdp-client.
 const chromeMock = {
   tabs: {
     get: vi.fn().mockResolvedValue({ url: 'https://app.example.com' }),
+    create: vi.fn().mockImplementation(async () => ({ id: Math.floor(Math.random() * 1000) + 10 })),
+    remove: vi.fn().mockResolvedValue(undefined),
+    update: vi.fn().mockResolvedValue(undefined),
+    onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
+    onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
   },
 };
 vi.stubGlobal('chrome', chromeMock);
@@ -68,6 +97,8 @@ import { testCaseDB, testResultDB } from '../../src/storage/indexed-db';
 import { getPageSnapshot } from '../../src/core/explorer/page-scanner';
 import { runStep } from '../../src/core/executor/action-runner';
 import { healStep } from '../../src/core/healing/self-healer';
+import { recoverSessionIfExpired } from '../../src/core/executor/auth-manager';
+import { configureBudget, BudgetExceededError } from '../../src/core/ai/budget-guard';
 import type { TestCase, ExecutionStep, StepResult, HealingAttempt } from '../../src/storage/schemas';
 
 const mockPlanSteps: ExecutionStep[] = [
@@ -134,6 +165,7 @@ describe('executeTest', () => {
   });
 
   it('given step fails when no healing succeeds then result status is failed', async () => {
+    // #login-btn fails on original, quick-retry, AND healed attempts.
     vi.mocked(runStep).mockImplementation(async (step) => {
       if (step.selector === '#login-btn') return makeFailedStep(step);
       return makePassedStep(step);
@@ -156,12 +188,14 @@ describe('executeTest', () => {
     expect(result.status).toBe('failed');
     expect(result.steps.find((s) => s.step.selector === '#login-btn')?.status).toBe('failed');
     expect(result.steps.filter((s) => s.status === 'skipped').length).toBeGreaterThan(0);
-  });
+  }, 20000);
 
   it('given step fails when healing succeeds then result status is passed', async () => {
-    vi.mocked(runStep)
-      .mockImplementationOnce(async (step) => makeFailedStep(step, 'Element not found'))
-      .mockImplementation(async (step) => makePassedStep(step));
+    // Original + quick-retry both fail (still #login-btn); only the HEALED
+    // selector passes — so healing is genuinely exercised.
+    vi.mocked(runStep).mockImplementation(async (step) =>
+      step.selector === '#login-btn' ? makeFailedStep(step, 'Element not found') : makePassedStep(step)
+    );
 
     const healedStep: ExecutionStep = { ...mockPlanSteps[0], selector: 'button.login-btn' };
     const successAttempt: HealingAttempt = {
@@ -303,4 +337,56 @@ describe('executeAllTests', () => {
 
     expect(results).toHaveLength(1);
   });
+});
+
+describe('executeAllTests — run controls (budget, ordering, ceiling)', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await testCaseDB.clear();
+    await testResultDB.clear();
+    configureBudget({ limitUsd: null }); // reset between tests
+    mockAIClient.chat.mockResolvedValue(validAIPlanResponse);
+    vi.mocked(getPageSnapshot).mockResolvedValue({
+      url: 'https://app.example.com', title: 'App', elements: [], domCompressed: '<div/>', capturedAt: new Date().toISOString(),
+    });
+    vi.mocked(runStep).mockImplementation(async (step) => makePassedStep(step));
+    vi.mocked(recoverSessionIfExpired).mockResolvedValue(false);
+  });
+
+  it('given a BudgetExceededError mid-run when executing then the run stops and skips remaining tests', async () => {
+    await testCaseDB.put(makeTestCase('tc-a'));
+    await testCaseDB.put(makeTestCase('tc-b'));
+
+    // First test's first step keeps failing → healing is invoked → budget throws.
+    vi.mocked(runStep).mockImplementation(async (step) =>
+      step.selector === '#login-btn' ? makeFailedStep(step) : makePassedStep(step)
+    );
+    vi.mocked(healStep).mockRejectedValue(new BudgetExceededError(1, 1.5, 10));
+
+    const results = await executeAllTests(mockAIClient as never, { concurrency: 1 });
+
+    // Run aborted before completing both tests.
+    expect(results.length).toBeLessThan(2);
+    expect(healStep).toHaveBeenCalled();
+  });
+
+  it('given concurrent execution when complete then results preserve input order', async () => {
+    await testCaseDB.put(makeTestCase('tc-1'));
+    await testCaseDB.put(makeTestCase('tc-2'));
+    await testCaseDB.put(makeTestCase('tc-3'));
+
+    const results = await executeAllTests(mockAIClient as never, { concurrency: 2 });
+
+    expect(results.map((r) => r.testCaseId)).toEqual(['tc-1', 'tc-2', 'tc-3']);
+  });
+
+  it('given a tiny per-test ceiling when executing then the test is aborted and marked failed', async () => {
+    await testCaseDB.put(makeTestCase('tc-ceil'));
+
+    const results = await executeAllTests(mockAIClient as never, { maxTestDurationMs: 5 });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].status).toBe('failed');
+    expect(results[0].errorMessage).toMatch(/aborted/i);
+  }, 15000);
 });

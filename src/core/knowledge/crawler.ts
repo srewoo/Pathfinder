@@ -80,7 +80,7 @@ interface RobotsRules {
   crawlDelayMs?: number;
 }
 
-function parseRobotsTxt(content: string): RobotsRules {
+export function parseRobotsTxt(content: string): RobotsRules {
   const rules: RobotsRules = { disallowPaths: [] };
   const lines = content.split('\n');
   let inRelevantBlock = false;
@@ -115,7 +115,7 @@ function parseRobotsTxt(content: string): RobotsRules {
   return rules;
 }
 
-function isBlockedByRobots(url: string, rules: RobotsRules): boolean {
+export function isBlockedByRobots(url: string, rules: RobotsRules): boolean {
   if (rules.disallowPaths.length === 0) return false;
   try {
     const path = new URL(url).pathname;
@@ -208,10 +208,13 @@ export async function crawlSite(
 
   const adaptiveConcurrency = new AdaptiveConcurrency(initialConcurrency);
 
+  // `Cookie` is a forbidden header name — the browser strips it from fetch().
+  // Seed the cookies into the cookie jar via chrome.cookies.set instead, then
+  // rely on credentials:'include' so the browser attaches them automatically.
   const extraHeaders: Record<string, string> = { ...(authHeaders ?? {}) };
   if (authCookies && authCookies.length > 0) {
-    extraHeaders['Cookie'] = authCookies.map((c) => `${c.name}=${c.value}`).join('; ');
-    log.info(`Crawling with ${authCookies.length} auth cookies injected`);
+    const seeded = await seedAuthCookies(startUrl, authCookies);
+    log.info(`Crawling with ${seeded}/${authCookies.length} auth cookies seeded into the cookie jar`);
   }
 
   if (fullRefresh) {
@@ -235,7 +238,7 @@ export async function crawlSite(
       let origin: string;
       try { origin = new URL(startUrl).origin; } catch { origin = ''; }
       if (origin) {
-        const robotsTxt = await fetchPage(`${origin}/robots.txt`, extraHeaders);
+        const robotsTxt = await fetchRaw(`${origin}/robots.txt`, extraHeaders);
         if (robotsTxt) {
           robotsRules = parseRobotsTxt(robotsTxt);
           if (robotsRules.disallowPaths.length > 0) {
@@ -286,6 +289,30 @@ export async function crawlSite(
   let docCount = 0;
   let vectorCount = 0;
   let skippedCount = 0;
+  // Pages that fetched + extracted usable content. Used to gate maxPages so
+  // failed fetches (4xx/timeout/empty) don't burn the page budget.
+  let processedCount = 0;
+
+  // ── Seed conditional-request cache from prior crawl ─────────────────────────
+  // Load existing docs once and prime the ETag / Last-Modified cache so unchanged
+  // pages return a bodyless 304 on re-crawl (skipping both download AND embedding).
+  // Without this seed the cache is empty after a service-worker restart and every
+  // page is re-downloaded in full.
+  const existingByUrl = new Map<string, CrawledDocument>();
+  if (!fullRefresh) {
+    try {
+      const existingDocs = await documentDB.getAll();
+      for (const d of existingDocs) {
+        existingByUrl.set(d.url, d);
+        if (d.etag || d.lastModified) {
+          conditionalHeaders.set(d.url, { etag: d.etag, lastModified: d.lastModified });
+        }
+      }
+      if (existingByUrl.size > 0) log.info(`Re-crawl: primed ${existingByUrl.size} docs (${[...conditionalHeaders.keys()].length} with validators) for 304 short-circuit`);
+    } catch (err) {
+      log.debug('Could not preload existing docs for conditional requests', err);
+    }
+  }
 
   // ── Build tab pool for parallel SPA rendering ───────────────────────────
   const tabPool: number[] = [];
@@ -299,12 +326,12 @@ export async function crawlSite(
     }
   }
 
-  while (queue.length > 0 && visited.size < maxPages) {
+  while (queue.length > 0 && processedCount < maxPages) {
     if (signal?.aborted) break;
 
     const currentConcurrency = adaptiveConcurrency.value;
     const batch: Array<{ url: string; depth: number }> = [];
-    while (queue.length > 0 && batch.length < currentConcurrency && visited.size + batch.length < maxPages) {
+    while (queue.length > 0 && batch.length < currentConcurrency && processedCount + batch.length < maxPages) {
       const entry = queue.shift()!;
       pending.delete(entry.url);
       if (!visited.has(entry.url)) {
@@ -333,23 +360,27 @@ export async function crawlSite(
     log.info(`Crawling batch of ${batch.length} (concurrency: ${currentConcurrency}): ${batch.map((b) => b.url).join(', ')}`);
 
     // ── Fetch all pages in the batch ─────────────────────────────────────
-    const fetchResults: PromiseSettledResult<{ url: string; html: string | null; responseTimeMs: number }>[] =
+    const fetchResults: PromiseSettledResult<BatchFetch>[] =
       renderJavaScript && tabPool.length > 0
         ? await fetchBatchRenderedParallel(batch.map((b) => b.url), tabPool, extraHeaders, events, onEvent)
         : await Promise.allSettled(
             batch.map(({ url }) => {
               const start = Date.now();
-              return fetchPage(url, extraHeaders).then((html) => ({
+              return fetchPage(url, extraHeaders).then((r) => ({
                 url,
-                html,
+                html: r.html,
+                notModified: r.notModified,
+                etag: r.etag,
+                lastModified: r.lastModified,
                 responseTimeMs: Date.now() - start,
               }));
             })
           );
 
     // ── Record response times for adaptive concurrency ───────────────────
+    // A 304 is a fast success (no body), so it counts toward ramping up.
     for (const result of fetchResults) {
-      if (result.status === 'fulfilled' && result.value.html) {
+      if (result.status === 'fulfilled' && (result.value.html || result.value.notModified)) {
         adaptiveConcurrency.recordSuccess(result.value.responseTimeMs);
       } else {
         adaptiveConcurrency.recordError();
@@ -366,21 +397,36 @@ export async function crawlSite(
       contentHash: string;
       hasExistingDoc: boolean;
       images: import('./extractor').ExtractedImage[];
+      etag?: string;
+      lastModified?: string;
+      links: string[];
     };
     const toEmbed: PageToEmbed[] = [];
 
+    /** A 304 / unchanged page: skip embedding, reuse stored links for BFS. */
+    type NotModifiedPage = { kind: 'notModified'; url: string; depth: number; existingDoc?: CrawledDocument };
+    type FetchedPage = {
+      kind: 'page'; url: string; depth: number; html: string; title: string;
+      content: string; images: import('./extractor').ExtractedImage[];
+      contentHash: string; existingDoc?: CrawledDocument; etag?: string; lastModified?: string;
+    };
+
     const hashChecks = await Promise.all(
-      fetchResults.map(async (result, i) => {
-        const { url } = batch[i];
+      fetchResults.map(async (result, i): Promise<NotModifiedPage | FetchedPage | null> => {
+        const { url, depth } = batch[i];
         if (result.status === 'rejected') {
           emitEvent(events, onEvent, 'error', url, `Fetch failed: ${result.reason}`, 'fetch_failed');
           return null;
         }
-        if (!result.value?.html) {
+        // 304 Not Modified — page is unchanged; no body to parse.
+        if (result.value.notModified) {
+          return { kind: 'notModified', url, depth, existingDoc: existingByUrl.get(url) };
+        }
+        if (!result.value.html) {
           emitEvent(events, onEvent, 'warning', url, 'No content returned (empty response or non-HTML)', 'fetch_failed');
           return null;
         }
-        const { html } = result.value;
+        const { html, etag, lastModified } = result.value;
         let extracted;
         try {
           extracted = extractContent(html, url);
@@ -393,19 +439,37 @@ export async function crawlSite(
           return null;
         }
         const contentHash = await sha256(extracted.content);
-        const existingDoc = await documentDB.getByUrl(url);
-        return { url, depth: batch[i].depth, html, title: extracted.title, content: extracted.content, sections: extracted.sections, images: extracted.images, contentHash, existingDoc };
+        return { kind: 'page', url, depth, html, title: extracted.title, content: extracted.content, images: extracted.images, contentHash, existingDoc: existingByUrl.get(url), etag, lastModified };
       })
     );
 
     for (const page of hashChecks) {
       if (!page) continue;
-      const { url, depth, html, contentHash, existingDoc } = page;
+      // Only successfully fetched (or 304-confirmed) pages count toward the budget.
+      processedCount++;
+      const { url, depth, existingDoc } = page;
 
+      // ── 304 Not Modified: skip download+embed, reuse stored outlinks ──
+      if (page.kind === 'notModified') {
+        log.debug(`Unchanged (304): ${url}`);
+        skippedCount++;
+        if (depth < maxDepth && existingDoc?.links) addLinks(existingDoc.links, depth, visited, pending, queue);
+        onProgress?.({ total: Math.min(queue.length + visited.size, maxPages), crawled: visited.size, embedded: docCount, skipped: skippedCount, currentUrl: url, status: 'crawling' });
+        continue;
+      }
+
+      const { html, contentHash } = page;
+      const outLinks = extractLinks(html, url);
+
+      // ── Hash match: content unchanged even though we got a 200 ──
       if (existingDoc?.contentHash === contentHash) {
         log.debug(`Unchanged (hash match): ${url}`);
         skippedCount++;
-        if (depth < maxDepth) addLinks(extractLinks(html, url), depth, visited, pending, queue);
+        // Refresh stored validators/links so the next crawl can 304.
+        if (page.etag || page.lastModified || !existingDoc.links) {
+          await documentDB.put({ ...existingDoc, etag: page.etag, lastModified: page.lastModified, links: outLinks }).catch(() => {});
+        }
+        if (depth < maxDepth) addLinks(outLinks, depth, visited, pending, queue);
         onProgress?.({ total: Math.min(queue.length + visited.size, maxPages), crawled: visited.size, embedded: docCount, skipped: skippedCount, currentUrl: url, status: 'crawling' });
         continue;
       }
@@ -415,9 +479,9 @@ export async function crawlSite(
         await Promise.all([vectorDB.deleteByUrl(url), documentDB.deleteByUrl(url)]);
       }
 
-      toEmbed.push({ url, depth, html, title: page.title, content: page.content, contentHash, hasExistingDoc: !!existingDoc, images: page.images });
+      toEmbed.push({ url, depth, html, title: page.title, content: page.content, contentHash, hasExistingDoc: !!existingDoc, images: page.images, etag: page.etag, lastModified: page.lastModified, links: outLinks });
 
-      if (depth < maxDepth) addLinks(extractLinks(html, url), depth, visited, pending, queue);
+      if (depth < maxDepth) addLinks(outLinks, depth, visited, pending, queue);
     }
 
     // ── Embed changed pages ──────────────────────────────────────────────
@@ -451,6 +515,11 @@ export async function crawlSite(
             crawledAt: new Date().toISOString(),
             chunkCount: chunks.length,
             contentHash: page.contentHash,
+            // Persist validators + outlinks so the NEXT crawl can 304 this page
+            // and still continue BFS from its links without re-downloading.
+            etag: page.etag,
+            lastModified: page.lastModified,
+            links: page.links,
           };
           await vectorDB.putBatch(vectors);
           await documentDB.put(doc);
@@ -509,7 +578,21 @@ function addLinks(
 // Cache for conditional request headers
 const conditionalHeaders = new Map<string, { lastModified?: string; etag?: string }>();
 
-async function fetchPage(url: string, extraHeaders?: Record<string, string>): Promise<string | null> {
+interface FetchResult {
+  html: string | null;
+  /** True when the server answered 304 Not Modified — the page is unchanged. */
+  notModified: boolean;
+  etag?: string;
+  lastModified?: string;
+}
+
+/** A fetched batch entry: a FetchResult plus its URL and timing. */
+interface BatchFetch extends FetchResult {
+  url: string;
+  responseTimeMs: number;
+}
+
+async function fetchPage(url: string, extraHeaders?: Record<string, string>): Promise<FetchResult> {
   const MAX_RETRIES = 3;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -526,28 +609,30 @@ async function fetchPage(url: string, extraHeaders?: Record<string, string>): Pr
           ...condHeaders,
           ...(extraHeaders ?? {}),
         },
+        credentials: 'include',
         signal: AbortSignal.timeout(15000),
       });
 
       if (response.status === 304) {
         log.debug(`Not modified (304): ${url}`);
-        return null;
+        // Preserve the validators so they're re-persisted on the doc.
+        return { html: null, notModified: true, etag: cached?.etag, lastModified: cached?.lastModified };
       }
 
-      if (response.status >= 400 && response.status < 500) return null;
+      if (response.status >= 400 && response.status < 500) return { html: null, notModified: false };
 
       if (!response.ok) {
         if (attempt < MAX_RETRIES - 1) {
           await delay(1000 * Math.pow(2, attempt));
           continue;
         }
-        return null;
+        return { html: null, notModified: false };
       }
 
-      const lastMod = response.headers.get('Last-Modified');
-      const etag = response.headers.get('ETag');
+      const lastMod = response.headers.get('Last-Modified') ?? undefined;
+      const etag = response.headers.get('ETag') ?? undefined;
       if (lastMod || etag) {
-        conditionalHeaders.set(url, { lastModified: lastMod ?? undefined, etag: etag ?? undefined });
+        conditionalHeaders.set(url, { lastModified: lastMod, etag });
       }
 
       const contentType = response.headers.get('content-type') ?? '';
@@ -555,26 +640,26 @@ async function fetchPage(url: string, extraHeaders?: Record<string, string>): Pr
       if (contentType.includes('application/pdf')) {
         try {
           const buffer = await response.arrayBuffer();
-          return extractPdfText(buffer, url);
+          return { html: extractPdfText(buffer, url), notModified: false, etag, lastModified: lastMod };
         } catch {
           log.debug(`PDF extraction failed for ${url}`);
-          return null;
+          return { html: null, notModified: false };
         }
       }
 
-      if (!contentType.includes('text/html')) return null;
+      if (!contentType.includes('text/html')) return { html: null, notModified: false };
 
-      return await response.text();
+      return { html: await response.text(), notModified: false, etag, lastModified: lastMod };
     } catch {
       if (attempt < MAX_RETRIES - 1) {
         await delay(1000 * Math.pow(2, attempt));
         continue;
       }
-      return null;
+      return { html: null, notModified: false };
     }
   }
 
-  return null;
+  return { html: null, notModified: false };
 }
 
 /**
@@ -615,7 +700,35 @@ function extractPdfText(buffer: ArrayBuffer, url: string): string | null {
   }
 }
 
-function normalizeUrl(url: string): string {
+/**
+ * Fetch a text resource (robots.txt, sitemap.xml) WITHOUT the HTML content-type
+ * gate that `fetchPage` enforces. robots.txt is served as text/plain and
+ * sitemaps as application/xml — `fetchPage` would reject both and return null,
+ * silently breaking robots compliance and sitemap seeding. Returns the raw body
+ * on any 2xx text-ish response.
+ */
+async function fetchRaw(url: string, extraHeaders?: Record<string, string>): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'pathfinder/1.0 (AI QA Assistant)',
+        Accept: 'text/plain,application/xml,text/xml,*/*',
+        ...(extraHeaders ?? {}),
+      },
+      credentials: 'include',
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) return null;
+    // Guard against binary payloads served at these paths.
+    const ct = (response.headers.get('content-type') ?? '').toLowerCase();
+    if (ct && !/text|xml|plain|json|octet-stream|^$/.test(ct)) return null;
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeUrl(url: string): string {
   try {
     const u = new URL(url);
     // Decode percent-encoded characters then re-encode for consistency.
@@ -638,6 +751,49 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Seed auth cookies into the browser cookie jar so credentialed fetches attach
+ * them automatically. Returns the count successfully set. The `Cookie` request
+ * header cannot be used directly — browsers treat it as a forbidden header.
+ */
+async function seedAuthCookies(
+  startUrl: string,
+  cookies: Array<{ name: string; value: string; domain?: string }>
+): Promise<number> {
+  if (typeof chrome === 'undefined' || !chrome.cookies?.set) return 0;
+  let origin: string;
+  let secure = false;
+  try {
+    const u = new URL(startUrl);
+    origin = u.origin;
+    secure = u.protocol === 'https:';
+  } catch {
+    return 0;
+  }
+
+  let set = 0;
+  await Promise.all(
+    cookies.map(async (c) => {
+      try {
+        // chrome.cookies.set derives the host from `url`; an explicit domain (if
+        // provided) widens the cookie to subdomains.
+        await chrome.cookies.set({
+          url: origin,
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: '/',
+          secure,
+        });
+        set++;
+      } catch (err) {
+        log.debug(`Failed to seed cookie ${c.name}`, err);
+      }
+    })
+  );
+  return set;
+}
+
 async function discoverSitemapUrls(startUrl: string, maxUrls: number, extraHeaders?: Record<string, string>): Promise<string[]> {
   let origin: string;
   try { origin = new URL(startUrl).origin; } catch { return []; }
@@ -645,7 +801,7 @@ async function discoverSitemapUrls(startUrl: string, maxUrls: number, extraHeade
   const urls = new Set<string>();
   const sitemapCandidates: string[] = [];
 
-  const robotsTxt = await fetchPage(`${origin}/robots.txt`, extraHeaders);
+  const robotsTxt = await fetchRaw(`${origin}/robots.txt`, extraHeaders);
   if (robotsTxt) {
     for (const line of robotsTxt.split('\n')) {
       const match = line.match(/^Sitemap:\s*(.+)/i);
@@ -664,7 +820,7 @@ async function discoverSitemapUrls(startUrl: string, maxUrls: number, extraHeade
     if (visited.has(sitemapUrl)) continue;
     visited.add(sitemapUrl);
 
-    const xml = await fetchPage(sitemapUrl, extraHeaders).catch(() => null);
+    const xml = await fetchRaw(sitemapUrl, extraHeaders).catch(() => null);
     if (!xml) continue;
 
     const nestedSitemaps = [...xml.matchAll(/<sitemap>[\s\S]*?<loc>(.*?)<\/loc>/gi)];
@@ -692,7 +848,8 @@ async function discoverSitemapUrls(startUrl: string, maxUrls: number, extraHeade
 
 // ── Parallel SPA Rendering via Tab Pool ─────────────────────────────────────
 // Distributes page rendering across multiple browser tabs simultaneously.
-// Falls back to static fetch on per-page failure.
+// Falls back to static fetch on per-page failure. Tab-rendered pages never
+// carry conditional-request validators (notModified is always false).
 
 async function fetchBatchRenderedParallel(
   urls: string[],
@@ -700,27 +857,27 @@ async function fetchBatchRenderedParallel(
   extraHeaders?: Record<string, string>,
   events?: CrawlEvent[],
   onEvent?: (e: CrawlEvent) => void
-): Promise<PromiseSettledResult<{ url: string; html: string | null; responseTimeMs: number }>[]> {
+): Promise<PromiseSettledResult<BatchFetch>[]> {
+  const staticFetch = async (url: string, start: number): Promise<BatchFetch> => {
+    const r = await fetchPage(url, extraHeaders);
+    return { url, html: r.html, notModified: r.notModified, etag: r.etag, lastModified: r.lastModified, responseTimeMs: Date.now() - start };
+  };
+
   if (tabPool.length === 0) {
-    return Promise.allSettled(urls.map((url) => {
-      const start = Date.now();
-      return fetchPage(url, extraHeaders).then((html) => ({ url, html, responseTimeMs: Date.now() - start }));
-    }));
+    return Promise.allSettled(urls.map((url) => staticFetch(url, Date.now())));
   }
 
   // Single tab — sequential (original behavior)
   if (tabPool.length === 1) {
-    const results: PromiseSettledResult<{ url: string; html: string | null; responseTimeMs: number }>[] = [];
+    const results: PromiseSettledResult<BatchFetch>[] = [];
     for (const url of urls) {
       const start = Date.now();
       try {
         const html = await fetchPageRendered(url, tabPool[0]);
-        results.push({ status: 'fulfilled', value: { url, html, responseTimeMs: Date.now() - start } });
+        results.push({ status: 'fulfilled', value: { url, html, notModified: false, responseTimeMs: Date.now() - start } });
       } catch (err) {
-        // Fall back to static fetch
         try {
-          const html = await fetchPage(url, extraHeaders);
-          results.push({ status: 'fulfilled', value: { url, html, responseTimeMs: Date.now() - start } });
+          results.push({ status: 'fulfilled', value: await staticFetch(url, start) });
         } catch (fetchErr) {
           if (events) emitEvent(events, onEvent, 'error', url, `Render + fetch fallback failed: ${fetchErr}`, 'render_failed');
           results.push({ status: 'rejected', reason: fetchErr });
@@ -731,7 +888,7 @@ async function fetchBatchRenderedParallel(
   }
 
   // Multiple tabs — parallel rendering with tab rotation
-  const results: PromiseSettledResult<{ url: string; html: string | null; responseTimeMs: number }>[] = new Array(urls.length);
+  const results: PromiseSettledResult<BatchFetch>[] = new Array(urls.length);
   const tabBusy = new Map<number, boolean>();
   for (const tid of tabPool) tabBusy.set(tid, false);
 
@@ -757,12 +914,10 @@ async function fetchBatchRenderedParallel(
     const start = Date.now();
     try {
       const html = await fetchPageRendered(url, tabId);
-      results[idx] = { status: 'fulfilled', value: { url, html, responseTimeMs: Date.now() - start } };
+      results[idx] = { status: 'fulfilled', value: { url, html, notModified: false, responseTimeMs: Date.now() - start } };
     } catch {
-      // Fall back to static fetch
       try {
-        const html = await fetchPage(url, extraHeaders);
-        results[idx] = { status: 'fulfilled', value: { url, html, responseTimeMs: Date.now() - start } };
+        results[idx] = { status: 'fulfilled', value: await staticFetch(url, start) };
       } catch (fetchErr) {
         if (events) emitEvent(events, onEvent, 'error', url, `Render + fetch fallback failed`, 'render_failed');
         results[idx] = { status: 'rejected', reason: fetchErr };

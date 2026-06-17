@@ -181,6 +181,8 @@ export interface ExplorationTargetOptions {
    * tester out, or trigger billing-side effects, so we skip them by default.
    */
   includeDangerous?: boolean;
+  /** Maximum number of click targets to return. Default 100. */
+  maxTargets?: number;
 }
 
 export function selectExplorationTargets(
@@ -188,11 +190,15 @@ export function selectExplorationTargets(
   visited: Set<string>,
   options: ExplorationTargetOptions = {}
 ): InteractiveElement[] {
-  const { includeDangerous = false } = options;
+  const { includeDangerous = false, maxTargets = 100 } = options;
+  // NOTE: off-viewport-but-rendered elements ARE included — the click action
+  // scrolls them into view first. We only require them to be clickable; the
+  // ordering below clicks in-viewport elements first, off-viewport if budget
+  // remains. This captures below-the-fold buttons and virtualized-list rows.
   const candidates = elements
     .filter((el) => {
-      if (!el.visible) return false;
       if (visited.has(el.selector)) return false;
+      if (el.disabled) return false;
       if (FORM_TAGS.has(el.tag)) return false;
       const isClickable =
         CLICKABLE_TAGS.has(el.tag) || CLICKABLE_ROLES.has(el.role ?? '');
@@ -216,10 +222,16 @@ export function selectExplorationTargets(
     !navElements.includes(el) && !actionButtons.includes(el)
   );
 
-  // Cap raised from 20 → 75. Pages with hundreds of buttons (data grids,
-  // dashboards) need more click-coverage; the per-page time budget stops
-  // exploration before this cap is reached on most sites.
-  return [...navElements, ...actionButtons, ...other].slice(0, 75);
+  // Within the priority order, click in-viewport elements before off-viewport
+  // ones (stable partition keeps relative order otherwise).
+  const viewportFirst = (list: InteractiveElement[]): InteractiveElement[] =>
+    [...list.filter((el) => el.visible), ...list.filter((el) => !el.visible)];
+
+  return [
+    ...viewportFirst(navElements),
+    ...viewportFirst(actionButtons),
+    ...viewportFirst(other),
+  ].slice(0, maxTargets);
 }
 
 export function selectFormTargets(

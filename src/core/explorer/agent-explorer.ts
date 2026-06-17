@@ -45,9 +45,10 @@ export async function getAgentActions(
   exploredSelectors: Set<string>,
   aiClient: AIClientInterface
 ): Promise<AgentAction[]> {
-  // Filter to clickable, visible, unexplored candidates
+  // Filter to clickable, unexplored candidates. Off-viewport elements are kept
+  // (the click action scrolls them into view) but in-viewport ones are ranked
+  // first so the AI's token budget favours what's immediately on screen.
   const candidates = elements.filter((el) => {
-    if (!el.visible) return false;
     if (exploredSelectors.has(el.selector)) return false;
     const isClickable =
       el.tag === 'button' ||
@@ -61,7 +62,7 @@ export async function getAgentActions(
 
   if (candidates.length === 0) return [];
 
-  const elementList = candidates
+  const elementList = [...candidates.filter((el) => el.visible), ...candidates.filter((el) => !el.visible)]
     .slice(0, 100) // stay within token budget
     .map((el, i) => {
       const label = el.ariaLabel || el.text || '';

@@ -355,7 +355,7 @@ async function expandTestCase(
     },
   ];
 
-  const raw = await aiClient.chat(messages, { temperature: 0.2, jsonMode: true });
+  const raw = await aiClient.chat(messages, { temperature: 0.2, jsonMode: true, maxTokens: 8192 });
   const result = parseExpansionResponse(raw, imported, graph);
 
   // If first attempt returned no steps, retry with a nudge for the AI to be more detailed
@@ -367,7 +367,7 @@ async function expandTestCase(
         { role: 'assistant' as const, content: raw },
         { role: 'user' as const, content: 'The response has no detailed steps. Please generate at least 4-6 specific, actionable test steps with exact field names, values to type, buttons to click, and assertions to verify. Return JSON with a "steps" array of strings.' },
       ];
-      const retryRaw = await aiClient.chat(retryMessages, { temperature: 0.3, jsonMode: true });
+      const retryRaw = await aiClient.chat(retryMessages, { temperature: 0.3, jsonMode: true, maxTokens: 8192 });
       const retryResult = parseExpansionResponse(retryRaw, imported, graph);
       if (retryResult.steps.length > result.steps.length) {
         return retryResult;

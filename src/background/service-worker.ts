@@ -241,9 +241,13 @@ async function handleMessage(
         useLocalEmbeddings: exploreSettings.useLocalEmbeddings,
       }) : undefined;
 
-      const singlePageOnly = message.payload.singlePageOnly === true;
+      // Two scoping modes (mutually exclusive in the UI):
+      //  · strict  — scan ONLY the current page (depth 0, 1 page, no link following)
+      //  · startHere ("Start from this page") — start at current tab, crawl to depth
+      const singlePageStrict = message.payload.singlePageStrict === true;
+      const startHere = message.payload.singlePageOnly === true;
       let singlePageStartUrl: string | undefined;
-      if (singlePageOnly) {
+      if (singlePageStrict || startHere) {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!activeTab?.url) {
           exploreController = null;
@@ -254,13 +258,20 @@ async function handleMessage(
       }
 
       exploreApp({
-        maxDepth: singlePageOnly ? 0 : (message.payload.depth ?? exploreSettings.maxExplorationDepth),
-        maxPages: singlePageOnly ? 1 : exploreSettings.maxCrawlPages,
+        maxDepth: singlePageStrict ? 0 : (message.payload.depth ?? exploreSettings.maxExplorationDepth),
+        maxPages: singlePageStrict ? 1 : exploreSettings.maxCrawlPages,
         startUrl: singlePageStartUrl,
-        reexplorePage: singlePageOnly,
+        reexplorePage: singlePageStrict,
+        // When the user anchored on a page, exhaustively cover EVERY element on
+        // it (tabs, panels, buttons, revealed dropdown items).
+        exhaustiveStartPage: singlePageStrict || startHere,
         agentMode: exploreSettings.agentMode ?? true,
         aiClient: exploreAiClient,
         includeDangerous: message.payload.includeDangerous === true,
+        submitForms: message.payload.submitForms === true,
+        // Fresh re-scan: re-visit existing pages + prune unreachable ones.
+        // Not applicable to strict single-page (only 1 page is touched).
+        fresh: message.payload.freshRescan === true && !singlePageStrict,
         signal: exploreSignal,
         onProgress: (progress) => {
           broadcastToSidebar({ type: 'EXPLORATION_PROGRESS', payload: progress });
@@ -321,12 +332,15 @@ async function handleMessage(
       const reexploreSignal = exploreController.signal;
       startSWKeepalive();
 
-      const reexploreSettings = await settingsStorage.get();
       const targetUrl = message.payload.url;
 
       exploreApp({
-        maxDepth: 2,
-        maxPages: reexploreSettings.maxCrawlPages,
+        // Re-scan ONLY this page (maxDepth 0 / maxPages 1) — the reload icon
+        // refreshes a single node in place. Re-walking neighbors (the old
+        // maxDepth 2) re-added them under inconsistent URL keys, creating
+        // duplicate graph entries.
+        maxDepth: 0,
+        maxPages: 1,
         startUrl: targetUrl,
         reexplorePage: true,
         signal: reexploreSignal,

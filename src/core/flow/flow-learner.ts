@@ -10,7 +10,7 @@ import type {
 import { PROMPTS } from '../ai/prompt-templates';
 import { serializeGraphForFlowLearning, loadGraph } from '../explorer/interaction-graph';
 import { searchByText, formatSearchResults } from '../knowledge/vector-search';
-import { saveFlow } from './flow-store';
+import { saveFlow, getAllFlows } from './flow-store';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('flow-learner');
@@ -49,30 +49,52 @@ function truncateGraphContext(raw: string): string {
     '\n\n[Graph truncated — site is large. Remaining pages omitted.]';
 }
 
-function buildRAGQuery(graph: InteractionGraph | undefined): string {
+/**
+ * Extract human-meaningful terms from a URL path: humanized non-ID segments.
+ * e.g. "/new/ui/callai/recording/5993642928991842993" → ["callai", "recording"].
+ */
+export function pathTerms(url: string): string[] {
+  try {
+    return new URL(url).pathname
+      .split('/')
+      .filter((s) => s.length > 2)
+      .filter((s) => !/^\d+$/.test(s) && !/^[0-9a-f]{8,}$/i.test(s)) // drop numeric/hex IDs
+      .map((s) => s.replace(/[-_]+/g, ' ').trim());
+  } catch {
+    return [];
+  }
+}
+
+export function buildRAGQuery(graph: InteractionGraph | undefined): string {
   if (!graph || graph.nodes.length === 0) {
     return 'user workflows features navigation steps';
   }
 
-  const pageTitles = graph.nodes
-    .map((n) => n.title)
-    .filter((t) => t && t !== '...')
-    .slice(0, 10);
-
+  const titles = graph.nodes.map((n) => n.title).filter((t): t is string => !!t && t !== '...');
+  const headings = graph.nodes.flatMap((n) => n.headings ?? []);
+  const tabLabels = graph.nodes.flatMap((n) => (n.tabs ?? []).map((t) => t.label));
+  const actionLabels = graph.nodes.flatMap((n) => (n.actions ?? []).map((a) => a.label)).filter((l): l is string => !!l);
   const formLabels = graph.nodes
     .flatMap((n) => n.formFields ?? [])
     .map((f) => f.label || f.name || f.placeholder)
-    .filter(Boolean)
-    .slice(0, 10);
+    .filter((l): l is string => !!l);
+  // Fallback for feature pages with no usable title/forms (e.g. a recording
+  // view titled "...") — derive meaning from the URL path itself.
+  const urlTerms = graph.nodes.flatMap((n) => pathTerms(n.url));
 
-  const parts = [
-    ...pageTitles,
-    ...formLabels,
-    'user workflows',
-    'form submission',
-  ];
+  // Dedup (case-insensitive), most descriptive signals first, capped so the
+  // RAG query stays focused.
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const term of [...titles, ...headings, ...tabLabels, ...formLabels, ...actionLabels, ...urlTerms]) {
+    const key = term.toLowerCase().trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    ordered.push(term);
+    if (ordered.length >= 40) break;
+  }
 
-  return parts.join(' ');
+  return [...ordered, 'user workflows features'].join(' ');
 }
 
 export async function learnFlows(aiClient: AIClientInterface): Promise<Flow[]> {
@@ -137,8 +159,16 @@ export async function learnFlows(aiClient: AIClientInterface): Promise<Flow[]> {
     }
   }
 
+  // Idempotency: skip flows whose name already exists so re-running "Learn
+  // Flows" tops up new flows instead of piling duplicates.
+  const normName = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const existingNames = new Set((await getAllFlows().catch(() => [])).map((f) => normName(f.name)));
+
   const saved: Flow[] = [];
+  let skipped = 0;
   for (const flowData of deduped) {
+    if (existingNames.has(normName(flowData.name))) { skipped++; continue; }
+    existingNames.add(normName(flowData.name));
     try {
       const startDetails = inferFlowStartDetails(graph, flowData);
       const flow = await saveFlow({
@@ -155,7 +185,7 @@ export async function learnFlows(aiClient: AIClientInterface): Promise<Flow[]> {
     }
   }
 
-  log.info(`Learned ${saved.length} flows`);
+  log.info(`Learned ${saved.length} new flows (${skipped} already existed)`);
   return saved;
 }
 
@@ -614,7 +644,7 @@ function normalizeUrl(url: string): string {
  *   1. "Navigate and Inspect" — visit the page and verify a key heading.
  *   2. A primary-action filler — click the most prominent button/link if any.
  */
-function synthesizeCoverageFillers(
+export function synthesizeCoverageFillers(
   graph: InteractionGraph,
   existingFlows: Array<Omit<Flow, 'flowId' | 'createdAt' | 'updatedAt'>>
 ): Array<Omit<Flow, 'flowId' | 'createdAt' | 'updatedAt'>> {
@@ -697,6 +727,33 @@ function synthesizeCoverageFillers(
           ],
         });
       }
+    }
+  }
+
+  // ── Feature-tab coverage: one flow per captured in-page tab/view ─────────
+  // node.tabs are same-page query/hash views (e.g. ?aiFeatureTab=transcript).
+  // normalizeUrl strips the query, so match tabs by their FULL URL instead.
+  const coveredFullUrls = new Set<string>();
+  for (const flow of existingFlows) {
+    for (const step of flow.steps) {
+      if (step.action === 'navigate' && step.value) coveredFullUrls.add(step.value);
+    }
+  }
+  for (const node of graph.nodes) {
+    if (node.isErrorPage || !node.tabs) continue;
+    const pageLabel = node.title && node.title !== '...' ? node.title : pickPathLabel(node.url);
+    for (const tab of node.tabs) {
+      if (coveredFullUrls.has(tab.url)) continue;
+      coveredFullUrls.add(tab.url); // avoid dupes within this run
+      fillers.push({
+        name: `Open ${tab.label} (${pageLabel})`,
+        description: `Open the "${tab.label}" view and verify it loads. Auto-generated feature-tab coverage.`,
+        source: 'exploration',
+        steps: [
+          { order: 1, action: 'navigate', value: tab.url, description: `Open ${tab.label}`, target: tab.url },
+          { order: 2, action: 'verify', target: tab.label, description: `Verify the "${tab.label}" view is shown`, expectedOutcome: `The "${tab.label}" view is displayed` },
+        ],
+      });
     }
   }
 

@@ -25,11 +25,34 @@ const chromeMock = {
     sendMessage: vi.fn(),
     get: vi.fn(),
     update: vi.fn(),
+    create: vi.fn(),
+    remove: vi.fn(),
     captureVisibleTab: vi.fn(),
     onUpdated: {
       addListener: vi.fn(),
       removeListener: vi.fn(),
     },
+    onRemoved: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+  },
+  // Cookie jar — used by the crawler to seed auth cookies (the Cookie request
+  // header is forbidden, so cookies must be set in the jar instead).
+  cookies: {
+    set: vi.fn().mockResolvedValue({}),
+    get: vi.fn().mockResolvedValue(null),
+    getAll: vi.fn().mockResolvedValue([]),
+  },
+  scripting: {
+    executeScript: vi.fn().mockResolvedValue([{ result: '<html></html>' }]),
+  },
+  debugger: {
+    attach: vi.fn(),
+    detach: vi.fn(),
+    sendCommand: vi.fn(),
+    onEvent: { addListener: vi.fn(), removeListener: vi.fn() },
+    onDetach: { addListener: vi.fn(), removeListener: vi.fn() },
   },
   sidePanel: {
     open: vi.fn(),

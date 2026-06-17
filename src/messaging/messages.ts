@@ -62,7 +62,7 @@ export type ContentScriptResponse =
 export type BackgroundMessage =
   | { type: 'START_CRAWL'; payload: { url: string } }
   | { type: 'STOP_CRAWL' }
-  | { type: 'START_EXPLORATION'; payload: { depth: number; singlePageOnly?: boolean; includeDangerous?: boolean } }
+  | { type: 'START_EXPLORATION'; payload: { depth: number; singlePageOnly?: boolean; singlePageStrict?: boolean; includeDangerous?: boolean; submitForms?: boolean; freshRescan?: boolean } }
   | { type: 'STOP_EXPLORATION' }
   | { type: 'STOP_TESTS' }
   | { type: 'REEXPLORE_PAGE'; payload: { url: string } }
