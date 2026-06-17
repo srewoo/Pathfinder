@@ -1,6 +1,6 @@
 {
   "name": "pathfinder",
-  "version": "1.0.0",
+  "version": "1.3",
   "description": "Pathfinder — AI Autonomous QA Chrome Extension",
   "private": true,
   "type": "module",
