@@ -190,7 +190,11 @@ export async function interactivePlan(
 
 async function executeStep(tabId: number, step: ExecutionStep): Promise<boolean> {
   try {
-    await sendToContentScript(tabId, {
+    // The content script reports the real outcome via { success, error }. A
+    // resolved message only means the script *responded* — we must inspect
+    // `success`, otherwise a click on a missing element is recorded as a
+    // verified step and the whole "observe actual state" premise collapses.
+    const response = await sendToContentScript<{ success: boolean; error?: string }>(tabId, {
       type: 'EXECUTE_ACTION',
       payload: {
         order: step.order,
@@ -204,8 +208,13 @@ async function executeStep(tabId: number, step: ExecutionStep): Promise<boolean>
         timeout: step.timeout ?? 5000,
       },
     });
-    return true;
-  } catch {
+    const success = response?.success ?? false;
+    if (!success) {
+      log.warn(`Step ${step.order} reported failure: ${response?.error ?? 'unknown error'}`);
+    }
+    return success;
+  } catch (err) {
+    log.warn(`Step ${step.order} dispatch failed`, err);
     return false;
   }
 }
@@ -227,8 +236,13 @@ function parseNextAction(raw: string): ParsedAction | null {
   try {
     const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
     const json = JSON.parse(cleaned) as Record<string, unknown>;
+    const isDone = json['isDone'] === true;
+    const action = normalizeAction(json['action']);
+    // Reject an unrecognized action instead of coercing it to a click — unless
+    // this is a completion signal, where the action field is irrelevant.
+    if (action === null && !isDone) return null;
     return {
-      action: normalizeAction(json['action']),
+      action: action ?? 'assert',
       selector: typeof json['selector'] === 'string' ? json['selector'] : undefined,
       value: typeof json['value'] === 'string' ? json['value'] : undefined,
       description: typeof json['description'] === 'string' ? json['description'] : 'Action',
@@ -256,13 +270,14 @@ const VALID_ACTIONS = new Set<ActionType>([
   'upload_file', 'dismiss_dialog',
 ]);
 
-function normalizeAction(raw: unknown): ActionType {
+/** Resolve a raw action to a known ActionType, or `null` if unrecognized. */
+function normalizeAction(raw: unknown): ActionType | null {
   if (typeof raw === 'string') {
     const lower = raw.toLowerCase();
     if (VALID_ACTIONS.has(lower as ActionType)) return lower as ActionType;
     if (ACTION_ALIASES[lower]) return ACTION_ALIASES[lower];
   }
-  return 'click';
+  return null;
 }
 
 function buildStep(parsed: ParsedAction, order: number): ExecutionStep {

@@ -39,7 +39,7 @@ export function formatSlackForSuite(run: TestRun): SlackMessage {
           { type: 'mrkdwn', text: `*Passed:*\n${summary.passed}` },
           { type: 'mrkdwn', text: `*Failed:*\n${summary.failed}` },
           { type: 'mrkdwn', text: `*Errors:*\n${summary.error}` },
-          { type: 'mrkdwn', text: `*Healed:*\n${summary.healed ?? 0}` },
+          { type: 'mrkdwn', text: `*Healed:*\n${summary.healedCount ?? 0}` },
         ],
       },
       ...failingTestsBlocks(run.results),

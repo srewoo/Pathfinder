@@ -13,6 +13,7 @@
 import type { AIClientInterface } from '../ai/ai-client';
 import type { InteractiveElement } from '../../storage/schemas';
 import { PROMPTS } from '../ai/prompt-templates';
+import { parseJSON, isAgentActionsShape } from '../ai/validators';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('agent-explorer');
@@ -88,17 +89,24 @@ export async function getAgentActions(
     return [];
   }
 
-  try {
-    const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
-    const parsed = JSON.parse(cleaned) as { actions?: AgentAction[] };
-    const actions = (parsed.actions ?? [])
-      .filter((a) => typeof a.selector === 'string' && a.selector.length > 0)
-      .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
-      .slice(0, MAX_AI_ACTIONS);
-    log.info(`Agent explorer: ${actions.length} actions ranked for "${title || currentUrl}"`);
-    return actions;
-  } catch (err) {
-    log.warn(`Agent explorer failed to parse AI response: ${String(err).slice(0, 120)}`);
+  // Validate the LLM output against a schema guard rather than trusting a raw
+  // JSON.parse — the model can return prose, truncated JSON, or the wrong shape.
+  const result = parseJSON(raw, isAgentActionsShape);
+  if (!result.ok) {
+    log.warn(`Agent explorer discarded malformed AI response for "${title || currentUrl}": ${result.error}`);
     return [];
   }
+
+  const actions: AgentAction[] = result.value.actions
+    .map((a) => ({
+      selector: a.selector,
+      action: 'click' as const,
+      description: a.description ?? '',
+      expectedOutcome: (a.expectedOutcome as AgentAction['expectedOutcome']) ?? 'unknown',
+      priority: a.priority ?? 0,
+    }))
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, MAX_AI_ACTIONS);
+  log.info(`Agent explorer: ${actions.length} actions ranked for "${title || currentUrl}"`);
+  return actions;
 }

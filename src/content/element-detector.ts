@@ -91,7 +91,7 @@ export function detectInteractiveElements(): InteractiveElement[] {
 
       const rawClasses = el.className;
       const stableClasses = typeof rawClasses === 'string'
-        ? rawClasses.split(/\\s+/).filter((cls) => cls.length > 1 && !isUtilityClass(cls)).slice(0, 5)
+        ? rawClasses.split(/\s+/).filter((cls) => cls.length > 1 && !isUtilityClass(cls)).slice(0, 5)
         : [];
 
       elements.push({
@@ -276,7 +276,21 @@ export function detectFormFields(): FormField[] {
   const FIELD_SELECTOR =
     'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"]), select, textarea';
 
-  document.querySelectorAll(FIELD_SELECTOR).forEach((el) => {
+  // Gather fields via walkDOM (pierces open shadow roots + same-origin iframes)
+  // rather than document.querySelectorAll, which stops at the top document and
+  // misses form controls inside web components — common in design-system UIs.
+  const fieldEls: Element[] = [];
+  const seenFieldEls = new Set<Element>();
+  walkDOM(document.body, (el) => {
+    try {
+      if (el.matches?.(FIELD_SELECTOR) && !seenFieldEls.has(el)) {
+        seenFieldEls.add(el);
+        fieldEls.push(el);
+      }
+    } catch { /* matches() can throw on detached nodes */ }
+  });
+
+  fieldEls.forEach((el) => {
     try {
       const selector = generateSelector(el);
       const tag = el.tagName.toLowerCase();

@@ -22,5 +22,6 @@
     "types": ["chrome", "vitest/globals"]
   },
   "include": ["src", "test"],
+  "exclude": ["node_modules", "dist", "test/e2e"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

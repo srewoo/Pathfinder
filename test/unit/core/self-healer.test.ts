@@ -161,6 +161,41 @@ describe('healStep', () => {
     expect(getHealedSelector('#a')).toBeUndefined();
   });
 
+  it('given a mutating action when validating a candidate then it PROBES (assert visible), not the real action', async () => {
+    // baseStep is a click (side-effecting). Healing must validate the candidate
+    // selector with a locate-only probe so it can't fire the click repeatedly
+    // (double-submit). The executor performs the real click once, after healing.
+    vi.mocked(findSimilarElements).mockResolvedValue(['button.candidate']);
+    vi.mocked(runStep).mockResolvedValue({ step: baseStep, status: 'passed', duration: 10 });
+
+    const result = await healStep(baseStep, 'not found', 1, mockAIClient as never);
+
+    expect(result.success).toBe(true);
+    // The healed step still carries the real action for the executor to run once.
+    expect(result.healedStep?.action).toBe('click');
+    expect(result.healedStep?.selector).toBe('button.candidate');
+    // But every validation call the healer made was a non-mutating probe.
+    const runnerCalls = vi.mocked(runStep).mock.calls;
+    expect(runnerCalls.length).toBeGreaterThan(0);
+    for (const [probeStep] of runnerCalls) {
+      expect(probeStep.action).toBe('assert');
+      expect(probeStep.assertType).toBe('visible');
+      expect(probeStep.selector).toBe('button.candidate');
+    }
+  });
+
+  it('given a non-mutating action when validating then it runs the real step (no probe rewrite)', async () => {
+    const assertStep: ExecutionStep = { order: 1, action: 'assert', assertType: 'visible', selector: '#gone', description: 'verify banner' };
+    vi.mocked(findSimilarElements).mockResolvedValue(['.banner']);
+    vi.mocked(runStep).mockResolvedValue({ step: assertStep, status: 'passed', duration: 10 });
+
+    const result = await healStep(assertStep, 'not found', 1, mockAIClient as never);
+
+    expect(result.success).toBe(true);
+    // A read-only assert is safe to execute directly during validation.
+    expect(vi.mocked(runStep).mock.calls[0][0].selector).toBe('.banner');
+  });
+
   it('given all strategies exhausted when healing then surfaces ai method failure', async () => {
     vi.mocked(findSimilarElements).mockResolvedValue(['s1']);
     vi.mocked(buildAttributeSelectors).mockResolvedValue(['s2']);

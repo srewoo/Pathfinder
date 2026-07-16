@@ -1,6 +1,7 @@
 import type { AIClientInterface } from '../ai/ai-client';
 import type { TestCase, Flow, TestPersonalityId, PageNode, FormField } from '../../storage/schemas';
 import { PROMPTS } from '../ai/prompt-templates';
+import { parseJSON, isTestsResponseShape } from '../ai/validators';
 import { searchByText, formatSearchResults } from '../knowledge/vector-search';
 import { serializeFlowForAI, getAllFlows } from '../flow/flow-store';
 import { loadGraph, extractAllFormFields } from '../explorer/interaction-graph';
@@ -315,29 +316,20 @@ export async function createUserTestCase(
 function parseTestsResponse(
   raw: string
 ): Array<{ title: string; description: string; type: TestCase['type']; steps?: string[] }> {
-  let json: unknown;
-
-  try {
-    const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
-    json = JSON.parse(cleaned);
-  } catch {
-    log.warn('Failed to parse tests JSON');
+  // Validate the LLM output against a schema guard rather than trusting a bare
+  // JSON.parse — the model can return prose, truncated JSON, or the wrong shape.
+  const result = parseJSON(raw, isTestsResponseShape);
+  if (!result.ok) {
+    log.warn(`Discarded malformed test-generation response: ${result.error}`);
     return [];
   }
 
-  if (typeof json !== 'object' || json === null) return [];
-
-  const obj = json as Record<string, unknown>;
-  const tests = Array.isArray(obj['tests']) ? obj['tests'] : [];
-
-  return tests
-    .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
-    .map((t) => ({
-      title: String(t['title'] ?? 'Unnamed Test'),
-      description: String(t['description'] ?? ''),
-      type: validateTestType(t['type']),
-      steps: Array.isArray(t['steps']) ? t['steps'].map(String) : undefined,
-    }));
+  return result.value.tests.map((t) => ({
+    title: String(t['title'] ?? 'Unnamed Test'),
+    description: String(t['description'] ?? ''),
+    type: validateTestType(t['type'], String(t['title'] ?? '')),
+    steps: Array.isArray(t['steps']) ? t['steps'].map(String) : undefined,
+  }));
 }
 
 interface RankedNode {
@@ -473,10 +465,22 @@ function tokenize(input: string): Set<string> {
   );
 }
 
-function validateTestType(raw: unknown): TestCase['type'] {
+function validateTestType(raw: unknown, title = ''): TestCase['type'] {
   const valid: TestCase['type'][] = ['positive', 'negative', 'edge'];
   if (typeof raw === 'string' && valid.includes(raw as TestCase['type'])) {
     return raw as TestCase['type'];
+  }
+  // A present-but-invalid type risks mislabeling a negative/edge test as
+  // positive — surface it and infer from the title instead of silently
+  // defaulting, so coverage accounting isn't quietly wrong.
+  if (raw != null) {
+    const t = title.toLowerCase();
+    const inferred: TestCase['type'] =
+      /\b(invalid|error|fail|wrong|missing|empty|unauthori[sz]ed|reject)\b/.test(t) ? 'negative'
+      : /\b(boundary|edge|max|min|limit|special char|overflow|unicode)\b/.test(t) ? 'edge'
+      : 'positive';
+    log.warn(`Test "${title}" had invalid type "${String(raw)}" — inferred "${inferred}" from title.`);
+    return inferred;
   }
   return 'positive';
 }

@@ -101,7 +101,7 @@ describe('Test Personality', () => {
 
   describe('personality test type weights', () => {
     it('should have weights summing to ~1.0 for all personalities', () => {
-      for (const [id, p] of Object.entries(PERSONALITIES)) {
+      for (const [, p] of Object.entries(PERSONALITIES)) {
         const sum = p.testTypeWeights.positive + p.testTypeWeights.negative + p.testTypeWeights.edge;
         expect(sum).toBeCloseTo(1.0, 1);
       }

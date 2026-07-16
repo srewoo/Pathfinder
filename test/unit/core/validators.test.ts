@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  parseJSON, stripFences, isAlternativesShape, isNextActionShape, isPlanShape,
+  parseJSON, stripFences, isAlternativesShape, isNextActionShape, isPlanShape, isAgentActionsShape,
 } from '../../../src/core/ai/validators';
 
 describe('stripFences', () => {
@@ -60,5 +60,35 @@ describe('isPlanShape', () => {
   });
   it('given non-object step when checking then false', () => {
     expect(isPlanShape({ steps: ['click'] })).toBe(false);
+  });
+});
+
+describe('isAgentActionsShape', () => {
+  it('given actions with valid selectors when checking then true', () => {
+    expect(isAgentActionsShape({ actions: [{ selector: 'button.x', priority: 5 }] })).toBe(true);
+  });
+  it('given an empty actions array when checking then true', () => {
+    expect(isAgentActionsShape({ actions: [] })).toBe(true);
+  });
+  it('given a missing actions array when checking then false', () => {
+    expect(isAgentActionsShape({})).toBe(false);
+  });
+  it('given an action without a selector when checking then false', () => {
+    expect(isAgentActionsShape({ actions: [{ description: 'no selector' }] })).toBe(false);
+  });
+  it('given an empty-string selector when checking then false', () => {
+    expect(isAgentActionsShape({ actions: [{ selector: '' }] })).toBe(false);
+  });
+  it('given a non-numeric priority when checking then false', () => {
+    expect(isAgentActionsShape({ actions: [{ selector: 'x', priority: 'high' }] })).toBe(false);
+  });
+  it('parseJSON parses a fenced valid ranking response', () => {
+    const r = parseJSON('```json\n{"actions":[{"selector":"#a","priority":3}]}\n```', isAgentActionsShape);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.actions[0].selector).toBe('#a');
+  });
+  it('parseJSON rejects a prose (non-JSON) ranking response', () => {
+    const r = parseJSON('Here are the actions I recommend...', isAgentActionsShape);
+    expect(r.ok).toBe(false);
   });
 });

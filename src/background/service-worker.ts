@@ -281,7 +281,7 @@ async function handleMessage(
           if (exploreSignal.aborted) {
             broadcastToSidebar({ type: 'EXPLORATION_STOPPED' });
           } else {
-            broadcastToSidebar({ type: 'EXPLORATION_COMPLETE' });
+            broadcastToSidebar({ type: 'EXPLORATION_COMPLETE', payload: { coverage: result.coverage } });
             // Broadcast a11y results if any were collected during exploration
             if (result.a11yResults.length > 0) {
               const totalIssues = result.a11yResults.reduce((sum: number, r: { summary: { total: number } }) => sum + r.summary.total, 0);

@@ -143,7 +143,7 @@ function lcsAlign(before: FlowStep[], after: FlowStep[]): StepDiff[] {
   let j = n;
   while (i > 0 && j > 0) {
     if (stepKey(before[i - 1]) === stepKey(after[j - 1])) {
-      const changes = stepFieldDiff(before[i - 1], after[j - 1]);
+      const changes = stepFieldDiff(before[i - 1], after[j - 1]) ?? [];
       if (changes.length === 0) {
         out.unshift({ kind: 'unchanged', before: before[i - 1], after: after[j - 1] });
       } else {

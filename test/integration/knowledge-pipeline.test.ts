@@ -13,7 +13,7 @@ import { extractContent, extractLinks } from '../../src/core/knowledge/extractor
 import { chunkText } from '../../src/core/knowledge/chunker';
 import { embedChunks } from '../../src/core/knowledge/embedder';
 import { vectorDB, documentDB } from '../../src/storage/indexed-db';
-import { search, formatSearchResults } from '../../src/core/knowledge/vector-search';
+import { search, formatSearchResults, invalidateVectorCache } from '../../src/core/knowledge/vector-search';
 import { generateId } from '../../src/utils/hash';
 import type { AIClientInterface } from '../../src/core/ai/ai-client';
 import type { CrawledDocument } from '../../src/storage/schemas';
@@ -58,6 +58,9 @@ describe('Knowledge pipeline: extract → chunk → embed → store → search',
   beforeEach(async () => {
     await vectorDB.clear();
     await documentDB.clear();
+    // Drop the cached in-memory IVF index so it doesn't leak vectors (or a
+    // stale embedding dimension) from a previous test into this one.
+    invalidateVectorCache();
   });
 
   it('given HTML page when extracted then produces title and content', () => {
@@ -120,6 +123,7 @@ describe('Knowledge pipeline: extract → chunk → embed → store → search',
       url: BASE_URL,
       title,
       content,
+      contentHash: 'test-hash',
       crawledAt: new Date().toISOString(),
       chunkCount: chunks.length,
     };
@@ -133,15 +137,16 @@ describe('Knowledge pipeline: extract → chunk → embed → store → search',
     const { content, title } = extractContent(SAMPLE_HTML, BASE_URL);
     const chunks = chunkText(content, BASE_URL);
 
-    // Use a deterministic embedding: query vector is [1,0,…,0], only first chunk matches well
+    // Deterministic embedding: query vector is [1,0,0,0] and the first chunk
+    // gets that exact direction (cosine 1), later chunks get orthogonal basis
+    // vectors (cosine 0). Uses post-increment so the FIRST chunk maps to slot 0.
     let callCount = 0;
     const aiClient: AIClientInterface = {
       chat: vi.fn(),
       embed: vi.fn(async (texts: string[]) => {
         return texts.map(() => {
-          callCount++;
-          // Return a random-but-valid embedding
-          return Array.from({ length: 4 }, (_, i) => (i === callCount % 4 ? 1 : 0));
+          const slot = callCount++ % 4;
+          return Array.from({ length: 4 }, (_, i) => (i === slot ? 1 : 0));
         });
       }),
     };

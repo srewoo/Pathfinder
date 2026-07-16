@@ -44,10 +44,12 @@ export class GoogleProvider implements AIClientInterface {
     }
 
     const response = await fetch(
-      `${this.baseUrl}/models/${this.model}:generateContent?key=${this.apiKey}`,
+      `${this.baseUrl}/models/${this.model}:generateContent`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // Send the key in a header, not the query string — a URL-embedded key
+        // leaks into proxy logs, browser history, and referrer headers.
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
       }
@@ -84,10 +86,10 @@ export class GoogleProvider implements AIClientInterface {
       }));
 
       const response = await fetch(
-        `${this.baseUrl}/models/${this.embeddingModel}:batchEmbedContents?key=${this.apiKey}`,
+        `${this.baseUrl}/models/${this.embeddingModel}:batchEmbedContents`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
           body: JSON.stringify({ requests }),
           signal: AbortSignal.timeout(30000),
         }

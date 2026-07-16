@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from "react";
 import { Trash2, Cpu, Globe, Image, Webhook, Zap, CheckCircle, XCircle, Bot, FlaskConical } from 'lucide-react';
 import type { PlanningMode } from '../../../storage/schemas';
 import { useSettingsStore } from '../../stores/settings-store';

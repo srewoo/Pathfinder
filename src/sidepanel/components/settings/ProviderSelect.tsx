@@ -1,4 +1,3 @@
-import React from 'react';
 import type { AIProvider } from '../../../storage/schemas';
 
 interface ProviderSelectProps {

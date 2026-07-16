@@ -7,6 +7,10 @@ const MOCK_TAB_ID = 1;
 
 vi.mock('../../../src/messaging/messenger', () => ({
   getActiveTabId: vi.fn(),
+  // interactivePlan (reached in 'auto' mode) dispatches steps through this.
+  // Default to a failed dispatch so interactive planning bows out and the
+  // single-shot path — which these tests exercise — takes over cleanly.
+  sendToContentScript: vi.fn().mockResolvedValue({ success: false, error: 'no content script in test' }),
 }));
 
 vi.mock('../../../src/storage/indexed-db', () => ({
@@ -19,7 +23,8 @@ vi.mock('../../../src/core/explorer/page-scanner', () => ({
 
 vi.mock('../../../src/core/explorer/interaction-graph', () => ({
   loadGraph: vi.fn().mockResolvedValue(undefined),
-  extractAllFormFields: vi.fn().mockReturnValue('No form fields captured.'),
+  extractFormFieldsStructured: vi.fn().mockReturnValue('No form fields captured.'),
+  serializeNavigationMap: vi.fn().mockReturnValue('No navigation map available.'),
 }));
 
 vi.mock('../../../src/core/flow/flow-store', () => ({
@@ -44,7 +49,7 @@ vi.mock('../../../src/utils/dom-compress', () => ({
 
 const { planTest } = await import('../../../src/core/planner/test-planner');
 const { getPageSnapshot } = await import('../../../src/core/explorer/page-scanner');
-const { loadGraph, extractAllFormFields } = await import('../../../src/core/explorer/interaction-graph');
+const { loadGraph, extractFormFieldsStructured } = await import('../../../src/core/explorer/interaction-graph');
 const { getAllFlows, serializeFlowsForAI } = await import('../../../src/core/flow/flow-store');
 const { searchByText, formatSearchResults } = await import('../../../src/core/knowledge/vector-search');
 const { computePlanHash, getCachedPlan, cachePlan } = await import('../../../src/core/planner/plan-cache');
@@ -94,7 +99,7 @@ function setupDefaultMocks() {
   vi.mocked(searchByText).mockResolvedValue([]);
   vi.mocked(formatSearchResults).mockReturnValue('');
   vi.mocked(loadGraph).mockResolvedValue(undefined);
-  vi.mocked(extractAllFormFields).mockReturnValue('No form fields captured.');
+  vi.mocked(extractFormFieldsStructured).mockReturnValue('No form fields captured.');
   vi.mocked(getAllFlows).mockResolvedValue([]);
   vi.mocked(serializeFlowsForAI).mockReturnValue('No learned flows available.');
   vi.mocked(computePlanHash).mockResolvedValue('hash-abc');
@@ -150,7 +155,9 @@ describe('planTest', () => {
   });
 
   it('given valid test case when no cached plan then calls AI and returns plan', async () => {
-    const plan = await planTest(baseTestCase, mockAIClient as never, MOCK_TAB_ID);
+    // Force single-shot: this test asserts the single-shot LLM path (one chat
+    // call). 'auto' would try interactive planning first.
+    const plan = await planTest(baseTestCase, mockAIClient as never, MOCK_TAB_ID, false, undefined, 'single-shot');
 
     expect(plan).toBeDefined();
     expect(plan.steps).toHaveLength(5);
@@ -225,7 +232,7 @@ describe('planTest', () => {
       steps: ['Navigate to login', 'Enter credentials', 'Click submit'],
     };
 
-    await planTest(testCaseWithSteps, mockAIClient as never, MOCK_TAB_ID);
+    await planTest(testCaseWithSteps, mockAIClient as never, MOCK_TAB_ID, false, undefined, 'single-shot');
 
     const chatCall = mockAIClient.chat.mock.calls[0];
     const userMessage = chatCall[0].find((m: { role: string }) => m.role === 'user');
@@ -243,7 +250,7 @@ describe('planTest', () => {
       setupSteps: ['Sign in as admin', 'Open the Projects workspace'],
     };
 
-    await planTest(presetBackedTest, mockAIClient as never, MOCK_TAB_ID);
+    await planTest(presetBackedTest, mockAIClient as never, MOCK_TAB_ID, false, undefined, 'single-shot');
 
     const chatCall = mockAIClient.chat.mock.calls[0];
     const userMessage = chatCall[0].find((m: { role: string }) => m.role === 'user');
@@ -290,7 +297,10 @@ describe('planTest', () => {
         description: 'Verify the user can open Call AI DSR Coaching from the dashboard',
       },
       mockAIClient as never,
-      MOCK_TAB_ID
+      MOCK_TAB_ID,
+      false,
+      undefined,
+      'single-shot'
     );
 
     expect(plan.steps[0].action).toBe('click');
@@ -299,15 +309,21 @@ describe('planTest', () => {
     expect(plan.steps[1].action).toBe('assert');
   });
 
-  it('given plan with unknown action types when parsing then defaults to click', async () => {
-    const stepsWithBadAction = [
+  it('given a plan with an unknown action type then that step is DROPPED (not silently coerced to click)', async () => {
+    // A valid step alongside a bogus one — the bogus action must be dropped, the
+    // valid step kept. Silently turning "unknown_action" into a click would fire
+    // a real click on the page.
+    const steps = [
       { order: 1, action: 'unknown_action', selector: '#btn', description: 'Do something' },
+      { order: 2, action: 'click', selector: '#real', description: 'Real click' },
     ];
-    mockAIClient.chat.mockResolvedValue(JSON.stringify({ steps: stepsWithBadAction }));
+    mockAIClient.chat.mockResolvedValue(JSON.stringify({ steps }));
 
     const plan = await planTest(baseTestCase, mockAIClient as never, MOCK_TAB_ID);
 
-    expect(plan.steps[0].action).toBe('click');
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.steps[0].selector).toBe('#real');
+    expect(plan.steps.some((s) => s.selector === '#btn')).toBe(false);
   });
 
   it('given knowledge results exist when planning then includes them in prompt', async () => {
@@ -319,7 +335,7 @@ describe('planTest', () => {
       },
     ]);
 
-    await planTest(baseTestCase, mockAIClient as never, MOCK_TAB_ID);
+    await planTest(baseTestCase, mockAIClient as never, MOCK_TAB_ID, false, undefined, 'single-shot');
 
     const chatCall = mockAIClient.chat.mock.calls[0];
     const userMessage = chatCall[0].find((m: { role: string }) => m.role === 'user');

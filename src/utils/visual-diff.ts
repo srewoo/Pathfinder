@@ -167,7 +167,9 @@ async function decodeDataUrl(dataUrl: string): Promise<ImageData> {
 async function encodeDiffImage(pixelData: Uint8ClampedArray, width: number, height: number): Promise<string> {
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d')!;
-  const imageData = new ImageData(pixelData as unknown as Uint8ClampedArray, width, height);
+  // Copy into a fresh ArrayBuffer-backed array — the DOM ImageData ctor rejects
+  // a SharedArrayBuffer-backed Uint8ClampedArray under strict lib typings.
+  const imageData = new ImageData(new Uint8ClampedArray(pixelData), width, height);
   ctx.putImageData(imageData, 0, 0);
 
   const blob = await canvas.convertToBlob({ type: 'image/png' });

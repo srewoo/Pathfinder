@@ -1,4 +1,4 @@
-const IS_DEV = import.meta.env?.DEV ?? false;
+const IS_DEV = (import.meta as { env?: { DEV?: boolean } }).env?.DEV ?? false;
 
 type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 

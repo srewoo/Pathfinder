@@ -1,4 +1,3 @@
-import React from 'react';
 import { FileText, ExternalLink } from 'lucide-react';
 import type { CrawledDocument } from '../../../storage/schemas';
 

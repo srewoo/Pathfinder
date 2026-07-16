@@ -415,3 +415,99 @@ describe('exploreApp — fresh re-scan, stale pruning, change detection', () => 
     expect(clicked).toBe(true);
   });
 });
+
+describe('exploreApp — coverage / health reporting', () => {
+  let chromeMock: ReturnType<typeof makeChromeMock>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    chromeMock = makeChromeMock();
+    vi.stubGlobal('chrome', chromeMock);
+    vi.mocked(scanner.scanPage).mockResolvedValue([]);
+    vi.mocked(scanner.scanFormFields).mockResolvedValue([]);
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([]);
+    vi.mocked(scanner.scanPageMetadata).mockResolvedValue({ headings: [] });
+    vi.mocked(scanner.getPageSnapshot).mockResolvedValue({ url: START, title: 'Home' } as never);
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([]);
+    vi.mocked(scanner.detectModal).mockResolvedValue({ found: false } as never);
+    vi.mocked(scanner.scanPageType).mockResolvedValue({ pageType: 'other', isErrorPage: false } as never);
+    vi.mocked(sendToContentScript).mockResolvedValue({ payload: { hasError: false, hasSuccess: false } } as never);
+    vi.mocked(graphMod.loadGraph).mockResolvedValue(undefined);
+  });
+
+  it('given a null page snapshot when scanning then it is counted as a SCAN FAILURE (not an empty page)', async () => {
+    // Content script never answers → snapshot null on both the initial read and
+    // the one retry. This must be distinguishable from a genuinely empty page.
+    vi.mocked(scanner.getPageSnapshot).mockResolvedValue(null);
+
+    const { graph, coverage } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    expect(coverage.pagesFailed).toBe(1);
+    expect(coverage.pagesScanned).toBe(0);
+    expect(graph.nodes).toHaveLength(0); // no node created for a failed scan
+    expect(coverage.warnings.some((w) => w.includes('Scan failed'))).toBe(true);
+  });
+
+  it('given a healthy but empty page then it is scanned (NOT a failure)', async () => {
+    // Snapshot responds; the page just has no interactive elements.
+    vi.mocked(scanner.getPageSnapshot).mockResolvedValue({ url: START, title: 'Home' } as never);
+    vi.mocked(scanner.scanPage).mockResolvedValue([]);
+
+    const { graph, coverage } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    expect(coverage.pagesFailed).toBe(0);
+    expect(coverage.pagesScanned).toBe(1);
+    expect(graph.nodes).toHaveLength(1);
+  });
+
+  it('given a CRAWL run with a link left uncrawled then it is an untested path and coverage < 100%', async () => {
+    // maxDepth 1 (crawl scope) so /other is enqueued, but maxPages 1 caps the run
+    // before it's visited → discovered edge, never mapped.
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([{ url: `${ORIGIN}/other`, text: 'Other' }] as never);
+
+    const { graph, coverage } = await exploreApp({
+      startUrl: START, maxDepth: 1, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    expect(graph.edges.some((e) => e.to === `${ORIGIN}/other`)).toBe(true);
+    expect(coverage.singlePage).toBe(false);
+    expect(coverage.untestedPaths).toBe(1);
+    expect(coverage.coverageRatio).toBeCloseTo(0.5); // 1 mapped page, 1 untested path → 50%
+  });
+
+  it('given a SINGLE-PAGE run then discovered links are next-steps, not coverage gaps (ratio 100%)', async () => {
+    // "This page only" (maxDepth 0): the page is the whole scope. It surfaces
+    // links to explore, but a fully-scanned page is 100% coverage — not 3%.
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([
+      { url: `${ORIGIN}/a`, text: 'A' },
+      { url: `${ORIGIN}/b`, text: 'B' },
+    ] as never);
+
+    const { coverage } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    expect(coverage.singlePage).toBe(true);
+    expect(coverage.pagesScanned).toBe(1);
+    expect(coverage.untestedPaths).toBe(2);   // reported as "links to explore"
+    expect(coverage.coverageRatio).toBe(1);   // the anchored page was fully mapped
+    expect(coverage.complete).toBe(true);     // hitting maxPages 1 is completion here, not truncation
+  });
+
+  it('given a page that resolves to an error page then it is counted as a BROKEN LINK and not mapped', async () => {
+    vi.mocked(scanner.scanPageType).mockResolvedValue({ pageType: 'error', isErrorPage: true, httpStatus: 404 } as never);
+
+    const { graph, coverage } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    expect(coverage.brokenLinks).toBe(1);
+    expect(coverage.pagesScanned).toBe(0);
+    expect(graph.nodes).toHaveLength(0);
+    expect(coverage.warnings.some((w) => w.includes('Broken/error page'))).toBe(true);
+  });
+});

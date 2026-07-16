@@ -1,4 +1,3 @@
-import React from 'react';
 import { CheckCircle2, ArrowRight, X } from 'lucide-react';
 
 interface NextStepBannerProps {

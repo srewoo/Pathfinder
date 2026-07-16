@@ -32,7 +32,7 @@ describe('HAR Impact Analysis', () => {
   });
 
   it('should return 100% coverage when no endpoints are discovered', async () => {
-    mockedLoadGraph.mockResolvedValue(null);
+    mockedLoadGraph.mockResolvedValue(undefined);
     const report = await analyzeHARImpact([]);
     expect(report.summary.totalEndpoints).toBe(0);
     expect(report.summary.coveragePercent).toBe(100);
@@ -92,7 +92,7 @@ describe('HAR Impact Analysis', () => {
   });
 
   it('should normalize dynamic URL segments for grouping', async () => {
-    mockedLoadGraph.mockResolvedValue(null);
+    mockedLoadGraph.mockResolvedValue(undefined);
 
     const result = makeTestResult({
       harEntries: [
@@ -107,7 +107,7 @@ describe('HAR Impact Analysis', () => {
   });
 
   it('should skip static assets in HAR entries', async () => {
-    mockedLoadGraph.mockResolvedValue(null);
+    mockedLoadGraph.mockResolvedValue(undefined);
 
     const result = makeTestResult({
       harEntries: [
@@ -122,7 +122,7 @@ describe('HAR Impact Analysis', () => {
   });
 
   it('should generate a markdown report', async () => {
-    mockedLoadGraph.mockResolvedValue(null);
+    mockedLoadGraph.mockResolvedValue(undefined);
     const report = await analyzeHARImpact([]);
     const markdown = formatHARImpactReport(report);
     expect(markdown).toContain('API Coverage Report');

@@ -9,7 +9,7 @@ import { getPageSnapshot } from '../explorer/page-scanner';
 import { testCaseDB, testResultDB, planDB } from '../../storage/indexed-db';
 import { getActiveTabId } from '../../messaging/messenger';
 import { captureTab } from '../../utils/screenshot';
-import { captureFullPageScreenshot } from '../cdp/cdp-client';
+import { captureFullPageScreenshot, isAttached, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
 import { generateId, generateRunId } from '../../utils/hash';
 import { createLogger } from '../../utils/logger';
 import { generatePostStepAssertion, assertionToStep } from './assertion-generator';
@@ -115,7 +115,16 @@ export async function executeTest(
         const harEntries = await teardownCDPSession(tabId);
         cdpActive = false;
         if (harEntries.length > 0) {
-          (result as any).harEntries = harEntries;
+          // Project the rich CDP HAR shape onto the persisted subset.
+          result.harEntries = harEntries.map((e) => ({
+            url: e.url,
+            method: e.method,
+            status: e.status,
+            statusText: e.statusText,
+            mimeType: e.mimeType,
+            duration: e.duration,
+            bodySize: e.bodySize,
+          }));
         }
       }
       await finalizeResult(testCase, result);
@@ -320,14 +329,17 @@ async function runParallel(
     }
   });
 
-  await Promise.all(workers);
-  const results: TestResult[] = resultsByIndex.filter((r): r is TestResult => r !== undefined);
-
-  // Clean up extra tabs
-  for (const tabId of extraTabIds) {
-    try { await chrome.tabs.remove(tabId); } catch { /* tab may already be closed */ }
+  try {
+    await Promise.all(workers);
+  } finally {
+    // Always clean up the extra tabs, even if a worker threw a non-budget
+    // error — otherwise a failed parallel run leaks background tabs.
+    for (const tabId of extraTabIds) {
+      try { await chrome.tabs.remove(tabId); } catch { /* tab may already be closed */ }
+    }
   }
 
+  const results: TestResult[] = resultsByIndex.filter((r): r is TestResult => r !== undefined);
   log.info(`Parallel run complete: ${results.filter((r) => r.status === 'passed').length}/${results.length} passed`);
   return results;
 }
@@ -346,10 +358,16 @@ async function attemptExecution(
   timeoutMultiplier: number
 ): Promise<TestResult> {
   // ── Auth setup: inject cookies and verify session before test ──
+  // If verification fails we still proceed (aborting every test on an
+  // unverifiable session is often worse), but we RECORD the warning so a
+  // downstream failure isn't misattributed — a test that fails because it was
+  // never authenticated should say so, not just log it and look like a UI bug.
+  let authWarning: string | undefined;
   if (testCase.requiresAuthenticatedSession && testCase.executionPresetId) {
     const authResult = await ensureAuthenticated(tabId, testCase.executionPresetId, testCase.startUrl);
     if (!authResult.authenticated) {
-      log.warn(`Auth setup failed (method: ${authResult.method}) — proceeding anyway`);
+      authWarning = `Auth setup could not be verified (method: ${authResult.method}) — the test ran without a confirmed session and may fail for that reason.`;
+      log.warn(authWarning);
     } else {
       log.info(`Auth verified via ${authResult.method}`);
     }
@@ -366,7 +384,9 @@ async function attemptExecution(
     }
     try {
       await navigateTab(tabId, effectiveStartUrl);
-      await delay(2000); // wait for SPA to render
+      // Wait for the SPA to actually settle (network idle + DOM) rather than a
+      // blind 2s sleep — faster on quick pages, more reliable on slow ones.
+      await settleTab(tabId, options.cdpActive, 2000);
     } catch (navErr) {
       log.warn('Failed to navigate to startUrl before test', navErr);
     }
@@ -449,8 +469,10 @@ async function attemptExecution(
       ? await getPageSnapshot(tabId).then((s) => s?.url ?? '').catch(() => '')
       : '';
 
-    // Adaptive delay based on previous step type
-    await delay(getPostStepDelay(previousStep, step));
+    // Let the previous step's effects settle before the next one. Prefer the
+    // network-idle/DOM-settle signal when CDP is live; the action-type ladder is
+    // only the fallback ceiling when CDP is unavailable.
+    await settleTab(tabId, options.cdpActive, getPostStepDelay(previousStep, step));
 
     const stepStart = Date.now();
 
@@ -499,8 +521,9 @@ async function attemptExecution(
       // Many transient failures (element not yet rendered, animation in progress)
       // resolve with a short delay. Try once more before expensive healing.
       {
-        const retryDelay = Math.min(1500, (step.timeout ?? 10000) * 0.15);
-        await new Promise((r) => setTimeout(r, retryDelay));
+        // Give transient conditions (mid-render, animation) a chance to clear —
+        // settle on the live signal when CDP is up, else a bounded backoff.
+        await settleTab(tabId, options.cdpActive, Math.min(1500, (step.timeout ?? 10000) * 0.15));
         const quickRetry = await (options.cdpActive ? runStepWithCDP : runStep)(resolvedStep, tabId);
         if (quickRetry.status === 'passed') {
           result = quickRetry;
@@ -614,12 +637,30 @@ async function attemptExecution(
     steps: stepResults,
     screenshot,
     domSnapshot: snapshot?.domCompressed,
-    errorMessage: aborted
-      ? stepResults.findLast((r) => r.error)?.error
-      : (signalAborted ? 'Test aborted (per-test time ceiling or run stopped)' : undefined),
+    errorMessage: buildErrorMessage(finalStatus, aborted, signalAborted, stepResults, authWarning),
     healingAttempts: stepResults.filter((r) => r.healingAttempt).map((r) => r.healingAttempt!),
     runId,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Build the result error message, folding in an unverified-auth warning when
+// the test did not pass (so an auth-caused failure isn't misattributed).
+// ---------------------------------------------------------------------------
+function buildErrorMessage(
+  finalStatus: TestResult['status'],
+  aborted: boolean,
+  signalAborted: boolean,
+  stepResults: StepResult[],
+  authWarning: string | undefined,
+): string | undefined {
+  const base = aborted
+    ? stepResults.findLast((r) => r.error)?.error
+    : (signalAborted ? 'Test aborted (per-test time ceiling or run stopped)' : undefined);
+  if (finalStatus !== 'passed' && authWarning) {
+    return base ? `${authWarning} | ${base}` : authWarning;
+  }
+  return base;
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +761,22 @@ async function executeExtendedStep(
     return { step, status: 'skipped', duration: 0 };
   } catch (err) {
     return { step, status: 'failed', duration: 0, error: String(err) };
+  }
+}
+
+/**
+ * Wait for the tab to stabilize after a navigation or interaction. When a CDP
+ * session is live (the normal case — initCDPSession enables the Network domain)
+ * this waits for the network to go quiet and the DOM to settle, so fast pages
+ * proceed in a few hundred ms and slow SPAs get the time they need. Falls back
+ * to a fixed sleep only when CDP is unavailable for the tab.
+ */
+async function settleTab(tabId: number, cdpActive: boolean | undefined, fallbackMs: number): Promise<void> {
+  if (cdpActive && isAttached(tabId)) {
+    await waitForNetworkIdle(tabId, { idleMs: 350, timeoutMs: Math.max(3_000, fallbackMs * 2) });
+    await waitForDomSettle(tabId, 2_000);
+  } else {
+    await delay(fallbackMs);
   }
 }
 

@@ -19,7 +19,7 @@ const el = (overrides: Partial<InteractiveElement>): InteractiveElement => ({
 const reply = (elements: InteractiveElement[]) =>
   vi.mocked(sendToContentScript).mockResolvedValue({ payload: elements } as never);
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.clearAllMocks(); });
 
 describe('findSimilarElements', () => {
   it('given content script throws when finding then returns empty', async () => {

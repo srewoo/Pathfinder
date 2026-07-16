@@ -58,7 +58,7 @@ export class AnthropicProvider implements AIClientInterface {
     return text;
   }
 
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(_texts: string[]): Promise<number[][]> {
     throw new Error(
       'Anthropic does not have a native embedding API. Please switch to OpenAI or Google for embedding generation.'
     );

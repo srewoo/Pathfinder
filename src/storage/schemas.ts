@@ -273,6 +273,12 @@ export interface PageNode {
   httpStatus?: number;
   /** Page load time in ms observed during exploration (navigation → DOM idle) */
   loadTimeMs?: number;
+  /**
+   * Full-page screenshot (base64 PNG data URL) captured during exploration when
+   * `captureScreenshots` is enabled. Lets a human visually verify the mapped
+   * page. Opt-in because storing one per node is storage-heavy.
+   */
+  screenshot?: string;
   /** Multi-step wizard/stepper form detected on this page */
   wizardSteps?: WizardStep[];
   /**
@@ -442,6 +448,14 @@ export interface TestCase {
   steps?: string[];
   /** Provenance per step, aligned by index with `steps`. Optional — absent for legacy/user tests. */
   stepConfidence?: StepConfidence[];
+  /**
+   * Deterministic execution plan built from selectors captured during
+   * exploration. When present, the planner runs these steps verbatim (no LLM)
+   * on the first attempt — the strongest CDP-executability guarantee — only
+   * re-deriving via the LLM if they fail and a fresh plan is requested.
+   * Set only when every step maps to a concrete executable step.
+   */
+  preplan?: ExecutionStep[];
   executionPresetId?: string;
   executionPresetName?: string;
   personaLabel?: string;
@@ -489,7 +503,11 @@ export type AssertType =
   | 'value'        // input value equals expected
   | 'attribute'    // element attribute equals expected
   | 'exists'       // element is in DOM (may be hidden)
-  | 'not_exists';  // element is absent from DOM
+  | 'not_exists'   // element is absent from DOM
+  // ── Network / API oracles (evaluated against captured HAR, CDP mode) ──
+  | 'api_called'      // an API request matching the spec was observed
+  | 'api_not_called'  // NO API request matched the spec (e.g. no error endpoint hit)
+  | 'api_status';     // a matching API request returned the expected status (e.g. "POST /api/login 200")
 
 export interface ExecutionStep {
   order: number;
@@ -663,4 +681,61 @@ export interface ExplorationProgress {
   currentPage: string;
   status: 'running' | 'paused' | 'done' | 'error';
   error?: string;
+  /**
+   * Coverage snapshot — populated live during the run and finalised on
+   * completion. Lets the UI show real coverage rather than raw visit counts,
+   * and distinguishes "we scanned an empty page" from "the scan failed".
+   */
+  coverage?: ExplorationCoverage;
+}
+
+/**
+ * Coverage/health summary for an exploration run. Answers the questions the
+ * product promises ("find untested paths", "broken links") with concrete
+ * numbers instead of raw counts.
+ */
+export interface ExplorationCoverage {
+  /** Pages the crawler attempted (dequeued and navigated to). */
+  pagesAttempted: number;
+  /** Pages whose DOM was successfully read (content script responded). */
+  pagesScanned: number;
+  /**
+   * Pages that failed to scan — content script never responded, navigation
+   * failed, or the page errored. These are NOT the same as empty pages.
+   */
+  pagesFailed: number;
+  /**
+   * Destination URLs that were discovered (recorded as edges) but never
+   * crawled — capped out by depth, page limit, run budget, or a saturated URL
+   * pattern. These are the "untested paths" the product surfaces.
+   */
+  untestedPaths: number;
+  /** Distinct broken links found (edges whose destination returned an error page / 4xx-5xx). */
+  brokenLinks: number;
+  /**
+   * Coverage ratio in [0,1], interpreted relative to the run's SCOPE:
+   *  · crawl runs ("from here" / "whole app"): mappedPages / (mappedPages +
+   *    untestedPaths) — how much of everything discovered was actually mapped.
+   *  · single-page runs ("this page only"): pagesScanned / pagesAttempted — the
+   *    anchored page is the whole intended scope, so a clean run is 1.0 and the
+   *    links it found are reported as `untestedPaths` (a next-step hint), not a
+   *    coverage deduction.
+   */
+  coverageRatio: number;
+  /**
+   * True when the run was scoped to a single page (no link following). Signals
+   * consumers that `coverageRatio` measures only the anchored page and that
+   * `untestedPaths` are discovered-but-out-of-scope links, not gaps.
+   */
+  singlePage: boolean;
+  /**
+   * Whether the run finished naturally (queue drained) vs. was truncated by a
+   * limit or stopped. A truncated run's coverage is a floor, not the total.
+   */
+  complete: boolean;
+  /**
+   * Human-readable warnings surfaced during the run (scan failures, form
+   * exploration errors, auth issues). Empty when the run was clean.
+   */
+  warnings: string[];
 }

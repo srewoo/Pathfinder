@@ -31,9 +31,9 @@ export function collectShadowHosts(el: Element): Element[] {
   const hosts: Element[] = [];
   let cur: Node | null = el;
   while (cur) {
-    const root = (cur as Element).getRootNode?.();
-    if (root && (root as ShadowRoot).host && (root as ShadowRoot) !== cur.ownerDocument) {
-      const host = (root as ShadowRoot).host;
+    const root: Node | undefined = cur.getRootNode?.();
+    if (root && root !== cur.ownerDocument && (root as ShadowRoot).host) {
+      const host: Element = (root as ShadowRoot).host;
       hosts.push(host);
       cur = host;
     } else {

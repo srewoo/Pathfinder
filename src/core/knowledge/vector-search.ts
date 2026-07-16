@@ -1,4 +1,6 @@
 import type { VectorRecord } from '../../storage/schemas';
+// Re-export so consumers/tests can pull the record type from the search module.
+export type { VectorRecord } from '../../storage/schemas';
 import { vectorDB } from '../../storage/indexed-db';
 import { createLogger } from '../../utils/logger';
 
@@ -304,11 +306,11 @@ async function getIndex(): Promise<IVFIndex> {
 
 // ── Cosine similarity ────────────────────────────────────────────────────────
 function cosineSimilarity(a: number[] | Float32Array, b: number[] | Float32Array): number {
-  if (a.length !== b.length) {
-    const ratio = Math.min(a.length, b.length) / Math.max(a.length, b.length);
-    if (ratio < 0.9) return 0;
-  }
-  const len = Math.min(a.length, b.length);
+  // Cosine similarity is only defined for equal-dimension vectors. Comparing
+  // over min(len) produces a meaningless score, so mismatched dimensions
+  // (e.g. a local 384-d vector against an API 1536-d one) score 0.
+  if (a.length !== b.length) return 0;
+  const len = a.length;
   if (len === 0) return 0;
 
   let dot = 0;
@@ -496,7 +498,14 @@ export async function search(
     diversityFactor = 0.3,
   } = options;
 
-  // Validate query dimensions against index
+  // Build/refresh the index FIRST so the dimension guard below compares against
+  // the current corpus. Reading `indexDimensions` before getIndex() used a
+  // stale value after an external DB clear + re-embed at a different dimension,
+  // causing a spurious empty result.
+  const index = await getIndex();
+  if (index.size === 0) return [];
+
+  // Validate query dimensions against the (now-current) index.
   if (indexDimensions > 0 && queryEmbedding.length !== indexDimensions) {
     const ratio = Math.min(queryEmbedding.length, indexDimensions) / Math.max(queryEmbedding.length, indexDimensions);
     if (ratio < 0.9) {
@@ -504,9 +513,6 @@ export async function search(
       return [];
     }
   }
-
-  const index = await getIndex();
-  if (index.size === 0) return [];
 
   // Use IVF index for candidate retrieval
   const candidates = index.search(queryEmbedding, topK, minScore, DEFAULT_N_PROBE, filterUrl);

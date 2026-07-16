@@ -1,4 +1,3 @@
-import React from 'react';
 import { Bug, Settings, Sun, Moon, HelpCircle } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settings-store';
 

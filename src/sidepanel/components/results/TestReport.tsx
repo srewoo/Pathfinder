@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from "react";
 import { ChevronDown, ChevronRight, Clock } from 'lucide-react';
 import type { TestResult } from '../../../storage/schemas';
 import { StatusIndicator } from '../shared/StatusIndicator';

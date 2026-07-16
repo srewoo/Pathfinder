@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import { Play, Square, Loader2, Globe, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '../shared/Button';
 import { useExplorerStore } from '../../stores/explorer-store';
-import type { ExplorationProgress } from '../../../storage/schemas';
+import type { ExplorationProgress, ExplorationCoverage } from '../../../storage/schemas';
 
 interface ExplorerControlsProps {
   progress: ExplorationProgress | null;
@@ -197,8 +197,104 @@ export function ExplorerControls({ progress, isExploring, reexploringUrl }: Expl
             <Stat value={progress.elementsFound} label="Elements" />
             <Stat value={progress.edgesRecorded} label="Links" />
           </div>
+          {progress.coverage && (
+            <CoverageBar coverage={progress.coverage} />
+          )}
           {progress.currentPage && (
             <p className="text-2xs text-text-muted truncate text-center">→ {progress.currentPage}</p>
+          )}
+        </div>
+      )}
+
+      {/* Last-run coverage summary — persists after the run finishes so the user
+          sees what was (and wasn't) covered, not just raw visit counts. */}
+      {!isExploring && !showProgress && store.coverage && (
+        <CoverageSummary coverage={store.coverage} />
+      )}
+    </div>
+  );
+}
+
+function pct(ratio: number): string {
+  return `${Math.round(ratio * 100)}%`;
+}
+
+/** Compact live coverage strip shown under the running progress stats. */
+function CoverageBar({ coverage }: { coverage: ExplorationCoverage }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-2xs">
+        <span className="text-text-muted">{coverage.singlePage ? 'Page mapped' : 'Coverage'}</span>
+        <span className="font-semibold text-text-primary">{pct(coverage.coverageRatio)}</span>
+      </div>
+      <div className="h-1 w-full rounded-full bg-surface-3 overflow-hidden">
+        <div
+          className="h-full bg-primary transition-all"
+          style={{ width: `${Math.round(coverage.coverageRatio * 100)}%` }}
+        />
+      </div>
+      <div className="flex items-center justify-center gap-3 text-2xs text-text-muted">
+        {coverage.pagesFailed > 0 && <span className="text-warning">{coverage.pagesFailed} failed</span>}
+        {coverage.untestedPaths > 0 && (
+          <span>{coverage.untestedPaths} {coverage.singlePage ? 'links found' : 'untested'}</span>
+        )}
+        {coverage.brokenLinks > 0 && <span className="text-danger">{coverage.brokenLinks} broken</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Post-run coverage/health card with warnings. Scope-aware: a single-page run
+ *  reports the anchored page as its whole scope (100% when clean) and treats the
+ *  links it discovered as next-step hints rather than coverage gaps. */
+function CoverageSummary({ coverage }: { coverage: ExplorationCoverage }) {
+  const [showWarnings, setShowWarnings] = useState(false);
+  const clean = coverage.pagesFailed === 0 && coverage.brokenLinks === 0 && coverage.warnings.length === 0;
+  const { singlePage } = coverage;
+  return (
+    <div className="p-3 bg-surface-2 border border-border rounded-lg space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-2xs font-medium text-text-secondary">
+          {singlePage ? 'Last run — this page' : `Last run coverage${coverage.complete ? '' : ' (partial)'}`}
+        </span>
+        <span className="text-sm font-bold text-text-primary">{pct(coverage.coverageRatio)}</span>
+      </div>
+      <div className="h-1 w-full rounded-full bg-surface-3 overflow-hidden">
+        <div className="h-full bg-primary" style={{ width: `${Math.round(coverage.coverageRatio * 100)}%` }} />
+      </div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-2xs text-text-muted">
+        <span>{coverage.pagesScanned} page{coverage.pagesScanned === 1 ? '' : 's'} mapped</span>
+        {singlePage ? (
+          <span className={coverage.untestedPaths > 0 ? 'text-text-secondary' : ''}>{coverage.untestedPaths} link{coverage.untestedPaths === 1 ? '' : 's'} to explore</span>
+        ) : (
+          <span className={coverage.untestedPaths > 0 ? 'text-text-secondary' : ''}>{coverage.untestedPaths} untested path{coverage.untestedPaths === 1 ? '' : 's'}</span>
+        )}
+        <span className={coverage.pagesFailed > 0 ? 'text-warning' : ''}>{coverage.pagesFailed} scan failure{coverage.pagesFailed === 1 ? '' : 's'}</span>
+        <span className={coverage.brokenLinks > 0 ? 'text-danger' : ''}>{coverage.brokenLinks} broken link{coverage.brokenLinks === 1 ? '' : 's'}</span>
+      </div>
+      {clean && singlePage && coverage.untestedPaths > 0 && (
+        <p className="text-2xs text-text-muted">This page was mapped fully. Switch scope to “From here outward” to explore the {coverage.untestedPaths} link{coverage.untestedPaths === 1 ? '' : 's'} it found.</p>
+      )}
+      {clean && singlePage && coverage.untestedPaths === 0 && (
+        <p className="text-2xs text-success">✓ Clean run — this page was mapped fully.</p>
+      )}
+      {clean && !singlePage && <p className="text-2xs text-success">✓ Clean run — everything discovered was mapped.</p>}
+      {coverage.warnings.length > 0 && (
+        <div className="border-t border-border pt-1.5">
+          <button
+            type="button"
+            onClick={() => setShowWarnings((v) => !v)}
+            className="flex items-center gap-1 text-2xs font-medium text-warning"
+          >
+            {showWarnings ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            {coverage.warnings.length} warning{coverage.warnings.length === 1 ? '' : 's'}
+          </button>
+          {showWarnings && (
+            <ul className="mt-1 space-y-0.5 max-h-32 overflow-y-auto">
+              {coverage.warnings.map((w, i) => (
+                <li key={i} className="text-2xs text-text-muted font-mono break-all leading-tight">• {w}</li>
+              ))}
+            </ul>
           )}
         </div>
       )}

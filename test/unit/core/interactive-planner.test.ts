@@ -28,7 +28,10 @@ const snap: PageSnapshot = {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getPageSnapshot).mockResolvedValue(snap);
-  vi.mocked(sendToContentScript).mockResolvedValue(undefined as never);
+  // The content script reports the real outcome; a successful action resolves
+  // with { success: true }. executeStep now inspects this instead of treating
+  // any resolved response as success.
+  vi.mocked(sendToContentScript).mockResolvedValue({ success: true } as never);
 });
 
 describe('interactivePlan', () => {
@@ -70,12 +73,14 @@ describe('interactivePlan', () => {
     expect(result.steps[0].action).toBe('type');
   });
 
-  it('given unknown action when planning then defaults to click', async () => {
+  it('given an unknown action when planning then it is rejected (NOT silently turned into a click)', async () => {
     aiClient.chat
       .mockResolvedValueOnce(JSON.stringify({ action: 'frobnicate', selector: '#x', description: 'd' }))
       .mockResolvedValue(JSON.stringify({ action: 'click', isDone: true }));
     const result = await interactivePlan(1, 'goal', aiClient as never, 3);
-    expect(result.steps[0].action).toBe('click');
+    // The bogus action must not be fabricated into a real click on the page.
+    expect(result.steps.some((s) => s.action === 'click' && s.description === 'd')).toBe(false);
+    expect(result.goalAchieved).toBe(false);
   });
 
   it('given same action repeats more than threshold when planning then breaks with loop reason', async () => {
@@ -93,10 +98,23 @@ describe('interactivePlan', () => {
       .mockResolvedValue(JSON.stringify({ action: 'click', isDone: true }));
     vi.mocked(sendToContentScript)
       .mockRejectedValueOnce(new Error('fail'))
-      .mockResolvedValue(undefined as never);
+      .mockResolvedValue({ success: true } as never);
     const result = await interactivePlan(1, 'goal', aiClient as never, 3);
     expect(result.steps).toHaveLength(1);
     expect(result.steps[0].selector).toBe('#good');
+  });
+
+  it('given content script reports success:false when planning then step is not recorded as passed', async () => {
+    // Regression: executeStep previously treated any resolved response as
+    // success, so a failed action was recorded as a verified step. It must
+    // now honour { success: false } and route through the retry/stuck path.
+    aiClient.chat
+      .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#bad', description: 'd' }))
+      .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#worse', description: 'd' }));
+    vi.mocked(sendToContentScript).mockResolvedValue({ success: false, error: 'element not found' } as never);
+    const result = await interactivePlan(1, 'goal', aiClient as never, 3);
+    expect(result.steps).toHaveLength(0);
+    expect(result.failureReason).toMatch(/Stuck at step/);
   });
 
   it('given executeStep fails and retry also fails when planning then breaks with stuck reason', async () => {

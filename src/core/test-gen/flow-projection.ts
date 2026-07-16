@@ -1,4 +1,4 @@
-import type { Flow, FlowStep, TestCase, FlowCoverageType } from '../../storage/schemas';
+import type { Flow, FlowStep, TestCase, FlowCoverageType, ExecutionStep, ActionType } from '../../storage/schemas';
 import { testCaseDB } from '../../storage/indexed-db';
 import { generateId } from '../../utils/hash';
 import { createLogger } from '../../utils/logger';
@@ -64,6 +64,57 @@ function quoteIfText(target: string): string {
   return /^https?:\/\//i.test(target) ? target : `"${target}"`;
 }
 
+/** Map a flow's action verb to an executable CDP action type. */
+const ACTION_MAP: Record<string, ActionType> = {
+  navigate: 'navigate', type: 'type', fill: 'type', select: 'select',
+  check: 'check', uncheck: 'uncheck', click: 'click', verify: 'assert', assert: 'assert',
+};
+
+/**
+ * Convert one structured flow step into a concrete, CDP-executable ExecutionStep.
+ * Returns null when the step can't be executed deterministically (e.g. a click
+ * with no captured selector) — that's the signal to fall back to LLM planning.
+ */
+function flowStepToExecutionStep(step: FlowStep, order: number): ExecutionStep | null {
+  const action = ACTION_MAP[step.action];
+  const description = step.description || stepToInstruction(step);
+
+  if (action === 'assert' || step.action === 'verify') {
+    const isUrl = step.target === 'page-url' || isUrlish(step.value) || isUrlish(step.target);
+    return isUrl
+      ? { order, action: 'assert', description, assertType: 'url', assertExpected: step.value || step.target || '' }
+      : { order, action: 'assert', description, assertType: 'text', assertExpected: step.target || step.expectedOutcome || '' };
+  }
+  if (action === 'navigate') {
+    return step.value ? { order, action: 'navigate', value: step.value, description } : null;
+  }
+  // type / select / check / uncheck / click all need a captured selector to run verbatim.
+  if (!action || !step.selector) return null;
+  const exec: ExecutionStep = { order, action, selector: step.selector, description };
+  if ((action === 'type' || action === 'select') && step.value !== undefined) exec.value = step.value;
+  return exec;
+}
+
+function isUrlish(v: string | undefined): boolean {
+  return !!v && /^https?:\/\//i.test(v);
+}
+
+/**
+ * Build a deterministic execution plan from a flow's captured selectors — but
+ * ONLY if every step maps cleanly. A single selector-less action step returns
+ * undefined so the planner falls back to the LLM for that whole test (which is
+ * exactly where the inferred step needs resolving).
+ */
+function buildPreplan(orderedSteps: FlowStep[]): ExecutionStep[] | undefined {
+  const exec: ExecutionStep[] = [];
+  for (let i = 0; i < orderedSteps.length; i++) {
+    const mapped = flowStepToExecutionStep(orderedSteps[i], i + 1);
+    if (!mapped) return undefined;
+    exec.push(mapped);
+  }
+  return exec.length > 0 ? exec : undefined;
+}
+
 /**
  * Project a flow into its canonical executable test case (a draft — no DB).
  * One test per flow: the flow's own realization. Field-level data variations
@@ -77,6 +128,7 @@ export function projectFlowToTestCases(flow: Flow): Array<Omit<TestCase, 'status
   const hasKnowledge = (flow.knowledgeRefs?.length ?? 0) > 0;
   const steps = ordered.map(stepToInstruction);
   const stepConfidence = ordered.map((s) => confidenceFromFlowStep(s, hasKnowledge));
+  const preplan = buildPreplan(ordered);
   const grounded = hasKnowledge
     ? ` Grounded in docs: ${flow.knowledgeRefs!.map((r) => r.section || r.url).slice(0, 2).join(', ')}.`
     : '';
@@ -91,6 +143,7 @@ export function projectFlowToTestCases(flow: Flow): Array<Omit<TestCase, 'status
       source: 'generated',
       steps,
       stepConfidence,
+      preplan,
       startUrl: flow.startUrl,
     },
   ];

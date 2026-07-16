@@ -4,6 +4,7 @@ import type {
   FormField,
   CrawlProgress,
   ExplorationProgress,
+  ExplorationCoverage,
   PageSnapshot,
 } from '../storage/schemas';
 
@@ -110,7 +111,7 @@ export type SidebarMessage =
   | { type: 'CRAWL_COMPLETE'; payload: { docCount: number; vectorCount: number; skippedCount: number } }
   | { type: 'CRAWL_ERROR'; payload: { error: string } }
   | { type: 'EXPLORATION_PROGRESS'; payload: ExplorationProgress }
-  | { type: 'EXPLORATION_COMPLETE' }
+  | { type: 'EXPLORATION_COMPLETE'; payload?: { coverage?: ExplorationCoverage } }
   | { type: 'EXPLORATION_ERROR'; payload: { error: string } }
   | { type: 'CRAWL_STOPPED' }
   | { type: 'EXPLORATION_STOPPED' }

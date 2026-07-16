@@ -49,6 +49,7 @@ function makeDocument(id: string): CrawledDocument {
     url: `https://example.com/${id}`,
     title: `Doc ${id}`,
     content: `Content of ${id}`,
+    contentHash: `hash-${id}`,
     crawledAt: new Date().toISOString(),
     chunkCount: 2,
   };

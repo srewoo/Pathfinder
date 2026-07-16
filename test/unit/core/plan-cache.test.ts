@@ -31,7 +31,7 @@ function makePlan(overrides: Partial<ExecutionPlan> = {}): ExecutionPlan {
 }
 
 describe('computePlanHash', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => { vi.clearAllMocks(); });
 
   it('given url and element count when hashing then buckets count by 10', async () => {
     await computePlanHash('sig', 'https://x.com/foo', 27);
@@ -67,7 +67,7 @@ describe('computePlanHash', () => {
 });
 
 describe('getCachedPlan', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => { vi.clearAllMocks(); });
 
   it('given no plan in store when getting then returns undefined', async () => {
     vi.mocked(planDB.getByHash).mockResolvedValue(undefined);
@@ -101,7 +101,7 @@ describe('getCachedPlan', () => {
 });
 
 describe('cachePlan', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => { vi.clearAllMocks(); });
 
   it('given partial plan when caching then fills id, testCaseId, hash, cachedAt', async () => {
     const before = Date.now();

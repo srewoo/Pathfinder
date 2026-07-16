@@ -65,7 +65,7 @@ export async function runRetrievalEval(
   const perQuery: QueryMetrics[] = [];
 
   for (const q of dataset.queries) {
-    const results = await searchByText(q.query, opts.aiClient, { ...opts, topK: k });
+    const results = await searchByText(q.query, (texts) => opts.aiClient.embed(texts), k, opts);
     const retrievedUrls = uniqueUrls(results.map((r) => r.record.url));
     const relevantSet = new Set(q.relevantUrls);
 

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from "react";
 import { ShieldCheck, UserRound, Trash2, Pencil, Sparkles, Cookie } from 'lucide-react';
 import { useSettingsStore } from '../../stores/settings-store';
 import { Button } from '../shared/Button';

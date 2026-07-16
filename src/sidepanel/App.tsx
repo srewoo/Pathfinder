@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import { Header } from './components/layout/Header';
 import { Footer } from './components/layout/Footer';
 import { TabNav } from './components/layout/TabNav';
@@ -82,7 +82,7 @@ export function App() {
           explorer.setProgress(message.payload);
           break;
         case 'EXPLORATION_COMPLETE':
-          explorer.setExplorationComplete();
+          explorer.setExplorationComplete(message.payload?.coverage);
           break;
         case 'EXPLORATION_ERROR':
           explorer.setExplorationError(message.payload.error);

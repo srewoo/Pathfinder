@@ -37,6 +37,8 @@ export async function embedChunks(
   const { skipRateLimit = false, onProgress, modelId } = options;
   const records: VectorRecord[] = [];
   const total = chunks.length;
+  let lastBatchError: unknown;
+  let failedBatches = 0;
 
   for (let i = 0; i < chunks.length; i += EMBED_BATCH_SIZE) {
     const batch = chunks.slice(i, i + EMBED_BATCH_SIZE);
@@ -46,8 +48,12 @@ export async function embedChunks(
     try {
       embeddings = await embedWithRetry(aiClient, texts, 3);
     } catch (err) {
-      // Per-chunk resilience: log the batch failure but continue with other batches
-      // instead of failing the entire page.
+      // Per-batch resilience: a single failed batch in a large document should
+      // not lose the whole page — record the error and continue. But if EVERY
+      // batch fails (see the post-loop guard) we fail loudly rather than
+      // silently returning an empty result the caller mistakes for success.
+      lastBatchError = err;
+      failedBatches++;
       log.error(`Embedding batch failed after retries (batch starting at chunk ${i}), skipping ${batch.length} chunks`, err);
       continue;
     }
@@ -83,6 +89,15 @@ export async function embedChunks(
     if (!skipRateLimit && i + EMBED_BATCH_SIZE < chunks.length) {
       await delay(RATE_LIMIT_MS);
     }
+  }
+
+  // Fail loudly on total failure: chunks were provided but embedding produced
+  // nothing (every batch errored). Returning [] here would let the caller
+  // believe the page was indexed when it was not.
+  if (records.length === 0 && total > 0 && failedBatches > 0) {
+    throw lastBatchError instanceof Error
+      ? lastBatchError
+      : new Error(`Embedding failed for all ${failedBatches} batch(es)`);
   }
 
   return records;

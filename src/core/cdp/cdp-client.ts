@@ -92,26 +92,36 @@ export async function dispatchClick(tabId: number, x: number, y: number): Promis
   });
 }
 
+/** CDP modifier bitmask values (Input.dispatchKeyEvent `modifiers`). */
+export const CDP_MODIFIERS = { Alt: 1, Ctrl: 2, Control: 2, Meta: 4, Cmd: 4, Command: 4, Shift: 8 } as const;
+
 /**
  * Dispatch a trusted keyboard key press via CDP Input.dispatchKeyEvent.
+ *
+ * `modifiers` is the CDP modifier bitmask (Alt=1, Ctrl=2, Meta=4, Shift=8).
+ * The `char` event (which produces text input) is only fired for a bare
+ * single character with no modifiers held — otherwise Ctrl+A would type "a".
  */
-export async function dispatchKeyPress(tabId: number, key: string, text?: string): Promise<void> {
-  const keyCode = key.length === 1 ? key.charCodeAt(0) : KEY_CODES[key] ?? 0;
+export async function dispatchKeyPress(tabId: number, key: string, text?: string, modifiers = 0): Promise<void> {
+  const keyCode = key.length === 1 ? key.toUpperCase().charCodeAt(0) : KEY_CODES[key] ?? 0;
+  const code = key.length === 1 ? `Key${key.toUpperCase()}` : key;
 
   await sendCommand(tabId, 'Input.dispatchKeyEvent', {
     type: 'keyDown',
     key,
-    code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
+    code,
     windowsVirtualKeyCode: keyCode,
     nativeVirtualKeyCode: keyCode,
+    modifiers,
     text: text ?? (key.length === 1 ? key : ''),
   });
 
-  if (key.length === 1) {
+  // Only emit the text-producing `char` event for an unmodified single char.
+  if (key.length === 1 && modifiers === 0) {
     await sendCommand(tabId, 'Input.dispatchKeyEvent', {
       type: 'char',
       key,
-      text: key,
+      text: text ?? key,
       unmodifiedText: key,
     });
   }
@@ -119,9 +129,30 @@ export async function dispatchKeyPress(tabId: number, key: string, text?: string
   await sendCommand(tabId, 'Input.dispatchKeyEvent', {
     type: 'keyUp',
     key,
-    code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
+    code,
     windowsVirtualKeyCode: keyCode,
     nativeVirtualKeyCode: keyCode,
+    modifiers,
+  });
+}
+
+/** Press (keyDown only) a modifier key so subsequent keys are dispatched while it is held. */
+export async function dispatchKeyDownRaw(tabId: number, key: string, modifiers = 0): Promise<void> {
+  await sendCommand(tabId, 'Input.dispatchKeyEvent', {
+    type: 'rawKeyDown',
+    key,
+    code: key,
+    modifiers,
+  });
+}
+
+/** Release (keyUp only) a previously-held key. */
+export async function dispatchKeyUpRaw(tabId: number, key: string, modifiers = 0): Promise<void> {
+  await sendCommand(tabId, 'Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key,
+    code: key,
+    modifiers,
   });
 }
 
@@ -266,7 +297,7 @@ export function unregisterDialogHandler(tabId: number): void {
   dialogHandlerTabs.delete(tabId);
 }
 
-chrome.debugger.onEvent.addListener((source, method, params) => {
+chrome.debugger.onEvent.addListener((source, method) => {
   if (method === 'Page.javascriptDialogOpening' && source.tabId !== undefined) {
     if (dialogHandlerTabs.has(source.tabId)) {
       // Auto-accept the dialog
@@ -358,13 +389,97 @@ export function getHAREntries(tabId: number): HAREntry[] {
   return harBuffers.get(tabId) ?? [];
 }
 
+/**
+ * Number of network requests currently in-flight for a tab (issued but not yet
+ * completed/failed). Zero means the network is momentarily quiet. Requires an
+ * active HAR capture (Network domain enabled) for this tab — returns 0 otherwise.
+ */
+export function getPendingRequestCount(tabId: number): number {
+  if (!harBuffers.has(tabId)) return 0;
+  let count = 0;
+  for (const req of pendingRequests.values()) {
+    if (req.tabId === tabId) count++;
+  }
+  return count;
+}
+
+/**
+ * Wait until the tab's network has been quiet (zero in-flight requests) for a
+ * continuous `idleMs` window, or until `timeoutMs` elapses — whichever comes
+ * first. This replaces fixed post-navigation/post-click sleeps: fast pages
+ * proceed as soon as their requests settle, and slow SPAs get the time they
+ * actually need (up to the ceiling).
+ *
+ * Requires an active HAR capture for the tab. Callers must fall back to a fixed
+ * delay when CDP is unavailable — this resolves immediately (idle by
+ * definition) if the Network domain isn't enabled for the tab.
+ */
+export async function waitForNetworkIdle(
+  tabId: number,
+  { idleMs = 500, timeoutMs = 10_000, pollMs = 100 }: { idleMs?: number; timeoutMs?: number; pollMs?: number } = {},
+): Promise<void> {
+  const start = Date.now();
+  let quietSince: number | null = getPendingRequestCount(tabId) === 0 ? start : null;
+
+  while (Date.now() - start < timeoutMs) {
+    const pending = getPendingRequestCount(tabId);
+    if (pending === 0) {
+      if (quietSince === null) quietSince = Date.now();
+      if (Date.now() - quietSince >= idleMs) return;
+    } else {
+      quietSince = null;
+    }
+    await delay(pollMs);
+  }
+  log.debug(`waitForNetworkIdle: timed out after ${timeoutMs}ms on tab ${tabId} (${getPendingRequestCount(tabId)} still pending)`);
+}
+
+/**
+ * Wait for the document to reach a settled state — `readyState === 'complete'`
+ * and no pending microtask-scheduled DOM mutations. Cheap CDP eval; best-effort.
+ */
+export async function waitForDomSettle(tabId: number, timeoutMs = 3_000): Promise<void> {
+  try {
+    await evaluate<boolean>(tabId, `
+      (async () => {
+        const deadline = Date.now() + ${timeoutMs};
+        while (document.readyState !== 'complete' && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        // One rAF settle so freshly-committed DOM/layout is observable.
+        await new Promise((r) => requestAnimationFrame(() => r(null)));
+        return true;
+      })()
+    `);
+  } catch {
+    /* non-fatal — settle is best-effort */
+  }
+}
+
+// Minimal shapes for the CDP Network events we consume.
+interface CDPRequestParams {
+  requestId?: string;
+  timestamp?: number;
+  request?: { url?: string; method?: string; headers?: Record<string, string>; postData?: string };
+  response?: {
+    status?: number;
+    statusText?: string;
+    headers?: Record<string, string>;
+    mimeType?: string;
+    timing?: unknown;
+    encodedDataLength?: number;
+  };
+}
+
 // Handle CDP network events
-chrome.debugger.onEvent.addListener((source, method, params: Record<string, unknown>) => {
+chrome.debugger.onEvent.addListener((source, method, rawParams) => {
   const tabId = source.tabId;
   if (tabId === undefined || !harBuffers.has(tabId)) return;
 
+  const params = (rawParams ?? {}) as CDPRequestParams;
+
   if (method === 'Network.requestWillBeSent') {
-    const requestId = params.requestId as string;
+    const requestId = params.requestId ?? '';
     pendingRequests.set(requestId, {
       tabId,
       url: params.request?.url ?? '',
@@ -376,7 +491,7 @@ chrome.debugger.onEvent.addListener((source, method, params: Record<string, unkn
   }
 
   if (method === 'Network.responseReceived') {
-    const requestId = params.requestId as string;
+    const requestId = params.requestId ?? '';
     const pending = pendingRequests.get(requestId);
     if (!pending || pending.tabId !== tabId) return;
 
@@ -390,7 +505,7 @@ chrome.debugger.onEvent.addListener((source, method, params: Record<string, unkn
       responseHeaders: response.headers ?? {},
       mimeType: response.mimeType ?? '',
       startedAt: pending.startedAt,
-      duration: response.timing
+      duration: response.timing && params.timestamp
         ? (params.timestamp * 1000) - pending.startedAt
         : 0,
       bodySize: response.encodedDataLength ?? 0,
@@ -408,7 +523,7 @@ chrome.debugger.onEvent.addListener((source, method, params: Record<string, unkn
   }
 
   if (method === 'Network.loadingFailed') {
-    pendingRequests.delete(params.requestId as string);
+    params.requestId && pendingRequests.delete(params.requestId);
   }
 });
 
@@ -435,37 +550,70 @@ export async function evaluate<T = unknown>(tabId: number, expression: string): 
 }
 
 /**
- * Get the bounding box of an element by selector via CDP.
+ * A JS function literal that pierces shadow DOM boundaries when searching for
+ * elements. `document.querySelector` only searches the main tree — this
+ * recurses into open shadow roots to find web-component elements. Shared by
+ * every CDP evaluate that needs to locate an element by selector, so the
+ * action runner and bounds lookup stay consistent.
+ *
+ * Usage inside an expression: `${DEEP_QUERY_FN} const el = __deepQuery(document, sel);`
+ */
+export const DEEP_QUERY_FN = `
+  function __deepQuery(root, sel) {
+    try { const el = root.querySelector(sel); if (el) return el; } catch (e) { return null; }
+    const all = root.querySelectorAll('*');
+    for (const host of all) {
+      if (host.shadowRoot) {
+        const found = __deepQuery(host.shadowRoot, sel);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+`;
+
+export interface ElementState {
+  found: boolean;
+  visible: boolean;
+  enabled: boolean;
+  rect: { x: number; y: number; width: number; height: number } | null;
+}
+
+/**
+ * Inspect an element's actionability state (present, visible, enabled) and its
+ * center-point bounds — piercing shadow DOM. Used by the actionability
+ * auto-wait so we never dispatch a trusted click at an element that is hidden,
+ * disabled, or off-screen.
+ */
+export async function getElementState(tabId: number, selector: string): Promise<ElementState> {
+  const empty: ElementState = { found: false, visible: false, enabled: false, rect: null };
+  try {
+    const state = await evaluate<ElementState>(tabId, `
+      (() => {
+        ${DEEP_QUERY_FN}
+        const el = __deepQuery(document, ${JSON.stringify(selector)});
+        if (!el) return ${JSON.stringify(empty)};
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const visible = r.width > 0 && r.height > 0 &&
+          style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
+        const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+        return { found: true, visible, enabled, rect: { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height } };
+      })()
+    `);
+    return state ?? empty;
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Get the bounding box of an element by selector via CDP (shadow-DOM aware).
  * Returns { x, y, width, height } in viewport coordinates, or null if not found.
  */
 export async function getElementBounds(tabId: number, selector: string): Promise<{ x: number; y: number; width: number; height: number } | null> {
-  try {
-    // Pierce shadow DOM boundaries when searching for elements.
-    // document.querySelector only searches the main DOM tree — we need to
-    // recursively search open shadow roots to find web component elements.
-    const bounds = await evaluate<{ x: number; y: number; width: number; height: number } | null>(tabId, `
-      (() => {
-        function deepQuery(root, sel) {
-          try { const el = root.querySelector(sel); if (el) return el; } catch { return null; }
-          const all = root.querySelectorAll('*');
-          for (const host of all) {
-            if (host.shadowRoot) {
-              const found = deepQuery(host.shadowRoot, sel);
-              if (found) return found;
-            }
-          }
-          return null;
-        }
-        const el = deepQuery(document, ${JSON.stringify(selector)});
-        if (!el) return null;
-        const r = el.getBoundingClientRect();
-        return { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height };
-      })()
-    `);
-    return bounds;
-  } catch {
-    return null;
-  }
+  const state = await getElementState(tabId, selector);
+  return state.found ? state.rect : null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

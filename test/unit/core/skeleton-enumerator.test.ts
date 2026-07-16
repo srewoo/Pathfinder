@@ -72,6 +72,38 @@ describe('enumerateSkeletons — graph-first completeness', () => {
     expect(names.some((n) => n.includes('Home → Reports → Report Detail'))).toBe(true);
   });
 
+  it('does NOT emit navigation flows to pages that were never mapped (single-page run)', () => {
+    // One mapped page with links to two destinations that were never crawled
+    // (no nodes for them) — the classic "This page only" shape.
+    const g = graph(
+      [node({ url: 'https://app/home', title: 'Home' })],
+      [
+        edge('https://app/home', 'https://app/reports', 'Reports', '#nav-reports'),
+        edge('https://app/home', 'https://app/settings', 'Settings', '#nav-settings'),
+      ]
+    );
+    const skeletons = enumerateSkeletons(g);
+    // No "Navigate → …" journey should be produced for the unmapped destinations.
+    expect(skeletons.some((s) => s.name.startsWith('Navigate:'))).toBe(false);
+  });
+
+  it('emits a navigation flow only for the hop whose destination WAS mapped', () => {
+    // /reports is mapped; /settings is only a discovered link (no node).
+    const g = graph(
+      [
+        node({ url: 'https://app/home', title: 'Home' }),
+        node({ url: 'https://app/reports', title: 'Reports' }),
+      ],
+      [
+        edge('https://app/home', 'https://app/reports', 'Reports', '#nav-reports'),
+        edge('https://app/home', 'https://app/settings', 'Settings', '#nav-settings'),
+      ]
+    );
+    const names = enumerateSkeletons(g).map((s) => s.name);
+    expect(names.some((n) => n.includes('Home → Reports'))).toBe(true);   // mapped → kept
+    expect(names.some((n) => n.includes('Settings'))).toBe(false);        // unmapped → dropped
+  });
+
   it('emits a happy-path AND a negative-path flow for a form with required fields', () => {
     const g = graph([
       node({

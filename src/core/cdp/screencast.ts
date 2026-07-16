@@ -99,7 +99,7 @@ export function getFrameCount(tabId: number): number {
 }
 
 // Handle incoming screencast frames from CDP
-chrome.debugger.onEvent.addListener((source, method, params: Record<string, unknown>) => {
+chrome.debugger.onEvent.addListener((source, method, rawParams) => {
   if (method !== 'Page.screencastFrame') return;
 
   const tabId = source.tabId;
@@ -108,8 +108,9 @@ chrome.debugger.onEvent.addListener((source, method, params: Record<string, unkn
   const session = activeSessions.get(tabId);
   if (!session || !session.active) return;
 
-  const data = params.data as string;
-  const sessionId = params.sessionId as number;
+  const params = (rawParams ?? {}) as { data?: string; sessionId?: number };
+  const data = params.data ?? '';
+  const sessionId = params.sessionId ?? 0;
 
   // ACK the frame so CDP continues sending
   chrome.debugger.sendCommand({ tabId }, 'Page.screencastFrameAck', { sessionId }).catch(() => {});

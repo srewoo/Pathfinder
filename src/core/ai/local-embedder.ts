@@ -128,12 +128,19 @@ export async function embedTextsLocally(
 ): Promise<number[][]> {
   const extractor = await getEmbeddingPipeline(options.onModelProgress);
 
+  // Transformers.js types the pipeline as a broad union; narrow the callable
+  // and its output to the feature-extraction shape we actually invoke.
+  const runExtractor = extractor as unknown as (
+    text: string,
+    opts: { pooling: 'mean'; normalize: boolean }
+  ) => Promise<{ data: Float32Array }>;
+
   const results: number[][] = [];
   for (const text of texts) {
     // Pool token embeddings to a single sentence vector and L2-normalise.
-    const output = await extractor(text, { pooling: 'mean', normalize: true });
+    const output = await runExtractor(text, { pooling: 'mean', normalize: true });
     // output.data is a Float32Array; convert to a plain JS number array.
-    results.push(Array.from(output.data as Float32Array));
+    results.push(Array.from(output.data));
   }
 
   return results;

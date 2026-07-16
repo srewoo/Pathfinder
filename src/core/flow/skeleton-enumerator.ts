@@ -175,6 +175,11 @@ function enumerateNavigationPaths(graph: InteractionGraph): FlowDraft[] {
     if (hops.length >= MAX_PATH_DEPTH) return;
     for (const edge of adjacency.get(current) ?? []) {
       if (visited.has(edge.to)) continue; // no cycles
+      // Only walk into pages that were actually mapped. A single-page (or
+      // truncated) run records outgoing links as edges without ever visiting
+      // their destinations — building a "Navigate → X" flow for a page we never
+      // explored yields an ungrounded stub, so skip those edges entirely.
+      if (!nodeByUrl.has(edge.to)) continue;
       visited.add(edge.to);
       dfs(edge.to, visited, [...hops, edge]);
       visited.delete(edge.to);

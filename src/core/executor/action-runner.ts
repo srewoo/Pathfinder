@@ -1,5 +1,7 @@
 import type { ExecutionStep, StepResult } from '../../storage/schemas';
 import { sendToContentScript, pingContentScript } from '../../messaging/messenger';
+import { isNetworkAssertion, evaluateNetworkAssertion } from './network-assertion';
+import { isAttached, waitForNetworkIdle } from '../cdp/cdp-client';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('action-runner');
@@ -24,6 +26,19 @@ export async function runStep(step: ExecutionStep, tabId: number): Promise<StepR
         step,
         status: 'passed',
         duration: Date.now() - start,
+      };
+    }
+
+    // Network/API assertions are evaluated against captured HAR in the executor,
+    // not the content script (the page has no access to request/response data).
+    // Not retried — like other assertions, a miss is a real failure.
+    if (isNetworkAssertion(step)) {
+      const r = evaluateNetworkAssertion(step, tabId);
+      return {
+        step,
+        status: r.passed ? 'passed' : 'failed',
+        duration: Date.now() - start,
+        error: r.passed ? undefined : r.error,
       };
     }
 
@@ -106,8 +121,14 @@ export async function runStep(step: ExecutionStep, tabId: number): Promise<StepR
 async function waitForPageReady(tabId: number): Promise<void> {
   const start = Date.now();
 
-  // First wait a minimum amount for scripts to begin executing
-  await delay(POST_NAVIGATE_MIN_MS);
+  // Prefer the authoritative CDP network-idle signal when a session is live —
+  // it settles as soon as requests actually go quiet. Only fall back to a fixed
+  // warm-up floor when CDP isn't available to tell us.
+  if (isAttached(tabId)) {
+    await waitForNetworkIdle(tabId, { idleMs: 350, timeoutMs: POST_NAVIGATE_MAX_MS });
+  } else {
+    await delay(POST_NAVIGATE_MIN_MS);
+  }
 
   // Then poll for content script availability with backoff
   let backoff = 200;

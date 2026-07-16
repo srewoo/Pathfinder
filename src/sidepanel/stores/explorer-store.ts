@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { InteractionGraph, ExplorationProgress, Flow } from '../../storage/schemas';
+import type { InteractionGraph, ExplorationProgress, ExplorationCoverage, Flow } from '../../storage/schemas';
 import { loadGraph } from '../../core/explorer/interaction-graph';
 import { getAllFlows } from '../../core/flow/flow-store';
 import { sendToBackground } from '../../messaging/messenger';
@@ -38,6 +38,11 @@ interface ExplorerState {
   isImporting: boolean;
   isDeleting: boolean;
   progress: ExplorationProgress | null;
+  /**
+   * Latest coverage/health summary — updated live during a run and retained
+   * after completion so the summary stays visible. Null until the first run.
+   */
+  coverage: ExplorationCoverage | null;
   error: string | null;
   exportImportError: string | null;
   /** Set when an exploration just finished — drives the "Continue → Flows" hand-off banner. */
@@ -57,7 +62,7 @@ interface ExplorerState {
   clearExplorationData: () => Promise<void>;
   loadData: () => Promise<void>;
   setProgress: (progress: ExplorationProgress) => void;
-  setExplorationComplete: () => void;
+  setExplorationComplete: (coverage?: ExplorationCoverage) => void;
   dismissExplorationCompletion: () => void;
   setExplorationError: (error: string) => void;
   setReexploreComplete: (url: string) => void;
@@ -80,6 +85,7 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
   isImporting: false,
   isDeleting: false,
   progress: null,
+  coverage: null,
   error: null,
   exportImportError: null,
   explorationJustCompleted: false,
@@ -97,7 +103,7 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
 
   startExploration: async () => {
     const { explorationDepth, singlePageOnly, singlePageStrict, submitForms, freshRescan } = get();
-    set({ isExploring: true, error: null, progress: null, explorationJustCompleted: false });
+    set({ isExploring: true, error: null, progress: null, coverage: null, explorationJustCompleted: false });
     const resp = await sendToBackground({
       type: 'START_EXPLORATION',
       payload: { depth: explorationDepth, singlePageOnly, singlePageStrict, submitForms, freshRescan },
@@ -188,10 +194,16 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
     set({ graph: graph ?? null, flows });
   },
 
-  setProgress: (progress) => set({ progress }),
+  setProgress: (progress) => set({ progress, coverage: progress.coverage ?? get().coverage }),
 
-  setExplorationComplete: () => {
-    set({ isExploring: false, reexploringUrl: null, progress: null, explorationJustCompleted: true });
+  setExplorationComplete: (coverage) => {
+    set({
+      isExploring: false,
+      reexploringUrl: null,
+      progress: null,
+      coverage: coverage ?? get().coverage,
+      explorationJustCompleted: true,
+    });
     get().loadData();
   },
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from "react";
 import { AlertTriangle, Camera, Code2, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
 import type { TestResult } from '../../../storage/schemas';
 import { StatusIndicator } from '../shared/StatusIndicator';

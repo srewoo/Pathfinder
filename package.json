@@ -1,7 +1,7 @@
 {
   "name": "pathfinder",
-  "version": "1.3",
-  "description": "Pathfinder — AI Autonomous QA Chrome Extension",
+  "version": "1.4",
+  "description": "Autonomously explore your web app to map UI flows and test coverage. Find untested paths and broken links automatically.",
   "private": true,
   "type": "module",
   "scripts": {

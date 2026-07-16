@@ -86,7 +86,7 @@ describe('crawlSite', () => {
 
   it('given a robots.txt served as text/plain when crawling then it is fetched (not content-type rejected)', async () => {
     await crawlSite(`${ORIGIN}/`, aiClient, { maxPages: 5 });
-    const fetchMock = vi.mocked(globalThis.fetch as never);
+    const fetchMock = vi.mocked(globalThis.fetch);
     const fetchedRobots = (fetchMock.mock.calls as unknown as Array<[string]>).some(([u]) => u.includes('/robots.txt'));
     expect(fetchedRobots).toBe(true);
   });
@@ -133,7 +133,7 @@ describe('crawlSite', () => {
 
   it('given credentialed fetch when crawling then page requests include credentials', async () => {
     await crawlSite(`${ORIGIN}/`, aiClient, { maxPages: 2 });
-    const fetchMock = vi.mocked(globalThis.fetch as never);
+    const fetchMock = vi.mocked(globalThis.fetch);
     const pageCall = (fetchMock.mock.calls as unknown as Array<[string, RequestInit]>).find(([u]) => new URL(u).pathname === '/');
     expect(pageCall?.[1]?.credentials).toBe('include');
   });

@@ -12,7 +12,7 @@ const { searchByText } = await import('../../../src/core/knowledge/vector-search
 
 const ai = { chat: vi.fn(), embed: vi.fn() };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.clearAllMocks(); });
 
 describe('precisionAtK', () => {
   it('given all retrieved relevant when computing then 1.0', () => {

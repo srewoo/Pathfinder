@@ -75,3 +75,49 @@ describe('projectFlowToTestCases', () => {
     expect(projectFlowToTestCases(flow({ steps: [] }))).toHaveLength(0);
   });
 });
+
+describe('projectFlowToTestCases preplan (verbatim CDP execution)', () => {
+  it('builds a verbatim execution plan when every step is grounded', () => {
+    const f = flow({
+      coverageType: 'happy',
+      steps: [
+        { order: 1, action: 'navigate', value: 'https://app/login', description: 'open' },
+        { order: 2, action: 'type', selector: '#email', target: 'Email', value: 'a@b.com', description: '' },
+        { order: 3, action: 'click', selector: '#submit', target: 'Submit', description: '' },
+        { order: 4, action: 'verify', target: 'Dashboard', description: '' },
+      ],
+    });
+    const [tc] = projectFlowToTestCases(f);
+    expect(tc.preplan).toBeDefined();
+    expect(tc.preplan!.map((s) => s.action)).toEqual(['navigate', 'type', 'click', 'assert']);
+    // Captured selectors are carried VERBATIM — not re-derived.
+    expect(tc.preplan![1]).toMatchObject({ action: 'type', selector: '#email', value: 'a@b.com' });
+    expect(tc.preplan![2]).toMatchObject({ action: 'click', selector: '#submit' });
+    // The verify step becomes a text assertion (no selector needed).
+    expect(tc.preplan![3]).toMatchObject({ action: 'assert', assertType: 'text', assertExpected: 'Dashboard' });
+  });
+
+  it('omits the preplan when an action step has no captured selector (→ LLM fallback)', () => {
+    const f = flow({
+      steps: [
+        { order: 1, action: 'navigate', value: 'https://app/x', description: 'open' },
+        { order: 2, action: 'click', target: 'Submit', description: '' }, // no selector
+      ],
+    });
+    const [tc] = projectFlowToTestCases(f);
+    expect(tc.preplan).toBeUndefined();
+    // Steps + confidence are still produced for display.
+    expect(tc.steps!.length).toBe(2);
+  });
+
+  it('maps a page-url verify to a url assertion', () => {
+    const f = flow({
+      steps: [
+        { order: 1, action: 'navigate', value: 'https://app/x', description: '' },
+        { order: 2, action: 'verify', target: 'page-url', value: 'https://app/x', description: '' },
+      ],
+    });
+    const [tc] = projectFlowToTestCases(f);
+    expect(tc.preplan![1]).toMatchObject({ action: 'assert', assertType: 'url', assertExpected: 'https://app/x' });
+  });
+});

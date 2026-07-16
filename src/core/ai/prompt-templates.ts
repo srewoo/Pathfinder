@@ -252,6 +252,10 @@ ASSERT TYPES:
 - attribute: element has attribute with expected value (specify "attribute" field)
 - exists: element is in the DOM (even if hidden)
 - not_exists: element is absent from the DOM
+- api_called: a backend API request was made — set assertExpected to "[METHOD] urlSubstring" (e.g. "POST /api/login"). Use to verify an action actually hit the backend.
+- api_not_called: NO API request matched — assertExpected "[METHOD] urlSubstring" (e.g. "/api/error"). Use for negative tests (e.g. invalid input must NOT submit).
+- api_status: a matching API request returned a status — assertExpected "[METHOD] urlSubstring status" where status is a code ("200") or class ("2xx"/"4xx") (e.g. "POST /api/login 200"). Use to verify success/error responses.
+(For api_* assertions, selector is ignored; put the request spec in assertExpected. Prefer these to confirm real backend behavior after form submits and logins.)
 
 ASSERTION TIMING RULES (CRITICAL — assertions poll but explicit waits are still essential):
 - After any click that submits a form or triggers navigation, ALWAYS insert a "wait" step for the assertion target element BEFORE the "assert" step.

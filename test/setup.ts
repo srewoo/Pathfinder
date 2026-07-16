@@ -12,7 +12,7 @@ const chromeMock = {
   },
   storage: {
     local: {
-      get: vi.fn((key: string, callback: (result: Record<string, unknown>) => void) => {
+      get: vi.fn((_key: string, callback: (result: Record<string, unknown>) => void) => {
         callback({});
       }),
       set: vi.fn((_items: object, callback?: () => void) => {

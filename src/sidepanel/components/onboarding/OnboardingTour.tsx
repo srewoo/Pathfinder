@@ -1,4 +1,3 @@
-import React from 'react';
 import { Sparkles, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { Tab } from '../layout/TabNav';
 import { TOUR_STEP_COUNT } from '../../stores/onboarding-store';

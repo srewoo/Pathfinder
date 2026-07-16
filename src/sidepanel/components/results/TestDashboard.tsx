@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import { TrendingUp, TrendingDown, AlertTriangle, Clock, Activity, Minus } from 'lucide-react';
 import { sendToBackground } from '../../../messaging/messenger';
 import type { TestTrends } from '../../../utils/report-exporter';

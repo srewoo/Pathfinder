@@ -1,4 +1,3 @@
-import React from 'react';
 import { Network, RefreshCw } from 'lucide-react';
 import type { InteractionGraph } from '../../../storage/schemas';
 import { useExplorerStore } from '../../stores/explorer-store';

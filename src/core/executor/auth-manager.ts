@@ -10,9 +10,25 @@
 import type { AuthCookie, ExecutionPreset, ExecutionStep } from '../../storage/schemas';
 import { executionPresetStorage } from '../../storage/chrome-storage';
 import { runStep } from './action-runner';
+import { isAttached, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('auth-manager');
+
+/**
+ * Wait for the tab to stabilize after a login navigation/action. Uses the CDP
+ * network-idle + DOM-settle signal when a session is attached (login flows fire
+ * auth XHRs whose completion is exactly what we need to wait on); falls back to
+ * a fixed sleep only when CDP is unavailable.
+ */
+async function settle(tabId: number, fallbackMs: number): Promise<void> {
+  if (isAttached(tabId)) {
+    await waitForNetworkIdle(tabId, { idleMs: 400, timeoutMs: Math.max(3_000, fallbackMs * 2) });
+    await waitForDomSettle(tabId, 2_000);
+  } else {
+    await delay(fallbackMs);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Cookie Capture — snapshot current browser cookies for a domain
@@ -205,7 +221,7 @@ export async function replayLogin(
         chrome.tabs.update(tabId, { url: preset.startUrl });
         setTimeout(done, 15_000);
       });
-      await delay(2000);
+      await settle(tabId, 2000);
     } catch {
       log.warn('Failed to navigate to login URL');
     }
@@ -222,15 +238,15 @@ export async function replayLogin(
         log.warn(`Login step ${i + 1} failed: ${result.error}`);
         return false;
       }
-      await delay(500);
+      await settle(tabId, 500);
     } catch (err) {
       log.warn(`Login step ${i + 1} threw: ${err}`);
       return false;
     }
   }
 
-  // Wait for page to settle after login
-  await delay(2000);
+  // Wait for page to settle after login (auth redirect + session XHRs).
+  await settle(tabId, 2000);
   log.info('Login replay completed');
   return true;
 }
@@ -415,7 +431,7 @@ export async function recoverSessionIfExpired(
       if (url) {
         try {
           await chrome.tabs.update(tabId, { url });
-          await delay(2000);
+          await settle(tabId, 2000);
         } catch { /* non-fatal */ }
       }
       return true;

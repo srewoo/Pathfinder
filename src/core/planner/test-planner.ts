@@ -1,6 +1,7 @@
 import type { AIClientInterface } from '../ai/ai-client';
 import type { TestCase, ExecutionPlan, ExecutionStep, ActionType, AssertType, InteractionGraph, PageNode, PageEdge } from '../../storage/schemas';
 import { PROMPTS } from '../ai/prompt-templates';
+import { parseJSON, isPlanShape } from '../ai/validators';
 import { searchByText, formatSearchResults } from '../knowledge/vector-search';
 import { getPageSnapshot } from '../explorer/page-scanner';
 import { loadGraph, extractFormFieldsStructured, serializeNavigationMap } from '../explorer/interaction-graph';
@@ -55,7 +56,11 @@ export async function planTest(
     ...(testCase.steps ?? []),
   ].join('\n');
 
-  const hash = await computePlanHash(testSignature, pageUrl);
+  // Include the live DOM element count so a cached plan is invalidated when the
+  // page structure changes materially (new fields, removed sections) — not left
+  // to the TTL alone. Previously this argument was omitted, making the
+  // structural-change bucket dead.
+  const hash = await computePlanHash(testSignature, pageUrl, snapshot?.elements?.length);
 
   if (!forceFresh) {
     const cached = await getCachedPlan(hash, testCase.id);
@@ -63,6 +68,35 @@ export async function planTest(
       log.info('Using cached plan', { testCaseId: testCase.id });
       return cached;
     }
+  }
+
+  // ── Deterministic preplan from captured selectors ─────────────────────────
+  // Projected tests carry a structured plan built from selectors the explorer
+  // actually clicked. Run it VERBATIM (no LLM) on the first attempt — the
+  // strongest CDP-executability guarantee. Selectors are still validated against
+  // the live page; if they later fail and a fresh plan is requested (forceFresh,
+  // i.e. attempt 2), we fall through to LLM re-derivation below.
+  if (!forceFresh && testCase.preplan && testCase.preplan.length > 0) {
+    let steps = groundNavigationSteps(testCase.preplan, testCase, pageUrl, await loadGraph());
+    if (validatePlan) {
+      try {
+        const validation = await validateAndRepairPlan(tabId, steps);
+        steps = validation.repairedSteps;
+        if (validation.issues.length > 0) {
+          const repaired = validation.issues.filter((i) => i.fixedSelector).length;
+          log.info(`Preplan validation: ${validation.issues.length} selector issues (${repaired} auto-repaired)`);
+        }
+      } catch (err) {
+        log.warn(`Preplan validation failed: ${err instanceof Error ? err.message : String(err)} — using captured selectors as-is`);
+      }
+    }
+    if (steps.length > 0) {
+      const startUrl = extractStartUrl(steps, pageUrl);
+      if (startUrl && !testCase.startUrl) await testCaseDB.put({ ...testCase, startUrl });
+      log.info(`Using deterministic preplan (${steps.length} captured-selector steps) for "${testCase.title}"`);
+      return cachePlan(testCase.id, hash, { steps });
+    }
+    log.warn(`Preplan for "${testCase.title}" produced no usable steps — falling back to LLM planning`);
   }
 
   // ── Interactive planning (attempt 1, or always when mode=interactive) ──────
@@ -189,41 +223,41 @@ function extractStartUrl(steps: ExecutionStep[], currentUrl: string): string | u
 }
 
 function parsePlanResponse(raw: string): ExecutionStep[] {
-  let json: unknown;
-
-  try {
-    const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
-    json = JSON.parse(cleaned);
-  } catch {
-    log.warn('Failed to parse plan JSON');
+  // Schema-validate the LLM output instead of a bare JSON.parse.
+  const result = parseJSON(raw, isPlanShape);
+  if (!result.ok) {
+    log.warn(`Discarded malformed plan response: ${result.error}`);
     return [];
   }
 
-  if (typeof json !== 'object' || json === null) return [];
-
-  const obj = json as Record<string, unknown>;
-  const steps = Array.isArray(obj['steps']) ? obj['steps'] : [];
-
-  return steps
-    .filter((s): s is Record<string, unknown> => typeof s === 'object' && s !== null)
-    .map((s, idx) => {
-      const step: ExecutionStep = {
-        order: Number(s['order'] ?? idx + 1),
-        action: validateAction(s['action']),
-        description: String(s['description'] ?? ''),
-      };
-
-      if (s['selector']) step.selector = String(s['selector']);
-      if (s['value']) step.value = String(s['value']);
-      if (s['timeout']) step.timeout = Number(s['timeout']);
-      if (s['assertType']) step.assertType = validateAssertType(s['assertType']);
-      if (s['assertExpected']) step.assertExpected = String(s['assertExpected']);
-      if (s['key']) step.key = String(s['key']);
-      if (s['attribute']) step.attribute = String(s['attribute']);
-      if (s['targetSelector']) step.targetSelector = String(s['targetSelector']);
-
-      return step;
-    });
+  const steps: ExecutionStep[] = [];
+  let dropped = 0;
+  result.value.steps.forEach((s, idx) => {
+    const action = validateAction(s['action']);
+    if (action === null) {
+      // Do NOT silently coerce an unrecognized action to "click" — that turns a
+      // mis-emitted step into a real click on the page. Drop it and warn.
+      log.warn(`Dropping plan step with unrecognized action "${String(s['action'])}": ${String(s['description'] ?? '')}`);
+      dropped++;
+      return;
+    }
+    const step: ExecutionStep = {
+      order: Number(s['order'] ?? idx + 1),
+      action,
+      description: String(s['description'] ?? ''),
+    };
+    if (s['selector']) step.selector = String(s['selector']);
+    if (s['value']) step.value = String(s['value']);
+    if (s['timeout']) step.timeout = Number(s['timeout']);
+    if (s['assertType']) step.assertType = validateAssertType(s['assertType']);
+    if (s['assertExpected']) step.assertExpected = String(s['assertExpected']);
+    if (s['key']) step.key = String(s['key']);
+    if (s['attribute']) step.attribute = String(s['attribute']);
+    if (s['targetSelector']) step.targetSelector = String(s['targetSelector']);
+    steps.push(step);
+  });
+  if (dropped > 0) log.warn(`Plan parse dropped ${dropped} step(s) with unrecognized actions.`);
+  return steps;
 }
 
 const VALID_ACTIONS: ActionType[] = [
@@ -231,11 +265,16 @@ const VALID_ACTIONS: ActionType[] = [
   'select', 'check', 'uncheck', 'clear', 'press_key', 'drag_drop', 'upload_file', 'dismiss_dialog',
 ];
 
-function validateAction(raw: unknown): ActionType {
+/**
+ * Resolve a raw action to a known ActionType, applying common aliases.
+ * Returns `null` for an unrecognized action so the caller can DROP the step —
+ * silently coercing to "click" would turn a mis-emitted action into a real
+ * click on the page.
+ */
+function validateAction(raw: unknown): ActionType | null {
   if (typeof raw === 'string' && VALID_ACTIONS.includes(raw as ActionType)) {
     return raw as ActionType;
   }
-  // Log unknown actions rather than silently defaulting to click
   if (typeof raw === 'string') {
     // Common aliases — map to correct types
     const aliases: Record<string, ActionType> = {
@@ -262,14 +301,13 @@ function validateAction(raw: unknown): ActionType {
     const alias = aliases[raw.toLowerCase()];
     if (alias) return alias;
   }
-  // Final fallback — default to click with a log warning
-  console.warn(`[planner] Unknown action type "${String(raw)}" — defaulting to "click"`);
-  return 'click';
+  return null;
 }
 
 const VALID_ASSERT_TYPES: AssertType[] = [
   'visible', 'not_visible', 'text', 'not_text', 'url', 'count', 'exact_count',
   'enabled', 'disabled', 'value', 'attribute', 'exists', 'not_exists',
+  'api_called', 'api_not_called', 'api_status',
 ];
 
 function validateAssertType(raw: unknown): AssertType {

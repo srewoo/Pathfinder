@@ -29,6 +29,13 @@ export interface ConstraintTestSpec {
   observedSuccessMessage?: string;
   /** Submit button selector from exploration */
   submitSelector?: string;
+  /**
+   * Overrides the generic pass/fail verification with an explicit assertion
+   * (e.g. a security oracle: the payload must not be reflected/executed). When
+   * set, it replaces the default "accepted without errors" step so the test has
+   * a meaningful oracle instead of merely "didn't crash".
+   */
+  customVerify?: string;
 }
 
 /**
@@ -88,8 +95,11 @@ export function deriveConstraintTests(
       }
     }
 
-    // 2. maxLength boundary
-    if (field.maxLength !== undefined && field.maxLength > 0) {
+    // 2. maxLength boundary — only for text-like inputs. minLength/maxLength are
+    // character-count constraints that don't apply to number/date/color/range
+    // inputs (those use min/max VALUE, tested separately below), so building a
+    // length-N string for them is meaningless and can exceed their value range.
+    if (LENGTH_CONSTRAINED_TYPES.has(field.type) && field.maxLength !== undefined && field.maxLength > 0) {
       specs.push({
         title: `${flowName} — "${label}" at max length (${field.maxLength} chars)`,
         description: `Enter exactly ${field.maxLength} characters. Should be accepted.`,
@@ -112,8 +122,8 @@ export function deriveConstraintTests(
       });
     }
 
-    // 3. minLength boundary
-    if (field.minLength !== undefined && field.minLength > 1) {
+    // 3. minLength boundary — text-like inputs only (see note above).
+    if (LENGTH_CONSTRAINED_TYPES.has(field.type) && field.minLength !== undefined && field.minLength > 1) {
       specs.push({
         title: `${flowName} — "${label}" below min length (${field.minLength - 1} chars)`,
         description: `Enter ${field.minLength - 1} characters. Expects a min-length validation error.`,
@@ -279,6 +289,10 @@ export function deriveConstraintTests(
         testValue: '<script>alert(1)</script>',
         expectError: false, // most apps accept and sanitize, not error
         errorHint: `"${label}" should handle special characters without crashing`,
+        // Real security oracle: the payload must be escaped/sanitized, not
+        // executed or reflected verbatim as live markup.
+        customVerify:
+          'Verify no JavaScript alert/dialog was triggered and the input "<script>alert(1)</script>" is NOT rendered as an active <script> element — it must appear only as escaped, inert text (reflected XSS would indicate a security defect).',
       });
     }
   }
@@ -384,7 +398,10 @@ function buildStepsFromSpec(spec: ConstraintTestSpec): string[] {
     : 'Submit the form';
   steps.push(submitAction);
 
-  if (spec.expectError) {
+  if (spec.customVerify) {
+    // Explicit oracle (e.g. security/XSS) takes precedence over generic checks.
+    steps.push(spec.customVerify);
+  } else if (spec.expectError) {
     // Use observed error selector + message for grounded assertions
     if (spec.observedErrorSelector && spec.observedErrorMessage) {
       steps.push(`Verify error message "${spec.observedErrorMessage}" is visible at ${spec.observedErrorSelector}`);
@@ -430,8 +447,25 @@ export function serializeFieldConstraints(fields: FormField[]): string {
   }).join('\n\n');
 }
 
+/**
+ * Field types whose length is constrained by minLength/maxLength (character
+ * count). Number/date/color/range/checkbox/etc. are excluded — they have no
+ * meaningful character-length boundary.
+ */
+const LENGTH_CONSTRAINED_TYPES = new Set(['text', 'textarea', 'search', 'password', 'email', 'url', 'tel']);
+
 function buildString(length: number, fieldType: string): string {
-  if (fieldType === 'email') return `${'a'.repeat(Math.max(1, length - 10))}@test.com`.slice(0, length);
-  if (fieldType === 'number') return '1'.repeat(length);
-  return 'a'.repeat(length);
+  const n = Math.max(1, length);
+  // Email must stay syntactically valid at the target length so the boundary
+  // being tested is length — not a format error masquerading as one.
+  if (fieldType === 'email') {
+    const suffix = '@test.com';
+    const localLen = Math.max(1, n - suffix.length);
+    return (`${'a'.repeat(localLen)}${suffix}`).slice(0, n);
+  }
+  if (fieldType === 'url') {
+    const prefix = 'https://a';
+    return (`${prefix}${'a'.repeat(Math.max(0, n - prefix.length - 4))}.com`).slice(0, n);
+  }
+  return 'a'.repeat(n);
 }

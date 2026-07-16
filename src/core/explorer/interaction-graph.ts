@@ -5,20 +5,39 @@ import { createLogger } from '../../utils/logger';
 
 const log = createLogger('interaction-graph');
 
-// ── O(1) Lookup Indices ─────────────────────────────────────────────────────
-// Maintain URL-keyed maps for fast node/edge lookup instead of O(n) array scans.
-// Indices are rebuilt on graph load and kept in sync by add/remove operations.
+// ── Per-graph O(1) lookup indices ────────────────────────────────────────────
+// URL-keyed maps for fast node/edge lookup instead of O(n) array scans. Each
+// graph instance carries its OWN indices, held in a WeakMap keyed by the graph
+// object. This is deliberate: a previous module-global index was silently
+// clobbered whenever two graphs were live at once — e.g. exploration holding
+// one graph while flow-learning called loadGraph() to build another — causing
+// addNode/getNode to operate against the wrong graph in the background service
+// worker (which processes messages concurrently). Per-graph indices are built
+// lazily on first access and kept in sync by add/remove operations.
 
-let nodeIndex = new Map<string, PageNode>();
-let edgeIndex = new Set<string>();
-
-function buildIndices(graph: InteractionGraph): void {
-  nodeIndex = new Map(graph.nodes.map((n) => [n.url, n]));
-  edgeIndex = new Set(graph.edges.map((e) => `${e.from}|${e.to}|${e.selector}`));
+interface GraphIndices {
+  nodeIndex: Map<string, PageNode>;
+  edgeIndex: Set<string>;
 }
+
+const indexCache = new WeakMap<InteractionGraph, GraphIndices>();
 
 function edgeKey(from: string, to: string, selector: string): string {
   return `${from}|${to}|${selector}`;
+}
+
+function buildIndices(graph: InteractionGraph): GraphIndices {
+  const indices: GraphIndices = {
+    nodeIndex: new Map(graph.nodes.map((n) => [n.url, n])),
+    edgeIndex: new Set(graph.edges.map((e) => edgeKey(e.from, e.to, e.selector))),
+  };
+  indexCache.set(graph, indices);
+  return indices;
+}
+
+/** Return this graph's indices, building (and caching) them on first access. */
+function getIndices(graph: InteractionGraph): GraphIndices {
+  return indexCache.get(graph) ?? buildIndices(graph);
 }
 
 export function createGraph(): InteractionGraph {
@@ -39,6 +58,7 @@ export function addNode(
   elementCount: number,
   formFields?: FormField[]
 ): PageNode {
+  const { nodeIndex } = getIndices(graph);
   // O(1) lookup via index instead of O(n) find
   const existing = nodeIndex.get(url);
   if (existing) {
@@ -73,6 +93,7 @@ export function addEdge(
   selector: string,
   label: string
 ): void {
+  const { edgeIndex } = getIndices(graph);
   // O(1) dedup via index instead of O(n) some()
   const key = edgeKey(fromUrl, toUrl, selector);
   if (edgeIndex.has(key)) return;
@@ -85,6 +106,7 @@ export function addEdge(
 
 /** Remove a node and all its edges from the graph. Updates indices. */
 export function removeNode(graph: InteractionGraph, url: string): void {
+  const { nodeIndex, edgeIndex } = getIndices(graph);
   graph.nodes = graph.nodes.filter((n) => n.url !== url);
   nodeIndex.delete(url);
 
@@ -108,8 +130,8 @@ export function pruneStaleNodes(graph: InteractionGraph, keepUrls: Set<string>):
 }
 
 /** Get a node by URL in O(1). */
-export function getNode(url: string): PageNode | undefined {
-  return nodeIndex.get(url);
+export function getNode(graph: InteractionGraph, url: string): PageNode | undefined {
+  return getIndices(graph).nodeIndex.get(url);
 }
 
 /** Get all edges originating from a URL. */
@@ -160,6 +182,7 @@ export async function loadGraph(): Promise<InteractionGraph | undefined> {
 }
 
 export function serializeGraphForAI(graph: InteractionGraph): string {
+  const { nodeIndex } = getIndices(graph);
   const lines: string[] = ['## Page Interaction Graph\n'];
 
   lines.push(`Pages discovered: ${graph.nodes.length}`);
@@ -292,6 +315,7 @@ export function serializeGraphForAI(graph: InteractionGraph): string {
  * Flow-learning-optimised serialization for large graphs.
  */
 export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
+  const { nodeIndex } = getIndices(graph);
   const lines: string[] = ['## Page Interaction Graph\n'];
   lines.push(`Pages discovered: ${graph.nodes.length}`);
   lines.push(`Interactions recorded: ${graph.edges.length}\n`);
@@ -409,10 +433,15 @@ export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
     lines.push('');
   }
 
-  if (graph.edges.length > 0) {
+  // Only surface navigation edges whose destination page was actually mapped.
+  // Links to pages we never explored (a single-page or truncated run records
+  // them as edges) would otherwise prompt the LLM to invent ungrounded
+  // "Navigate → X" flows for pages it knows nothing about.
+  const mappedEdges = graph.edges.filter((e) => nodeIndex.has(e.to));
+  if (mappedEdges.length > 0) {
     lines.push('### Navigation Paths (click-discovered):');
     const byFrom = new Map<string, Map<string, PageEdge>>();
-    for (const edge of graph.edges) {
+    for (const edge of mappedEdges) {
       if (!byFrom.has(edge.from)) byFrom.set(edge.from, new Map());
       const key = `${edge.label}→${edge.to}`;
       byFrom.get(edge.from)!.set(key, edge);
@@ -438,6 +467,7 @@ export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
 export function serializeNavigationMap(graph: InteractionGraph): string {
   if (graph.edges.length === 0) return 'No navigation paths discovered yet — run Exploration first.';
 
+  const { nodeIndex } = getIndices(graph);
   const lines: string[] = ['Navigation paths between pages:\n'];
 
   const byFrom = new Map<string, PageEdge[]>();
@@ -720,6 +750,7 @@ export function addFormOutcome(
   pageUrl: string,
   outcome: FormSubmissionOutcome
 ): void {
+  const { nodeIndex } = getIndices(graph);
   // O(1) node lookup
   const node = nodeIndex.get(pageUrl);
   if (!node) return;

@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   createGraph,
   addNode,
   addEdge,
+  getNode,
   serializeGraphForAI,
 } from '../../../src/core/explorer/interaction-graph';
 
@@ -13,6 +14,37 @@ vi.mock('../../../src/storage/indexed-db', () => ({
     clear: vi.fn(),
   },
 }));
+
+describe('per-graph index isolation', () => {
+  it('given two live graphs when mutated interleaved then indices do not cross-contaminate', () => {
+    // Regression: indices were module-global, so building one graph clobbered
+    // the other. addNode/getNode must resolve against the graph they are given.
+    const a = createGraph();
+    const b = createGraph();
+
+    addNode(a, 'https://a.test/1', 'A1', 3);
+    addNode(b, 'https://b.test/1', 'B1', 5);
+    // Interleave: touching b must not affect a's index and vice versa.
+    addNode(a, 'https://a.test/2', 'A2', 2);
+
+    expect(getNode(a, 'https://a.test/1')?.title).toBe('A1');
+    expect(getNode(a, 'https://b.test/1')).toBeUndefined();
+    expect(getNode(b, 'https://b.test/1')?.title).toBe('B1');
+    expect(getNode(b, 'https://a.test/2')).toBeUndefined();
+    expect(a.nodes).toHaveLength(2);
+    expect(b.nodes).toHaveLength(1);
+  });
+
+  it('given edge dedup when two graphs share a selector then each dedups independently', () => {
+    const a = createGraph();
+    const b = createGraph();
+    addEdge(a, 'p1', 'p2', 'click', '.btn', 'Go');
+    addEdge(a, 'p1', 'p2', 'click', '.btn', 'Go'); // dup in a
+    addEdge(b, 'p1', 'p2', 'click', '.btn', 'Go'); // same key, different graph
+    expect(a.edges).toHaveLength(1);
+    expect(b.edges).toHaveLength(1);
+  });
+});
 
 describe('createGraph', () => {
   it('given no input when creating then returns empty graph', () => {

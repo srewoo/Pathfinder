@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from "react";
 import { Bot, Play, Sparkles, Globe, ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '../shared/Button';
 import { Badge } from '../shared/Badge';

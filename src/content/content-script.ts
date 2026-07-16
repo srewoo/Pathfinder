@@ -758,8 +758,31 @@ function detectConditionalFields(): Array<{ fieldSelector: string; triggerSelect
   return rules;
 }
 
+// Page-inspection messages describe the WHOLE page and must be answered only by
+// the top frame. The content script is injected into every frame (all_frames),
+// so each subframe also receives these; the first sendResponse wins, which means
+// a subframe could return its own partial content instead of the top document's.
+// Subframes decline these (return false, no sendResponse) so the top frame's
+// answer is the one the background receives. Action/health/recorder messages are
+// deliberately NOT gated — an action may target an element inside a subframe.
+const TOP_FRAME_ONLY_MESSAGES: ReadonlySet<ContentScriptMessage['type']> = new Set([
+  'GET_ELEMENTS', 'GET_FORM_FIELDS', 'GET_LINKS', 'REVEAL_PAGE_CONTENT',
+  'GET_DOM_SNAPSHOT', 'SCAN_PAGE', 'WAIT_FOR_IDLE', 'DETECT_FORM_MESSAGES',
+  'GET_PAGE_METADATA', 'DETECT_MODAL', 'GET_PAGE_ACTIONS', 'GET_DATA_TABLES',
+  'GET_PAGE_TYPE', 'GET_FIELD_ERRORS', 'GET_WIZARD_STEPS', 'GET_CONDITIONAL_FIELDS',
+  'VALIDATE_SELECTORS', 'DETECT_SPA_ROUTES',
+]);
+
+const IS_TOP_FRAME = (() => {
+  try { return window.top === window.self; } catch { return false; }
+})();
+
 chrome.runtime.onMessage.addListener(
   (message: ContentScriptMessage, _sender, sendResponse) => {
+    // Decline page-scan messages in subframes so only the top frame answers.
+    if (!IS_TOP_FRAME && TOP_FRAME_ONLY_MESSAGES.has(message.type)) {
+      return false;
+    }
     handleMessage(message)
       .then(sendResponse)
       .catch((err) => {
@@ -910,6 +933,39 @@ async function handleMessage(message: ContentScriptMessage): Promise<unknown> {
 }
 
 /**
+ * Snapshot SPA-framework globals from the PAGE's main world.
+ *
+ * The content script runs in an ISOLATED world, so `window.__NEXT_DATA__`,
+ * `__BUILD_MANIFEST`, and `__NUXT__` are always undefined here — reading them
+ * directly (as this code used to) is dead. We briefly inject a script into the
+ * page world to copy them onto a DOM attribute we can then read back. Inline
+ * `<script>` executes synchronously on append, so the value is available
+ * immediately. Best-effort: a strict page CSP blocks the injected script, in
+ * which case we return null and the caller falls back to DOM-derived links.
+ */
+function readPageFrameworkGlobals(): { nextPage?: string; nextRoutes?: string[]; nuxtPath?: string } | null {
+  const ATTR = 'data-pf-spa-globals';
+  try {
+    const script = document.createElement('script');
+    script.textContent = `(() => { try {
+      const out = {};
+      const nd = window.__NEXT_DATA__; if (nd && nd.page) out.nextPage = nd.page;
+      const bm = window.__BUILD_MANIFEST; if (bm) out.nextRoutes = Object.keys(bm);
+      const nx = window.__NUXT__;
+      if (nx && nx.state && nx.state.route && nx.state.route.path) out.nuxtPath = nx.state.route.path;
+      document.documentElement.setAttribute(${JSON.stringify(ATTR)}, JSON.stringify(out));
+    } catch (e) {} })();`;
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+    const raw = document.documentElement.getAttribute(ATTR);
+    document.documentElement.removeAttribute(ATTR);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Detect SPA framework routes from page globals and navigation DOM.
  * Reads Next.js, Nuxt/__NUXT__, and Vue Router data; falls back to href links.
  */
@@ -917,30 +973,24 @@ function detectSPARoutes(): { framework: string; routes: string[] } {
   const routes = new Set<string>();
   let framework = 'unknown';
 
-  // Next.js: __NEXT_DATA__ contains the current route; __BUILD_MANIFEST lists all routes
-  const win = window as unknown as Record<string, unknown>;
+  // Next.js / Nuxt globals live in the page's main world — snapshot them across
+  // the isolated-world boundary (returns null under a strict CSP).
+  const pageGlobals = readPageFrameworkGlobals();
   try {
-    const nextData = win['__NEXT_DATA__'] as { page?: string } | undefined;
-    if (nextData?.page) {
-      routes.add(nextData.page);
+    if (pageGlobals?.nextPage) {
+      routes.add(pageGlobals.nextPage);
       framework = 'next.js';
     }
-    const buildManifest = win['__BUILD_MANIFEST'] as Record<string, string[]> | undefined;
-    if (buildManifest) {
+    if (pageGlobals?.nextRoutes) {
       framework = 'next.js';
-      Object.keys(buildManifest).forEach((route) => {
+      pageGlobals.nextRoutes.forEach((route) => {
         if (route && route !== '/_buildManifest' && route !== '/_ssgManifest') {
           routes.add(route);
         }
       });
     }
-  } catch { /* skip */ }
-
-  // Nuxt / Vue Router: __NUXT__ may expose router data
-  try {
-    const nuxt = win['__NUXT__'] as { state?: { route?: { path?: string } } } | undefined;
-    if (nuxt?.state?.route?.path) {
-      routes.add(nuxt.state.route.path);
+    if (pageGlobals?.nuxtPath) {
+      routes.add(pageGlobals.nuxtPath);
       if (framework === 'unknown') framework = 'nuxt';
     }
   } catch { /* skip */ }

@@ -15,8 +15,10 @@ import {
   dispatchClick,
   dispatchType,
   dispatchKeyPress,
+  dispatchKeyDownRaw,
+  dispatchKeyUpRaw,
   dispatchHover,
-  getElementBounds,
+  getElementState,
   evaluate,
   enableDialogAutoDismiss,
   registerDialogHandler,
@@ -26,8 +28,10 @@ import {
   getHAREntries,
   getAccessibilityTree,
   serializeAXTree,
+  DEEP_QUERY_FN,
+  CDP_MODIFIERS,
 } from './cdp-client';
-import type { HAREntry } from './cdp-client';
+import type { HAREntry, ElementState } from './cdp-client';
 import { runStep as runSyntheticStep } from '../executor/action-runner';
 import { createLogger } from '../../utils/logger';
 
@@ -140,30 +144,63 @@ export async function runStepWithCDP(step: ExecutionStep, tabId: number): Promis
 
 // ── CDP Action Implementations ──────────────────────────────────────────────
 
+const ACTIONABILITY_TIMEOUT_MS = 5000;
+const ACTIONABILITY_POLL_MS = 100;
+
+/**
+ * Auto-wait for an element (first of comma-separated fallbacks) to become
+ * actionable: present, visible, enabled, and geometrically stable (its center
+ * unchanged across two consecutive polls). This is the reliability primitive
+ * that replaces blind fixed sleeps — we never dispatch a trusted event at an
+ * element that is hidden, disabled, mid-animation, or off-screen.
+ *
+ * Returns the resolved selector + settled state, or null on timeout.
+ */
+async function waitForActionable(
+  selectorStr: string,
+  tabId: number,
+  timeoutMs = ACTIONABILITY_TIMEOUT_MS
+): Promise<{ selector: string; state: ElementState } | null> {
+  const selectors = selectorStr.split(',').map((s) => s.trim()).filter(Boolean);
+  const deadline = Date.now() + timeoutMs;
+  let prev: ElementState | null = null;
+
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      const state = await getElementState(tabId, sel);
+      if (state.found && state.visible && state.enabled && state.rect) {
+        // Require geometric stability: same center as the previous poll.
+        if (
+          prev?.rect &&
+          Math.abs(prev.rect.x - state.rect.x) < 1 &&
+          Math.abs(prev.rect.y - state.rect.y) < 1
+        ) {
+          return { selector: sel, state };
+        }
+        prev = state;
+      }
+    }
+    await delay(ACTIONABILITY_POLL_MS);
+  }
+  return null;
+}
+
 async function cdpClick(step: ExecutionStep, tabId: number, start: number): Promise<StepResult> {
-  const bounds = await resolveSelector(step.selector!, tabId);
-  if (!bounds) {
-    return fallbackResult(step, tabId, start, 'Element not found for CDP click');
+  // Scroll the candidate into view, then auto-wait for actionability.
+  await evaluate(tabId, `(() => { ${DEEP_QUERY_FN} const el = __deepQuery(document, ${JSON.stringify(step.selector!)}); if (el) el.scrollIntoView({ block: 'center' }); })()`);
+
+  const target = await waitForActionable(step.selector!, tabId);
+  if (!target) {
+    // Not found / never became visible+enabled+stable — hand off to synthetic
+    // (which has its own retry + healing) rather than clicking blind.
+    return fallbackResult(step, tabId, start, 'Element not actionable within timeout for CDP click');
   }
 
-  // Scroll element into view first
-  await evaluate(tabId, `document.querySelector(${JSON.stringify(step.selector!)})?.scrollIntoView({ block: 'center' })`);
-
-  // Wait for element to be in viewport (poll up to 500ms instead of fixed delay)
-  let freshBounds = await getElementBounds(tabId, step.selector!);
-  for (let wait = 0; !freshBounds && wait < 500; wait += 100) {
-    await delay(100);
-    freshBounds = await getElementBounds(tabId, step.selector!);
-  }
-  if (!freshBounds) {
-    return fallbackResult(step, tabId, start, 'Element lost after scroll');
-  }
-
-  await dispatchClick(tabId, freshBounds.x, freshBounds.y);
+  await dispatchClick(tabId, target.state.rect!.x, target.state.rect!.y);
 
   if (step.action === 'double_click') {
     await delay(50);
-    await dispatchClick(tabId, freshBounds.x, freshBounds.y);
+    await dispatchClick(tabId, target.state.rect!.x, target.state.rect!.y);
   }
 
   // Brief wait for DOM to settle
@@ -177,22 +214,21 @@ async function cdpClick(step: ExecutionStep, tabId: number, start: number): Prom
 }
 
 async function cdpType(step: ExecutionStep, tabId: number, start: number): Promise<StepResult> {
-  const bounds = await resolveSelector(step.selector!, tabId);
-  if (!bounds) {
-    return fallbackResult(step, tabId, start, 'Element not found for CDP type');
+  const target = await waitForActionable(step.selector!, tabId);
+  if (!target) {
+    return fallbackResult(step, tabId, start, 'Element not actionable within timeout for CDP type');
   }
+  const sel = target.selector;
 
-  // Focus the element
-  await evaluate(tabId, `
-    const el = document.querySelector(${JSON.stringify(step.selector!)});
-    if (el) { el.focus(); el.scrollIntoView({ block: 'center' }); }
-  `);
+  // Focus the element (shadow-DOM aware)
+  await evaluate(tabId, `(() => { ${DEEP_QUERY_FN} const el = __deepQuery(document, ${JSON.stringify(sel)}); if (el) { el.focus(); el.scrollIntoView({ block: 'center' }); } })()`);
   await delay(100);
 
   // Clear existing content
-  await dispatchKeyPress(tabId, 'a', undefined);
-  await evaluate(tabId, `
-    const el = document.querySelector(${JSON.stringify(step.selector!)});
+  await dispatchKeyPress(tabId, 'a', undefined, CDP_MODIFIERS.Control);
+  await evaluate(tabId, `(() => {
+    ${DEEP_QUERY_FN}
+    const el = __deepQuery(document, ${JSON.stringify(sel)});
     if (el) {
       const nativeSetter = Object.getOwnPropertyDescriptor(
         el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
@@ -201,17 +237,19 @@ async function cdpType(step: ExecutionStep, tabId: number, start: number): Promi
       if (nativeSetter) nativeSetter.call(el, '');
       el.dispatchEvent(new Event('input', { bubbles: true }));
     }
-  `);
+  })()`);
   await delay(50);
 
-  // Verify clear succeeded before typing
+  // Verify clear succeeded before typing. evaluate() already unwraps to the
+  // raw returned value, so read it directly (not `.result.value`).
   try {
-    const clearCheck = await evaluate(tabId, `
-      (() => { const el = document.querySelector(${JSON.stringify(step.selector!)}); return el ? (el.value ?? el.textContent ?? '') : ''; })()
-    `);
-    const val = clearCheck as unknown as { result?: { value?: string } };
-    if (val?.result?.value && val.result.value.length > 0) {
-      log.warn(`Field clear may not have succeeded for "${step.selector}", proceeding with type`);
+    const remaining = await evaluate<string>(tabId, `(() => {
+      ${DEEP_QUERY_FN}
+      const el = __deepQuery(document, ${JSON.stringify(sel)});
+      return el ? (el.value ?? el.textContent ?? '') : '';
+    })()`);
+    if (typeof remaining === 'string' && remaining.length > 0) {
+      log.warn(`Field clear may not have succeeded for "${sel}" (still "${remaining.slice(0, 20)}"), proceeding with type`);
     }
   } catch { /* non-fatal — proceed with typing regardless */ }
 
@@ -219,14 +257,28 @@ async function cdpType(step: ExecutionStep, tabId: number, start: number): Promi
   await dispatchType(tabId, step.value ?? '');
 
   // Fire change event
-  await evaluate(tabId, `
-    const el = document.querySelector(${JSON.stringify(step.selector!)});
-    if (el) {
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  `);
+  await evaluate(tabId, `(() => {
+    ${DEEP_QUERY_FN}
+    const el = __deepQuery(document, ${JSON.stringify(sel)});
+    if (el) el.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
 
   await delay(100);
+
+  // Verify the value actually landed — a type that leaves the field empty (or
+  // unchanged for a non-empty target) is a real failure, not a pass.
+  if (step.value) {
+    try {
+      const landed = await evaluate<string>(tabId, `(() => {
+        ${DEEP_QUERY_FN}
+        const el = __deepQuery(document, ${JSON.stringify(sel)});
+        return el ? String(el.value ?? el.textContent ?? '') : '';
+      })()`);
+      if (typeof landed === 'string' && !landed.includes(step.value)) {
+        return fallbackResult(step, tabId, start, `Typed value did not land (field is "${landed.slice(0, 30)}")`);
+      }
+    } catch { /* verification best-effort; don't fail on read error */ }
+  }
 
   return {
     step,
@@ -236,19 +288,24 @@ async function cdpType(step: ExecutionStep, tabId: number, start: number): Promi
 }
 
 async function cdpClear(step: ExecutionStep, tabId: number, start: number): Promise<StepResult> {
-  await evaluate(tabId, `
-    const el = document.querySelector(${JSON.stringify(step.selector!)});
-    if (el) {
-      el.focus();
-      const nativeSetter = Object.getOwnPropertyDescriptor(
-        el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
-        'value'
-      )?.set;
-      if (nativeSetter) nativeSetter.call(el, '');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  `);
+  const cleared = await evaluate<boolean>(tabId, `(() => {
+    ${DEEP_QUERY_FN}
+    const el = __deepQuery(document, ${JSON.stringify(step.selector!)});
+    if (!el) return false;
+    el.focus();
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+      'value'
+    )?.set;
+    if (nativeSetter) nativeSetter.call(el, '');
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+
+  if (!cleared) {
+    return fallbackResult(step, tabId, start, 'Element not found for CDP clear');
+  }
 
   return {
     step,
@@ -259,7 +316,7 @@ async function cdpClear(step: ExecutionStep, tabId: number, start: number): Prom
 
 async function cdpPressKey(step: ExecutionStep, tabId: number, start: number): Promise<StepResult> {
   if (step.selector) {
-    await evaluate(tabId, `document.querySelector(${JSON.stringify(step.selector)})?.focus()`);
+    await evaluate(tabId, `(() => { ${DEEP_QUERY_FN} const el = __deepQuery(document, ${JSON.stringify(step.selector)}); if (el) el.focus(); })()`);
     await delay(100);
   }
 
@@ -267,17 +324,31 @@ async function cdpPressKey(step: ExecutionStep, tabId: number, start: number): P
   const parts = key.split('+');
   const mainKey = parts.pop() ?? key;
 
-  // Handle modifiers
+  // Resolve modifiers to their held key name + cumulative CDP bitmask. The main
+  // key must be dispatched WHILE the modifiers are held (with the bitmask set),
+  // otherwise Ctrl+A degrades to a bare "a" — the previous code pressed AND
+  // released each modifier before the main key and never set `modifiers`.
+  const heldKeys: string[] = [];
+  let modifierMask = 0;
   for (const mod of parts) {
-    const modKey = mod.toLowerCase() === 'ctrl' || mod.toLowerCase() === 'control' ? 'Control'
-      : mod.toLowerCase() === 'shift' ? 'Shift'
-      : mod.toLowerCase() === 'alt' ? 'Alt'
-      : mod.toLowerCase() === 'meta' || mod.toLowerCase() === 'cmd' ? 'Meta'
-      : mod;
-    await dispatchKeyPress(tabId, modKey);
+    const m = mod.toLowerCase();
+    if (m === 'ctrl' || m === 'control') { heldKeys.push('Control'); modifierMask |= CDP_MODIFIERS.Control; }
+    else if (m === 'shift') { heldKeys.push('Shift'); modifierMask |= CDP_MODIFIERS.Shift; }
+    else if (m === 'alt') { heldKeys.push('Alt'); modifierMask |= CDP_MODIFIERS.Alt; }
+    else if (m === 'meta' || m === 'cmd' || m === 'command') { heldKeys.push('Meta'); modifierMask |= CDP_MODIFIERS.Meta; }
   }
 
-  await dispatchKeyPress(tabId, mainKey);
+  for (const held of heldKeys) {
+    await dispatchKeyDownRaw(tabId, held, modifierMask);
+  }
+  try {
+    await dispatchKeyPress(tabId, mainKey, undefined, modifierMask);
+  } finally {
+    // Release in reverse order regardless of outcome so modifiers never stick.
+    for (const held of [...heldKeys].reverse()) {
+      await dispatchKeyUpRaw(tabId, held, 0);
+    }
+  }
 
   await delay(100);
 
@@ -289,20 +360,14 @@ async function cdpPressKey(step: ExecutionStep, tabId: number, start: number): P
 }
 
 async function cdpHover(step: ExecutionStep, tabId: number, start: number): Promise<StepResult> {
-  const bounds = await resolveSelector(step.selector!, tabId);
-  if (!bounds) {
-    return fallbackResult(step, tabId, start, 'Element not found for CDP hover');
+  await evaluate(tabId, `(() => { ${DEEP_QUERY_FN} const el = __deepQuery(document, ${JSON.stringify(step.selector!)}); if (el) el.scrollIntoView({ block: 'center' }); })()`);
+
+  const target = await waitForActionable(step.selector!, tabId);
+  if (!target) {
+    return fallbackResult(step, tabId, start, 'Element not actionable within timeout for CDP hover');
   }
 
-  await evaluate(tabId, `document.querySelector(${JSON.stringify(step.selector!)})?.scrollIntoView({ block: 'center' })`);
-  await delay(100);
-
-  const freshBounds = await getElementBounds(tabId, step.selector!);
-  if (!freshBounds) {
-    return fallbackResult(step, tabId, start, 'Element lost after scroll');
-  }
-
-  await dispatchHover(tabId, freshBounds.x, freshBounds.y);
+  await dispatchHover(tabId, target.state.rect!.x, target.state.rect!.y);
   await delay(200);
 
   return {
@@ -315,44 +380,33 @@ async function cdpHover(step: ExecutionStep, tabId: number, start: number): Prom
 async function cdpCheck(step: ExecutionStep, tabId: number, start: number): Promise<StepResult> {
   const checked = step.action === 'check';
 
-  await evaluate(tabId, `
-    const el = document.querySelector(${JSON.stringify(step.selector!)});
-    if (el) {
-      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
-      if (nativeSetter) nativeSetter.call(el, ${checked});
-      else el.checked = ${checked};
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  `);
+  const result = await evaluate<boolean | null>(tabId, `(() => {
+    ${DEEP_QUERY_FN}
+    const el = __deepQuery(document, ${JSON.stringify(step.selector!)});
+    if (!el) return null;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+    if (nativeSetter) nativeSetter.call(el, ${checked});
+    else el.checked = ${checked};
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return el.checked === ${checked};
+  })()`);
 
   await delay(100);
+
+  if (result === null) {
+    return fallbackResult(step, tabId, start, 'Element not found for CDP check');
+  }
+  if (result === false) {
+    return fallbackResult(step, tabId, start, `Checkbox did not reach checked=${checked}`);
+  }
 
   return {
     step,
     status: 'passed',
     duration: Date.now() - start,
   };
-}
-
-// ── Selector Resolution with Fallbacks ──────────────────────────────────────
-
-/**
- * Try to resolve a selector, supporting comma-separated fallback selectors.
- * Returns the bounds of the first matching selector.
- */
-async function resolveSelector(
-  selectorStr: string,
-  tabId: number
-): Promise<{ x: number; y: number; width: number; height: number } | null> {
-  const selectors = selectorStr.split(',').map((s) => s.trim()).filter(Boolean);
-
-  for (const sel of selectors) {
-    const bounds = await getElementBounds(tabId, sel);
-    if (bounds) return bounds;
-  }
-  return null;
 }
 
 /**

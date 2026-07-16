@@ -103,6 +103,18 @@ export function buildRAGQuery(graph: InteractionGraph | undefined): string {
 export async function learnFlows(aiClient: AIClientInterface): Promise<Flow[]> {
   const graph = await loadGraph();
 
+  // Transparency: navigation flows are only learned for pages that were
+  // actually mapped. A single-page (or truncated) run records outgoing links as
+  // edges without visiting their destinations — those are excluded from flow
+  // learning so we never emit ungrounded "Navigate → X" stubs. Surface how many.
+  if (graph) {
+    const mappedUrls = new Set(graph.nodes.map((n) => n.url));
+    const unmappedDests = new Set(graph.edges.map((e) => e.to).filter((to) => !mappedUrls.has(to)));
+    if (unmappedDests.size > 0) {
+      log.info(`Flow learning: ignoring ${unmappedDests.size} link destination(s) never mapped (explore them with wider scope to learn their flows).`);
+    }
+  }
+
   // Embed failure must not abort the whole flow.
   let knowledgeContext = 'No product documentation indexed yet.';
   try {

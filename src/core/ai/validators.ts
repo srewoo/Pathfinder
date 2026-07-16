@@ -82,6 +82,48 @@ export const isPlanShape: Guard<PlanShape> = (v): v is PlanShape => {
   return v.steps.every((s) => isObject(s));
 };
 
+/** Shape of the test-generation LLM response: `{ tests: [{title, ...}] }`. */
+export interface TestsResponseShape {
+  tests: Array<Record<string, unknown>>;
+}
+
+export const isTestsResponseShape: Guard<TestsResponseShape> = (v): v is TestsResponseShape => {
+  if (!isObject(v)) return false;
+  if (!Array.isArray(v.tests)) return false;
+  return v.tests.every(
+    (t) => isObject(t) && (t.title == null || typeof t.title === 'string'),
+  );
+};
+
+/**
+ * Shape of the AI-guided explorer's ranking response — a list of click targets
+ * the model deemed worth exploring. Each action must carry a non-empty string
+ * selector; other fields are optional and defaulted downstream.
+ */
+export interface AgentActionsShape {
+  actions: Array<{
+    selector: string;
+    action?: string;
+    description?: string;
+    expectedOutcome?: string;
+    priority?: number;
+  }>;
+}
+
+export const isAgentActionsShape: Guard<AgentActionsShape> = (v): v is AgentActionsShape => {
+  if (!isObject(v)) return false;
+  if (!Array.isArray(v.actions)) return false;
+  return v.actions.every((a) => {
+    if (!isObject(a)) return false;
+    if (typeof a.selector !== 'string' || a.selector.length === 0) return false;
+    if (a.action != null && typeof a.action !== 'string') return false;
+    if (a.description != null && typeof a.description !== 'string') return false;
+    if (a.expectedOutcome != null && typeof a.expectedOutcome !== 'string') return false;
+    if (a.priority != null && typeof a.priority !== 'number') return false;
+    return true;
+  });
+};
+
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }

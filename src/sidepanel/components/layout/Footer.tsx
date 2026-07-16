@@ -1,4 +1,3 @@
-import React from 'react';
 import { HelpCircle, Shield } from 'lucide-react';
 
 function openExtensionPage(filename: string) {

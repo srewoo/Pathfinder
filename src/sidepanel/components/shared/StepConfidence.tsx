@@ -1,4 +1,3 @@
-import React from 'react';
 import type { StepConfidence } from '../../../storage/schemas';
 
 const META: Record<StepConfidence, { color: string; label: string; title: string }> = {

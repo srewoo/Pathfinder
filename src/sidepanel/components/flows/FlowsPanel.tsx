@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 import { GitBranch, ChevronDown, ChevronRight, Wand2, Trash2, Loader2, CheckSquare, Square } from 'lucide-react';
 import { getAllFlows, deleteFlow } from '../../../core/flow/flow-store';
 import type { Flow } from '../../../storage/schemas';

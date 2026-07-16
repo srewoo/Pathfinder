@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import { useEffect } from "react";
 import { GitBranch, ArrowRight } from 'lucide-react';
 import { ExplorerControls } from './ExplorerControls';
 import { ExplorerDataControls } from './ExplorerDataControls';

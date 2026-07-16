@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import { useEffect } from "react";
 import { Database, Layers } from 'lucide-react';
 import { CrawlForm } from './CrawlForm';
 import { KnowledgeList } from './KnowledgeList';

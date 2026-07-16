@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from "react";
 import { Globe, Play, Loader2 } from 'lucide-react';
 import { Button } from '../shared/Button';
 import { ProgressBar } from '../shared/ProgressBar';
