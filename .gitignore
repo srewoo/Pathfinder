@@ -20,7 +20,6 @@ out/
 # Extension release archives
 releases/
 *.zip
-!cli/templates/*.zip
 *.crx
 *.pem
 
@@ -55,17 +54,6 @@ playwright/.cache/
 __snapshots__/*.snap.tmp
 **/test-output/
 **/.cypress/
-
-# ─── MCP package — runtime data ──────────────────────────────────────────
-MCP/data/
-MCP/.mysql-data/
-MCP/screenshots/
-MCP/sessions/
-MCP/tmp/
-
-# Local DB snapshots and Playwright sessions captured by capture_auth
-MCP/auth/
-MCP/storage-states/
 
 # ─── IDE / Editor ────────────────────────────────────────────────────────
 .idea/

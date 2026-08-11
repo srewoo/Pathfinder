@@ -49,11 +49,13 @@ vi.mock('../../src/core/executor/action-runner', () => ({
 
 // Neutralize CDP — these tests exercise the synthetic-runner path. initCDPSession
 // returns false so executeTest uses runStep (mocked above).
-vi.mock('../../src/core/cdp/cdp-action-runner', () => ({
+// Session lifecycle only — actions live in the CDP driver now (fix.md §3).
+vi.mock('../../src/core/cdp/cdp-session', () => ({
   initCDPSession: vi.fn().mockResolvedValue(false),
   teardownCDPSession: vi.fn().mockResolvedValue([]),
-  runStepWithCDP: vi.fn(),
   getAXContext: vi.fn().mockResolvedValue(undefined),
+  getCurrentHAR: vi.fn().mockReturnValue([]),
+  captureFullPageScreenshot: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../src/core/cdp/cdp-client', () => ({

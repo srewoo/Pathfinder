@@ -18,7 +18,7 @@ import { recordedActionsToSteps, inferTestTitle } from '../core/recorder/recorde
 import type { RecordedAction } from '../core/recorder/recorder';
 import { parseOpenAPISpec, extractValidationRules } from '../core/openapi/openapi-parser';
 import { compareScreenshots } from '../utils/visual-diff';
-import { captureAuthCookies, saveCookiesToPreset, verifyAuthState } from '../core/executor/auth-manager';
+import { verifyAuthState } from '../core/executor/auth-manager';
 import { generateHtmlReport, generateJUnitXml } from '../utils/html-reporter';
 import { generateJsonReport, computeTestTrends, getRunResults } from '../utils/report-exporter';
 import { notifyTestComplete, notifySuiteComplete, testWebhook } from '../core/executor/webhook-notifier';
@@ -27,6 +27,12 @@ import { analyzeHARImpact, formatHARImpactReport } from '../core/analysis/har-im
 import { runAccessibilityAudit, formatA11yReport } from '../core/analysis/accessibility-audit';
 import { validateAgainstSpec, formatContractReport } from '../core/analysis/api-contract-validator';
 import type { ParsedAPISpec } from '../core/openapi/openapi-parser';
+import { installPumpListener, resumeInterruptedJobs } from './job-pump';
+import { installScheduleListener, syncAlarms } from './scheduled-runs';
+// Side-effect import: registers the CDP step executor with the core port
+// (fix.md §2/§3). Must happen before any step runs, so it lives at top level.
+import '../drivers/step-runner';
+import '../drivers/cdp-cookies';
 
 const log = createLogger('service-worker');
 
@@ -35,11 +41,28 @@ const log = createLogger('service-worker');
 // Extension page ports (sidepanel) do NOT extend SW lifetime — only content
 // script ports do. We use chrome.alarms (already in manifest permissions) to
 // fire a periodic event that keeps the SW alive during long operations.
+//
+// NOTE (fix.md §4): keepalive is a mitigation, not a fix — Chrome can still
+// evict mid-operation and the alarm only reduces the odds. Work that must
+// survive eviction belongs in a durable job (see ./job-pump), which resumes from
+// persisted state instead of depending on the worker staying up. The legacy
+// in-memory orchestrators below are the remaining users of keepalive; each one
+// migrated to a job is one less thing eviction can lose.
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'sw-keepalive') {
     log.debug('SW keepalive ping');
   }
 });
+
+// Durable job pump and schedule listener. Registered at top level so a restarted
+// worker re-attaches both before any alarm can fire — alarms survive eviction,
+// listener registrations do not.
+installPumpListener();
+installScheduleListener();
+void resumeInterruptedJobs().catch((err) =>
+  log.warn('Could not check for interrupted jobs at startup', err)
+);
+void syncAlarms().catch((err) => log.warn('Could not sync schedule alarms', err));
 
 function startSWKeepalive(): void {
   // periodInMinutes: 0.5 = every 30 seconds — well within Chrome's 30s idle timeout
@@ -916,13 +939,17 @@ async function handleMessage(
 
     // ── Auth Session Management ──────────────────────────────────────────
     case 'CAPTURE_AUTH_COOKIES': {
-      try {
-        const cookies = await captureAuthCookies(message.payload.url);
-        await saveCookiesToPreset(message.payload.presetId, cookies);
-        return { success: true, cookieCount: cookies.length };
-      } catch (err) {
-        return { success: false, error: String(err) };
-      }
+      // Removed in fix.md §7.3 — Pathfinder no longer reads the browser's cookie
+      // jar. Returns an actionable error rather than 'success: true' with zero
+      // cookies, which would look like a working capture that authenticates
+      // nothing.
+      return {
+        success: false,
+        error:
+          'Capturing your browser session was removed for safety. Configure login ' +
+          "steps on the preset instead — Pathfinder will log in itself rather than " +
+          'reusing your session.',
+      };
     }
 
     case 'VERIFY_AUTH': {

@@ -13,20 +13,12 @@ import { createLogger } from '../utils/logger';
 
 const log = createLogger('indexed-db');
 
-const DB_NAME = 'pathfinder_db';
-const DB_VERSION = 2;
+// Schema, version and the migration chain live in ./migrations (fix.md §12) so
+// the upgrade path is explicit and reviewable rather than implied by a pile of
+// existence guards.
+import { DB_NAME, DB_VERSION, STORES, runMigrations } from './migrations';
 
-const STORES = {
-  vectors: 'vectors',
-  documents: 'documents',
-  flows: 'flows',
-  testCases: 'test_cases',
-  testResults: 'test_results',
-  executionPlans: 'execution_plans',
-  interactionGraph: 'interaction_graph',
-  testRuns: 'test_runs',
-  graphSnapshots: 'graph_snapshots',
-} as const;
+export { STORES };
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -36,66 +28,14 @@ function openDB(): Promise<IDBDatabase> {
     request.onsuccess = () => resolve(request.result);
 
     request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
-
-      // ── v1 stores ─────────────────────────────────────────────────────────
-      if (!db.objectStoreNames.contains(STORES.vectors)) {
-        const vectorStore = db.createObjectStore(STORES.vectors, { keyPath: 'id' });
-        vectorStore.createIndex('url', 'url', { unique: false });
+      const target = event.target as IDBOpenDBRequest;
+      const db = target.result;
+      const tx = target.transaction;
+      if (!tx) {
+        reject(new Error('No versionchange transaction available for migration'));
+        return;
       }
-
-      if (!db.objectStoreNames.contains(STORES.documents)) {
-        const docStore = db.createObjectStore(STORES.documents, { keyPath: 'id' });
-        docStore.createIndex('url', 'url', { unique: true });
-      }
-
-      if (!db.objectStoreNames.contains(STORES.flows)) {
-        db.createObjectStore(STORES.flows, { keyPath: 'flowId' });
-      }
-
-      if (!db.objectStoreNames.contains(STORES.testCases)) {
-        const testStore = db.createObjectStore(STORES.testCases, { keyPath: 'id' });
-        testStore.createIndex('sourceFlowId', 'sourceFlowId', { unique: false });
-      }
-
-      if (!db.objectStoreNames.contains(STORES.testResults)) {
-        const resultStore = db.createObjectStore(STORES.testResults, { keyPath: 'id' });
-        resultStore.createIndex('testCaseId', 'testCaseId', { unique: false });
-        resultStore.createIndex('runId', 'runId', { unique: false });
-      }
-
-      if (!db.objectStoreNames.contains(STORES.executionPlans)) {
-        const planStore = db.createObjectStore(STORES.executionPlans, { keyPath: 'id' });
-        planStore.createIndex('testCaseHash', 'testCaseHash', { unique: false });
-        planStore.createIndex('testCaseId', 'testCaseId', { unique: false });
-      }
-
-      if (!db.objectStoreNames.contains(STORES.interactionGraph)) {
-        db.createObjectStore(STORES.interactionGraph, { keyPath: 'id', autoIncrement: true });
-      }
-
-      if (!db.objectStoreNames.contains(STORES.testRuns)) {
-        db.createObjectStore(STORES.testRuns, { keyPath: 'id' });
-      }
-
-      // ── v2 stores ─────────────────────────────────────────────────────────
-      if (!db.objectStoreNames.contains(STORES.graphSnapshots)) {
-        const snapStore = db.createObjectStore(STORES.graphSnapshots, { keyPath: 'id' });
-        snapStore.createIndex('savedAt', 'savedAt', { unique: false });
-      }
-
-      // ── v2 index additions for existing stores ────────────────────────────
-      // Add testCaseId index to executionPlans if missing (v1 didn't have it)
-      if (event.oldVersion < 2) {
-        try {
-          const planStore = (event.target as IDBOpenDBRequest).transaction!.objectStore(STORES.executionPlans);
-          if (!planStore.indexNames.contains('testCaseId')) {
-            planStore.createIndex('testCaseId', 'testCaseId', { unique: false });
-          }
-        } catch {
-          // Store may not exist in transaction — handled above
-        }
-      }
+      runMigrations(db, tx, event.oldVersion);
     };
   });
 }

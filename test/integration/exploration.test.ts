@@ -40,7 +40,15 @@ vi.mock('../../src/core/explorer/page-scanner', () => ({
   scanConditionalFields: vi.fn().mockResolvedValue([]),
 }));
 
-vi.mock('../../src/core/explorer/agent-explorer', () => ({ getAgentActions: vi.fn().mockResolvedValue([]) }));
+// Execution now routes through the CDP driver (fix.md §3), not the content
+// script. Actions are asserted against this mock instead of EXECUTE_ACTION
+// messages.
+vi.mock('../../src/core/step-executor', () => ({
+  executeStep: vi.fn().mockResolvedValue({ success: true }),
+  canExecuteStep: vi.fn().mockReturnValue(true),
+  releaseTab: vi.fn(),
+}));
+vi.mock('../../src/core/explorer/action-ranker', () => ({ getAgentActions: vi.fn().mockResolvedValue([]) }));
 vi.mock('../../src/core/explorer/spa-detector', () => ({ detectSPARoutes: vi.fn().mockResolvedValue([]) }));
 
 // CDP unavailable — exercises the non-CDP path (no HAR / a11y).
@@ -104,6 +112,14 @@ const el = (partial: Partial<InteractiveElement>): InteractiveElement =>
 const { exploreApp, computeStructureFingerprint } = await import('../../src/core/explorer/explorer-agent');
 const scanner = await import('../../src/core/explorer/page-scanner');
 const { sendToContentScript } = await import('../../src/messaging/messenger');
+const { executeStep } = await import('../../src/core/step-executor');
+
+/** Selectors the explorer actually clicked, via the driver step-runner. */
+function clickedSelectors(): string[] {
+  return vi.mocked(executeStep).mock.calls
+    .filter(([step]) => step?.action === 'click')
+    .map(([step]) => step.selector ?? '');
+}
 const graphMod = await import('../../src/core/explorer/interaction-graph');
 
 describe('exploreApp — single-page vs full-app coverage', () => {
@@ -139,10 +155,10 @@ describe('exploreApp — single-page vs full-app coverage', () => {
     expect(graph.nodes).toHaveLength(1);
     expect(graph.nodes[0].modals?.some((m) => m.title === 'Create Item')).toBe(true);
     // The explorer actually clicked the element (interaction happened on the single page).
-    expect(vi.mocked(sendToContentScript)).toHaveBeenCalledWith(1, expect.objectContaining({
-      type: 'EXECUTE_ACTION',
-      payload: expect.objectContaining({ action: 'click', selector: '#open' }),
-    }));
+    expect(vi.mocked(executeStep)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'click', selector: '#open' }),
+      1
+    );
   });
 
   it('given single-page mode (maxDepth 0) then pure navigation links are skipped but buttons and tabs ARE clicked', async () => {
@@ -158,9 +174,7 @@ describe('exploreApp — single-page vs full-app coverage', () => {
 
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false });
 
-    const clicked = vi.mocked(sendToContentScript).mock.calls
-      .filter(([, msg]) => (msg as { payload?: { action?: string } })?.payload?.action === 'click')
-      .map(([, msg]) => (msg as { payload: { selector: string } }).payload.selector);
+    const clicked = clickedSelectors();
 
     expect(clicked).toContain('#btn');      // in-place action → clicked
     expect(clicked).toContain('#tab');      // feature tab (query-param view) → clicked
@@ -219,9 +233,7 @@ describe('exploreApp — single-page vs full-app coverage', () => {
 
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false, exhaustiveStartPage: true });
 
-    const clicked = vi.mocked(sendToContentScript).mock.calls
-      .filter(([, msg]) => (msg as { payload?: { action?: string } })?.payload?.action === 'click')
-      .map(([, msg]) => (msg as { payload: { selector: string } }).payload.selector);
+    const clicked = clickedSelectors();
     expect(clicked).toEqual(expect.arrayContaining(['#a', '#b', '#c']));
   }, 20000);
 
@@ -239,9 +251,7 @@ describe('exploreApp — single-page vs full-app coverage', () => {
 
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false, exhaustiveStartPage: true });
 
-    const clicked = vi.mocked(sendToContentScript).mock.calls
-      .filter(([, msg]) => (msg as { payload?: { action?: string } })?.payload?.action === 'click')
-      .map(([, msg]) => (msg as { payload: { selector: string } }).payload.selector);
+    const clicked = clickedSelectors();
     expect(clicked).toContain('#copy');          // the trigger
     expect(clicked).toContain('#copy-summary');  // revealed menu item
     expect(clicked).toContain('#copy-all');      // revealed menu item
@@ -256,9 +266,8 @@ describe('exploreApp — single-page vs full-app coverage', () => {
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false });
 
     // No form-submit action should ever be dispatched in read-only mode.
-    const calls = vi.mocked(sendToContentScript).mock.calls;
-    const submitted = calls.some(([, msg]) =>
-      (msg as { payload?: { description?: string } })?.payload?.description?.includes('form submit'));
+    const submitted = vi.mocked(executeStep).mock.calls.some(([step]) =>
+      step?.description?.includes('form submit'));
     expect(submitted).toBe(false);
   });
 
@@ -270,9 +279,8 @@ describe('exploreApp — single-page vs full-app coverage', () => {
 
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false, submitForms: true });
 
-    const calls = vi.mocked(sendToContentScript).mock.calls;
-    const submitted = calls.some(([, msg]) =>
-      (msg as { payload?: { description?: string } })?.payload?.description?.includes('form submit'));
+    const submitted = vi.mocked(executeStep).mock.calls.some(([step]) =>
+      step?.description?.includes('form submit'));
     expect(submitted).toBe(true);
   }, 20000);
 
@@ -379,8 +387,7 @@ describe('exploreApp — fresh re-scan, stale pruning, change detection', () => 
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false, fresh: true });
 
     // No click action dispatched because the structure fingerprint matched.
-    const clicked = vi.mocked(sendToContentScript).mock.calls.some(([, msg]) =>
-      (msg as { payload?: { action?: string } })?.payload?.action === 'click');
+    const clicked = clickedSelectors().length > 0;
     expect(clicked).toBe(false);
   });
 
@@ -410,8 +417,7 @@ describe('exploreApp — fresh re-scan, stale pruning, change detection', () => 
 
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false, fresh: true });
 
-    const clicked = vi.mocked(sendToContentScript).mock.calls.some(([, msg]) =>
-      (msg as { payload?: { action?: string } })?.payload?.action === 'click');
+    const clicked = clickedSelectors().length > 0;
     expect(clicked).toBe(true);
   });
 });

@@ -5,14 +5,14 @@
  * this planner walks the app step-by-step — executing each action and observing the
  * ACTUAL resulting page state before deciding the next action.
  *
- * Uses Chrome extension messaging (EXECUTE_ACTION) instead of Playwright.
+ * Executes via the CDP driver (fix.md §3) — one execution substrate.
  * The generated step list is then replayed by the normal test-executor with healing.
  */
 
 import type { AIClientInterface } from '../ai/ai-client';
 import type { ExecutionStep, ActionType, AssertType } from '../../storage/schemas';
 import { getPageSnapshot } from '../explorer/page-scanner';
-import { sendToContentScript } from '../../messaging/messenger';
+import { executeStep as executeStepViaPort } from '../step-executor';
 import { serializeCompressedDOM } from '../../utils/dom-compress';
 import { PROMPTS } from '../ai/prompt-templates';
 import { createLogger } from '../../utils/logger';
@@ -190,13 +190,11 @@ export async function interactivePlan(
 
 async function executeStep(tabId: number, step: ExecutionStep): Promise<boolean> {
   try {
-    // The content script reports the real outcome via { success, error }. A
-    // resolved message only means the script *responded* — we must inspect
-    // `success`, otherwise a click on a missing element is recorded as a
-    // verified step and the whole "observe actual state" premise collapses.
-    const response = await sendToContentScript<{ success: boolean; error?: string }>(tabId, {
-      type: 'EXECUTE_ACTION',
-      payload: {
+    // The driver reports the real outcome via { success, error }. We must inspect
+    // `success`, otherwise a click on a missing element is recorded as a verified
+    // step and the whole "observe actual state" premise collapses.
+    const response = await executeStepViaPort(
+      {
         order: step.order,
         action: step.action,
         selector: step.selector,
@@ -207,7 +205,8 @@ async function executeStep(tabId: number, step: ExecutionStep): Promise<boolean>
         description: step.description,
         timeout: step.timeout ?? 5000,
       },
-    });
+      tabId
+    );
     const success = response?.success ?? false;
     if (!success) {
       log.warn(`Step ${step.order} reported failure: ${response?.error ?? 'unknown error'}`);

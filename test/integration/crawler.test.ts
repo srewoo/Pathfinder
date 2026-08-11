@@ -91,14 +91,28 @@ describe('crawlSite', () => {
     expect(fetchedRobots).toBe(true);
   });
 
-  it('given auth cookies when crawling then they are seeded into the cookie jar', async () => {
+  it('given auth cookies when crawling then the cookie jar is NOT written to (fix.md §7.3)', async () => {
+    // The `cookies` permission was dropped, so the crawler must not reach for
+    // chrome.cookies at all. This asserts the capability is gone rather than
+    // merely unused — a regression here would silently restore the ability to
+    // write to the user's whole-profile cookie jar.
     await crawlSite(`${ORIGIN}/`, aiClient, {
       maxPages: 2,
       authCookies: [{ name: 'session', value: 'abc123' }],
     });
 
     const cookieSet = (globalThis.chrome as unknown as { cookies: { set: ReturnType<typeof vi.fn> } }).cookies.set;
-    expect(cookieSet).toHaveBeenCalledWith(expect.objectContaining({ name: 'session', value: 'abc123', url: ORIGIN }));
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('given auth cookies when crawling then the crawl still completes rather than throwing', async () => {
+    // Degrading loudly (a warning) must not become degrading fatally — an
+    // unsupported auth mode should not take down a public-docs crawl.
+    const result = await crawlSite(`${ORIGIN}/`, aiClient, {
+      maxPages: 2,
+      authCookies: [{ name: 'session', value: 'abc123' }],
+    });
+    expect(result).toBeDefined();
   });
 
   it('given a prior crawl with ETags when re-crawling then unchanged pages 304, skip embedding, and still follow stored links', async () => {

@@ -4,8 +4,11 @@ import type { PageSnapshot } from '../../../src/storage/schemas';
 vi.mock('../../../src/core/explorer/page-scanner', () => ({
   getPageSnapshot: vi.fn(),
 }));
-vi.mock('../../../src/messaging/messenger', () => ({
-  sendToContentScript: vi.fn(),
+// Execution routes through the CDP driver (fix.md §3), not the content script.
+vi.mock('../../../src/core/step-executor', () => ({
+  executeStep: vi.fn(),
+  canExecuteStep: vi.fn().mockReturnValue(true),
+  releaseTab: vi.fn(),
 }));
 vi.mock('../../../src/utils/dom-compress', () => ({
   serializeCompressedDOM: vi.fn(() => 'compressed-dom'),
@@ -13,7 +16,7 @@ vi.mock('../../../src/utils/dom-compress', () => ({
 
 const { interactivePlan } = await import('../../../src/core/planner/interactive-planner');
 const { getPageSnapshot } = await import('../../../src/core/explorer/page-scanner');
-const { sendToContentScript } = await import('../../../src/messaging/messenger');
+const { executeStep } = await import('../../../src/core/step-executor');
 
 const aiClient = { chat: vi.fn(), embed: vi.fn() };
 
@@ -31,7 +34,7 @@ beforeEach(() => {
   // The content script reports the real outcome; a successful action resolves
   // with { success: true }. executeStep now inspects this instead of treating
   // any resolved response as success.
-  vi.mocked(sendToContentScript).mockResolvedValue({ success: true } as never);
+  vi.mocked(executeStep).mockResolvedValue({ success: true } as never);
 });
 
 describe('interactivePlan', () => {
@@ -96,7 +99,7 @@ describe('interactivePlan', () => {
       .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#bad', description: 'd' }))
       .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#good', description: 'd' }))
       .mockResolvedValue(JSON.stringify({ action: 'click', isDone: true }));
-    vi.mocked(sendToContentScript)
+    vi.mocked(executeStep)
       .mockRejectedValueOnce(new Error('fail'))
       .mockResolvedValue({ success: true } as never);
     const result = await interactivePlan(1, 'goal', aiClient as never, 3);
@@ -104,14 +107,14 @@ describe('interactivePlan', () => {
     expect(result.steps[0].selector).toBe('#good');
   });
 
-  it('given content script reports success:false when planning then step is not recorded as passed', async () => {
+  it('given the driver reports success:false when planning then step is not recorded as passed', async () => {
     // Regression: executeStep previously treated any resolved response as
     // success, so a failed action was recorded as a verified step. It must
     // now honour { success: false } and route through the retry/stuck path.
     aiClient.chat
       .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#bad', description: 'd' }))
       .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#worse', description: 'd' }));
-    vi.mocked(sendToContentScript).mockResolvedValue({ success: false, error: 'element not found' } as never);
+    vi.mocked(executeStep).mockResolvedValue({ success: false, error: 'element not found' } as never);
     const result = await interactivePlan(1, 'goal', aiClient as never, 3);
     expect(result.steps).toHaveLength(0);
     expect(result.failureReason).toMatch(/Stuck at step/);
@@ -121,7 +124,7 @@ describe('interactivePlan', () => {
     aiClient.chat
       .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#bad', description: 'd' }))
       .mockResolvedValueOnce(JSON.stringify({ action: 'click', selector: '#worse', description: 'd' }));
-    vi.mocked(sendToContentScript).mockRejectedValue(new Error('fail'));
+    vi.mocked(executeStep).mockRejectedValue(new Error('fail'));
     const result = await interactivePlan(1, 'goal', aiClient as never, 3);
     expect(result.failureReason).toMatch(/Stuck at step/);
   });

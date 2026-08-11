@@ -3,7 +3,7 @@ import type { AIClientInterface } from '../ai/ai-client';
 import { planTest } from '../planner/test-planner';
 import type { PlanningMode } from '../planner/test-planner';
 import { runStep, navigateTab } from './action-runner';
-import { runStepWithCDP, initCDPSession, teardownCDPSession, getAXContext } from '../cdp/cdp-action-runner';
+import { initCDPSession, teardownCDPSession, getAXContext } from '../cdp/cdp-session';
 import { healStep, registerHealedSelector } from '../healing/self-healer';
 import { getPageSnapshot } from '../explorer/page-scanner';
 import { testCaseDB, testResultDB, planDB } from '../../storage/indexed-db';
@@ -478,7 +478,7 @@ async function attemptExecution(
 
     // Handle extended action types (conditional, loop, capture)
     if (step.action === 'if_visible' || step.action === 'loop' || step.action === 'capture_value' || step.action === 'use_captured') {
-      const extResult = await executeExtendedStep(step, tabId, capturedValues, options.cdpActive ? runStepWithCDP : runStep);
+      const extResult = await executeExtendedStep(step, tabId, capturedValues, runStep);
       extResult.duration = Date.now() - stepStart;
       stepResults.push(extResult);
       options.onStepResult?.(testCase.id, step.order, extResult);
@@ -491,7 +491,7 @@ async function attemptExecution(
     const resolvedStep = resolveStepVariables(step, capturedValues);
 
     // Use CDP trusted events when available, fall back to synthetic
-    const executeStep = options.cdpActive ? runStepWithCDP : runStep;
+    const executeStep = runStep;
     let result = await executeStep(resolvedStep, tabId);
 
     if (result.status === 'failed' && step.selector) {
@@ -505,7 +505,7 @@ async function attemptExecution(
       );
       if (sessionRecovered) {
         log.info(`Session recovered — retrying step ${step.order}`);
-        const retryAfterAuth = await (options.cdpActive ? runStepWithCDP : runStep)(resolvedStep, tabId);
+        const retryAfterAuth = await runStep(resolvedStep, tabId);
         if (retryAfterAuth.status === 'passed') {
           result = retryAfterAuth;
           result.duration = Date.now() - stepStart;
@@ -524,7 +524,7 @@ async function attemptExecution(
         // Give transient conditions (mid-render, animation) a chance to clear —
         // settle on the live signal when CDP is up, else a bounded backoff.
         await settleTab(tabId, options.cdpActive, Math.min(1500, (step.timeout ?? 10000) * 0.15));
-        const quickRetry = await (options.cdpActive ? runStepWithCDP : runStep)(resolvedStep, tabId);
+        const quickRetry = await runStep(resolvedStep, tabId);
         if (quickRetry.status === 'passed') {
           result = quickRetry;
           result.duration = Date.now() - stepStart;
@@ -541,7 +541,7 @@ async function attemptExecution(
       log.info(`Step ${step.order} failed — attempting healing for: ${step.selector}`);
       // Heal + retry using the SAME runner the test is using (CDP trusted events
       // when a CDP session is live), so validation matches real execution.
-      const activeRunner = options.cdpActive ? runStepWithCDP : runStep;
+      const activeRunner = runStep;
       const healed = await healStep(step, result.error ?? '', tabId, aiClient, activeRunner);
 
       if (healed.success && healed.healedStep) {
@@ -599,7 +599,7 @@ async function attemptExecution(
         const assertion = await generatePostStepAssertion(tabId, step, preStepUrl, aiClient).catch(() => null);
         if (assertion) {
           const autoStep = assertionToStep(assertion, step.order + 0.5);
-          const executeStep = options.cdpActive ? runStepWithCDP : runStep;
+          const executeStep = runStep;
           const assertResult = await executeStep(autoStep, tabId).catch(() => null);
           if (assertResult) {
             assertResult.duration = assertResult.duration ?? 0;

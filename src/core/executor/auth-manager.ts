@@ -2,15 +2,19 @@
  * Auth Session Manager for pathfinder.
  *
  * Handles:
- * 1. Capturing cookies from the current browser session
- * 2. Injecting saved cookies before test execution
- * 3. Verifying auth state before and during tests
- * 4. Replaying login steps when session expires mid-test
+ * 1. Injecting preset-supplied cookies before test execution (via CDP)
+ * 2. Verifying auth state before and during tests
+ * 3. Replaying login steps when session expires mid-test
+ *
+ * Reading the browser's own cookie jar was removed in fix.md §7.3 — a run
+ * authenticates by performing a real login, never by borrowing the user's
+ * session.
  */
 import type { AuthCookie, ExecutionPreset, ExecutionStep } from '../../storage/schemas';
 import { executionPresetStorage } from '../../storage/chrome-storage';
 import { runStep } from './action-runner';
 import { isAttached, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
+import { injectCookies } from '../cookie-port';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('auth-manager');
@@ -35,26 +39,25 @@ async function settle(tabId: number, fallbackMs: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Capture all cookies for the given URL's domain.
- * Uses the chrome.cookies API to read actual browser cookies.
+ * REMOVED (fix.md §7.3): cookie capture from the user's live browser session.
+ *
+ * This previously called `chrome.cookies.getAll` to copy the user's real
+ * session into a preset. That is the "borrow the live session" pattern §7.3
+ * eliminates — it made every run capable of acting as the user against any
+ * origin, and it is why the manifest requested the `cookies` permission.
+ *
+ * The capability is deleted rather than deprecated: authenticate through a
+ * preset's `setupSteps` (a real login performed in the session) instead. Cookies
+ * obtained that way already live in the session and need no capture.
+ *
+ * Kept as an explicitly throwing stub so any missed caller fails loudly at the
+ * boundary rather than silently authenticating as nobody (CLAUDE.md §1.1).
  */
-export async function captureAuthCookies(url: string): Promise<AuthCookie[]> {
-  try {
-    const cookies = await chrome.cookies.getAll({ url });
-    return cookies.map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path,
-      secure: c.secure,
-      httpOnly: c.httpOnly,
-      sameSite: c.sameSite as AuthCookie['sameSite'],
-      expirationDate: c.expirationDate,
-    }));
-  } catch (err) {
-    log.warn('Failed to capture cookies', err);
-    return [];
-  }
+export async function captureAuthCookies(_url: string): Promise<never> {
+  throw new Error(
+    'captureAuthCookies was removed (fix.md §7.3): Pathfinder no longer reads the ' +
+      "browser's cookie jar. Configure the preset's login steps instead."
+  );
 }
 
 /**
@@ -83,35 +86,16 @@ export async function saveCookiesToPreset(presetId: string, cookies: AuthCookie[
  * Inject saved auth cookies into the browser for the given URL.
  * This restores a previously authenticated session.
  */
-export async function injectAuthCookies(url: string, cookies: AuthCookie[]): Promise<number> {
-  let injected = 0;
-
-  for (const cookie of cookies) {
-    try {
-      // Skip expired cookies
-      if (cookie.expirationDate && cookie.expirationDate * 1000 < Date.now()) {
-        log.debug(`Skipping expired cookie: ${cookie.name}`);
-        continue;
-      }
-
-      await chrome.cookies.set({
-        url,
-        name: cookie.name,
-        value: cookie.value,
-        domain: cookie.domain,
-        path: cookie.path,
-        secure: cookie.secure,
-        httpOnly: cookie.httpOnly,
-        sameSite: cookie.sameSite,
-        expirationDate: cookie.expirationDate,
-      });
-      injected++;
-    } catch (err) {
-      log.debug(`Failed to inject cookie ${cookie.name}`, err);
-    }
-  }
-
-  log.info(`Injected ${injected}/${cookies.length} auth cookies for ${url}`);
+export async function injectAuthCookies(
+  tabId: number,
+  url: string,
+  cookies: AuthCookie[]
+): Promise<number> {
+  // Writes go through CDP `Network.setCookie` rather than `chrome.cookies.set`
+  // (fix.md §7.3). Same effect for the target session, but scoped to the tab's
+  // debugger session instead of the whole browser profile — which is what let
+  // the `cookies` permission leave the manifest.
+  const { injected } = await injectCookies(tabId, url, cookies);
   return injected;
 }
 
@@ -339,7 +323,7 @@ export async function ensureAuthenticated(
 
   // Step 1: Inject saved cookies
   if (preset.authCookies && preset.authCookies.length > 0) {
-    await injectAuthCookies(url, preset.authCookies);
+    await injectAuthCookies(tabId, url, preset.authCookies);
   }
 
   // Step 2: Check current auth state
@@ -354,11 +338,9 @@ export async function ensureAuthenticated(
   if (preset.setupSteps && preset.setupSteps.length > 0) {
     const success = await replayLogin(tabId, preset);
     if (success) {
-      // Re-capture cookies after successful login for future runs
-      const freshCookies = await captureAuthCookies(url);
-      if (freshCookies.length > 0) {
-        await saveCookiesToPreset(preset.id, freshCookies);
-      }
+      // No cookie re-capture (fix.md §7.3). A successful login already put the
+      // session cookies in the tab's jar; reading them back out only existed to
+      // persist them into a preset, which is the borrowing pattern we removed.
       return { authenticated: true, method: 'replay' };
     }
     log.warn('Login replay failed — proceeding without auth');
@@ -412,19 +394,13 @@ export async function recoverSessionIfExpired(
   // Re-inject cookies and replay login
   const url = startUrl ?? preset.startUrl;
   if (url && preset.authCookies && preset.authCookies.length > 0) {
-    await injectAuthCookies(url, preset.authCookies);
+    await injectAuthCookies(tabId, url, preset.authCookies);
   }
 
   if (preset.setupSteps && preset.setupSteps.length > 0) {
     const success = await replayLogin(tabId, preset);
     if (success) {
-      // Re-capture cookies after successful recovery
-      if (url) {
-        const freshCookies = await captureAuthCookies(url);
-        if (freshCookies.length > 0) {
-          await saveCookiesToPreset(preset.id, freshCookies);
-        }
-      }
+      // No cookie re-capture after recovery (fix.md §7.3) — see ensureAuthenticated.
       log.info('Session recovered successfully — resuming test');
 
       // Navigate back to the page where the test was running

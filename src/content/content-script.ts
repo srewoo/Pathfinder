@@ -1,4 +1,3 @@
-import { executeAction } from './dom-actions';
 import { detectInteractiveElements, detectFormFields, extractSameOriginLinks, revealPageContent } from './element-detector';
 import type { FormField, PageAction, DataTable, PageType, FieldError } from '../storage/schemas';
 import { compressDOM, serializeCompressedDOM } from '../utils/dom-compress';
@@ -796,11 +795,6 @@ async function handleMessage(message: ContentScriptMessage): Promise<unknown> {
   switch (message.type) {
     case 'PING':
       return { type: 'PONG' } satisfies ContentScriptResponse;
-
-    case 'EXECUTE_ACTION': {
-      const result = await executeAction(message.payload);
-      return { type: 'ACTION_RESULT', success: result.success, error: result.error } satisfies ContentScriptResponse;
-    }
 
     case 'GET_ELEMENTS': {
       const elements = detectInteractiveElements();

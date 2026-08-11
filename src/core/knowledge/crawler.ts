@@ -760,38 +760,27 @@ async function seedAuthCookies(
   startUrl: string,
   cookies: Array<{ name: string; value: string; domain?: string }>
 ): Promise<number> {
-  if (typeof chrome === 'undefined' || !chrome.cookies?.set) return 0;
-  let origin: string;
-  let secure = false;
-  try {
-    const u = new URL(startUrl);
-    origin = u.origin;
-    secure = u.protocol === 'https:';
-  } catch {
-    return 0;
-  }
+  if (cookies.length === 0) return 0;
 
-  let set = 0;
-  await Promise.all(
-    cookies.map(async (c) => {
-      try {
-        // chrome.cookies.set derives the host from `url`; an explicit domain (if
-        // provided) widens the cookie to subdomains.
-        await chrome.cookies.set({
-          url: origin,
-          name: c.name,
-          value: c.value,
-          domain: c.domain,
-          path: '/',
-          secure,
-        });
-        set++;
-      } catch (err) {
-        log.debug(`Failed to seed cookie ${c.name}`, err);
-      }
-    })
+  // UNSUPPORTED since fix.md §7.3 dropped the `cookies` permission.
+  //
+  // This path seeded the browser's cookie jar so the crawler's credentialed
+  // `fetch()` calls would attach them. The CDP replacement (`Network.setCookie`)
+  // needs an attached tab, and this crawler has none — it fetches directly.
+  //
+  // Failing loudly beats returning 0 and crawling anyway: a silent fallback
+  // produces a knowledge base full of login pages, which then poisons every
+  // downstream generation step with bogus context.
+  //
+  // Fixed properly when Phase 3 (§4) moves crawling into tab-backed job steps,
+  // where a CDP session is available. Until then, use `extraHeaders` with a
+  // bearer token for authenticated documentation.
+  log.warn(
+    `Cookie-based crawl auth is unsupported (fix.md §7.3): ${cookies.length} cookie(s) ` +
+      `ignored for ${startUrl}. Use extraHeaders (e.g. Authorization) instead, or crawl ` +
+      `only public documentation.`
   );
-  return set;
+  return 0;
 }
 
 async function discoverSitemapUrls(startUrl: string, maxUrls: number, extraHeaders?: Record<string, string>): Promise<string[]> {

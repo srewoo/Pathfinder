@@ -1,5 +1,4 @@
 import type {
-  ExecutionStep,
   InteractiveElement,
   FormField,
   CrawlProgress,
@@ -11,7 +10,6 @@ import type {
 // ─── Background → Content Script messages ───────────────────────────────────
 
 export type ContentScriptMessage =
-  | { type: 'EXECUTE_ACTION'; payload: ExecutionStep }
   | { type: 'SCAN_PAGE' }
   | { type: 'GET_DOM_SNAPSHOT' }
   | { type: 'GET_ELEMENTS' }
@@ -38,7 +36,6 @@ export type ContentScriptMessage =
 // ─── Content Script → Background messages ───────────────────────────────────
 
 export type ContentScriptResponse =
-  | { type: 'ACTION_RESULT'; success: boolean; error?: string }
   | { type: 'PAGE_SNAPSHOT'; payload: PageSnapshot }
   | { type: 'ELEMENTS'; payload: InteractiveElement[] }
   | { type: 'FORM_FIELDS'; payload: FormField[] }

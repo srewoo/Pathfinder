@@ -1,7 +1,7 @@
 import type { ExecutionStep, StepResult } from '../../storage/schemas';
-import { sendToContentScript, pingContentScript } from '../../messaging/messenger';
 import { isNetworkAssertion, evaluateNetworkAssertion } from './network-assertion';
 import { isAttached, waitForNetworkIdle } from '../cdp/cdp-client';
+import { canExecuteStep, executeStep } from '../step-executor';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('action-runner');
@@ -10,9 +10,7 @@ const DEFAULT_TIMEOUT = 15000;
 const NAVIGATE_TIMEOUT = 20000;
 const POST_NAVIGATE_MIN_MS = 500;
 const POST_NAVIGATE_MAX_MS = 8000;
-const CONTENT_SCRIPT_RETRY_ATTEMPTS = 3;
-const CONTENT_SCRIPT_RETRY_DELAY_MS = 800;
-/** Max step-level retries for transient failures (timeout, content script flake). */
+/** Max step-level retries for transient failures (timeout, detached session). */
 const STEP_RETRY_ATTEMPTS = 2;
 const STEP_RETRY_DELAY_MS = 500;
 
@@ -42,36 +40,34 @@ export async function runStep(step: ExecutionStep, tabId: number): Promise<StepR
       };
     }
 
-    // Step-level retry for transient failures (timeout, content script flakes).
-    // Assertion failures are NOT retried — they indicate a real test issue.
+    // Step-level retry for transient failures. Assertion failures are NOT
+    // retried — they indicate a real test issue.
     let lastResult: StepResult | undefined;
     for (let attempt = 0; attempt <= STEP_RETRY_ATTEMPTS; attempt++) {
-      // Ensure content script is alive before sending
-      const ready = await waitForContentScript(tabId);
-      if (!ready) {
+      // A debugger session is now required: with the content-script execution
+      // path removed (fix.md §3), no session means no execution at all. Failing
+      // loudly beats silently doing nothing and reporting a pass.
+      if (!canExecuteStep(tabId)) {
         lastResult = {
           step,
           status: 'failed',
           duration: Date.now() - start,
-          error: 'Content script unavailable. The page may be loading or restricted.',
+          error:
+            'No CDP session on this tab. Pathfinder needs the debugger attached to ' +
+            'execute steps — the page may be restricted (chrome://, Web Store) or the ' +
+            'session was detached.',
         };
         if (attempt < STEP_RETRY_ATTEMPTS) {
-          log.debug(`Content script unavailable, retrying step (attempt ${attempt + 1})`);
+          log.debug(`No CDP session, retrying step (attempt ${attempt + 1})`);
           await delay(STEP_RETRY_DELAY_MS * Math.pow(1.5, attempt));
           continue;
         }
         return lastResult;
       }
 
-      const response = await sendToContentScript<{ success: boolean; error?: string }>(
-        tabId,
-        {
-          type: 'EXECUTE_ACTION',
-          payload: {
-            ...step,
-            timeout: step.timeout ?? DEFAULT_TIMEOUT,
-          },
-        }
+      const response = await executeStep(
+        { ...step, timeout: step.timeout ?? DEFAULT_TIMEOUT },
+        tabId
       );
 
       const success = response?.success ?? false;
@@ -114,39 +110,21 @@ export async function runStep(step: ExecutionStep, tabId: number): Promise<StepR
 }
 
 /**
- * After navigation completes, wait for the content script to be ready
- * AND for the page to settle (DOM idle + network idle).
- * Uses exponential backoff polling instead of a fixed delay.
+ * After navigation completes, wait for the page to settle.
+ *
+ * Reduced to the CDP network-idle signal only (fix.md §3). The content-script
+ * ping-then-WAIT_FOR_IDLE round trip it used to do is gone: every subsequent
+ * action asserts its own actionability preconditions in the driver (§8), so
+ * there is nothing left for a post-navigate wait to protect against. What
+ * remains is a courtesy settle that keeps the first action from racing the
+ * initial burst of XHRs.
  */
 async function waitForPageReady(tabId: number): Promise<void> {
-  const start = Date.now();
-
-  // Prefer the authoritative CDP network-idle signal when a session is live —
-  // it settles as soon as requests actually go quiet. Only fall back to a fixed
-  // warm-up floor when CDP isn't available to tell us.
   if (isAttached(tabId)) {
     await waitForNetworkIdle(tabId, { idleMs: 350, timeoutMs: POST_NAVIGATE_MAX_MS });
-  } else {
-    await delay(POST_NAVIGATE_MIN_MS);
+    return;
   }
-
-  // Then poll for content script availability with backoff
-  let backoff = 200;
-  while (Date.now() - start < POST_NAVIGATE_MAX_MS) {
-    const alive = await pingContentScript(tabId);
-    if (alive) {
-      // Content script is alive — ask it to wait for DOM+network idle
-      try {
-        await sendToContentScript(tabId, { type: 'WAIT_FOR_IDLE', settleMs: 300 } as any, 3000);
-      } catch {
-        // Timeout is acceptable — page may be slow but content script is alive
-      }
-      return;
-    }
-    await delay(backoff);
-    backoff = Math.min(backoff * 1.5, 1000);
-  }
-  // Exhausted wait time — proceed anyway
+  await delay(POST_NAVIGATE_MIN_MS);
 }
 
 /**
@@ -193,21 +171,6 @@ export async function navigateTab(tabId: number, url: string): Promise<void> {
       reject(err);
     });
   });
-}
-
-/**
- * Wait for the content script to become available after navigation.
- * Retries with backoff — the content script takes time to inject after load.
- */
-async function waitForContentScript(tabId: number): Promise<boolean> {
-  for (let i = 0; i < CONTENT_SCRIPT_RETRY_ATTEMPTS; i++) {
-    const alive = await pingContentScript(tabId);
-    if (alive) return true;
-    if (i < CONTENT_SCRIPT_RETRY_ATTEMPTS - 1) {
-      await delay(CONTENT_SCRIPT_RETRY_DELAY_MS * Math.pow(1.5, i));
-    }
-  }
-  return false;
 }
 
 function delay(ms: number): Promise<void> {

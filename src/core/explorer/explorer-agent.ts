@@ -13,9 +13,10 @@ import {
 } from './interaction-graph';
 import type { InteractionGraph, InteractiveElement, FormField, FormSubmissionOutcome, ModalDiscovery, ExplorationProgress, ExplorationCoverage, ObservedAPI } from '../../storage/schemas';
 import type { AIClientInterface } from '../ai/ai-client';
-import { getAgentActions } from './agent-explorer';
+import { getAgentActions } from './action-ranker';
 import { detectSPARoutes } from './spa-detector';
 import { sendToContentScript, getActiveTabId } from '../../messaging/messenger';
+import { executeStep as executeStepViaPort } from '../step-executor';
 import { attach, detach, isAttached, startHARCapture, getHAREntries, captureFullPageScreenshot, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
 import type { HAREntry } from '../cdp/cdp-client';
 import { ensureAuthenticated } from '../executor/auth-manager';
@@ -774,10 +775,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
         let stayedOnPage = true;
         await withTimeout(SINGLE_CLICK_TIMEOUT_MS, async () => {
           const beforeUrl = currentUrl;
-          await sendToContentScript(tabId, {
-            type: 'EXECUTE_ACTION',
-            payload: { order: 0, action: 'click', selector: target.selector, description: `Explore: ${resolveElementLabel(target)}` },
-          });
+          await executeStepViaPort({ order: 0, action: 'click', selector: target.selector, description: `Explore: ${resolveElementLabel(target)}` }, tabId);
 
           // Wait for any click-triggered XHR/route change to settle.
           await settle(tabId, { idleMs: 350 });
@@ -827,10 +825,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
                     const modalElements = await scanPage(tabId);
                     const modalSubmit = findSubmitButton(modalElements);
                     if (modalSubmit) {
-                      await sendToContentScript(tabId, {
-                        type: 'EXECUTE_ACTION',
-                        payload: { order: 0, action: 'click', selector: modalSubmit.selector, description: 'Explore: modal empty submit' },
-                      });
+                      await executeStepViaPort({ order: 0, action: 'click', selector: modalSubmit.selector, description: 'Explore: modal empty submit' }, tabId);
                       await settle(tabId);
                       const outcome = await captureFormOutcome(tabId, currentUrl, [], modalSubmit.selector);
                       discovery.formOutcome = outcome;
@@ -1023,10 +1018,7 @@ async function exploreFormSubmission(
   // ── Attempt 1: Empty submission — discover required field validation ──
   try {
     const harBefore = cdpOn ? getHAREntries(tabId).length : 0;
-    await sendToContentScript(tabId, {
-      type: 'EXECUTE_ACTION',
-      payload: { order: 0, action: 'click', selector: submitButton.selector, description: 'Explore: empty form submit' },
-    });
+    await executeStepViaPort({ order: 0, action: 'click', selector: submitButton.selector, description: 'Explore: empty form submit' }, tabId);
     await settle(tabId);
 
     const outcome = await captureFormOutcome(tabId, pageUrl, [], submitButton.selector);
@@ -1071,26 +1063,20 @@ async function exploreFormSubmission(
         : (field.type === 'checkbox' || field.type === 'radio') ? 'check'
         : 'type';
 
-      await sendToContentScript(tabId, {
-        type: 'EXECUTE_ACTION',
-        payload: {
+      await executeStepViaPort({
           order: 0,
           action,
           selector: field.selector,
           value: action === 'check' ? undefined : testValue,
           description: `Explore: fill ${field.label || field.name || field.type}`,
-        },
-      });
+        }, tabId);
       filledSelectors.push(field.selector);
       await delay(300);
     }
 
     if (filledSelectors.length > 0) {
       const harBeforeFilled = cdpOn ? getHAREntries(tabId).length : 0;
-      await sendToContentScript(tabId, {
-        type: 'EXECUTE_ACTION',
-        payload: { order: 0, action: 'click', selector: submitButton.selector, description: 'Explore: filled form submit' },
-      });
+      await executeStepViaPort({ order: 0, action: 'click', selector: submitButton.selector, description: 'Explore: filled form submit' }, tabId);
       await settle(tabId);
 
       const outcome = await captureFormOutcome(tabId, pageUrl, filledSelectors, submitButton.selector);
@@ -1271,10 +1257,7 @@ export function generateTestValue(field: FormField): string | undefined {
 async function dismissModalSafe(tabId: number): Promise<void> {
   // Strategy 1: Press Escape
   try {
-    await sendToContentScript(tabId, {
-      type: 'EXECUTE_ACTION',
-      payload: { order: 0, action: 'press_key', key: 'Escape', description: 'Close modal' },
-    });
+    await executeStepViaPort({ order: 0, action: 'press_key', key: 'Escape', description: 'Close modal' }, tabId);
     await delay(400);
   } catch { /* non-fatal */ }
 
@@ -1294,10 +1277,7 @@ async function dismissModalSafe(tabId: number): Promise<void> {
       ];
       for (const sel of closeSelectors) {
         try {
-          await sendToContentScript(tabId, {
-            type: 'EXECUTE_ACTION',
-            payload: { order: 0, action: 'click', selector: sel, description: 'Close modal via button', timeout: 1000 },
-          });
+          await executeStepViaPort({ order: 0, action: 'click', selector: sel, description: 'Close modal via button', timeout: 1000 }, tabId);
           await delay(300);
           break;
         } catch {
