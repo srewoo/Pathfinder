@@ -1,4 +1,12 @@
 /**
+ * AI-generated post-step assertions.
+ *
+ * Moved out of `core/executor/` (fix.md §6): this is a GENERATION concern that
+ * needs a model, and keeping it under the executor forced that directory to
+ * import the AI layer. The executor now receives it through the
+ * `AssertionSuggester` port instead.
+ */
+/**
  * AI-Generated Assertion Builder
  *
  * After key execution steps (navigate, click, type, select), captures the live

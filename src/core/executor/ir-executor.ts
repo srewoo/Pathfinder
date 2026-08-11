@@ -85,6 +85,47 @@ export async function executeIR(
 
   const orderedSteps = [...ir.steps].sort((a, b) => a.order - b.order);
 
+  // Assertions pinned to a step run immediately after it; the rest run at the
+  // end. Without this, an assertion about intermediate state would be evaluated
+  // against a page the test never made a claim about.
+  const positional = new Map<number, Assertion[]>();
+  const deferred: Assertion[] = [];
+  for (const a of [...ir.assertions].sort((x, y) => x.order - y.order)) {
+    if (a.afterStep === undefined) {
+      deferred.push(a);
+      continue;
+    }
+    const list = positional.get(a.afterStep) ?? [];
+    list.push(a);
+    positional.set(a.afterStep, list);
+  }
+
+  /** Evaluate one assertion, recording its result. Returns false on failure. */
+  const evaluate = async (assertion: Assertion): Promise<boolean> => {
+    const aStart = now();
+    try {
+      await checkAssertion(driver, assertion, { locatorUsages, currentUrl, captured });
+      assertionResults.push({
+        order: assertion.order,
+        description: assertion.description,
+        status: 'passed',
+        durationMs: now() - aStart,
+      });
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      assertionResults.push({
+        order: assertion.order,
+        description: assertion.description,
+        status: 'failed',
+        durationMs: now() - aStart,
+        error: message,
+      });
+      errorMessage ??= message;
+      return false;
+    }
+  };
+
   for (const step of orderedSteps) {
     if (opts.signal?.aborted) {
       stepResults.push({
@@ -129,6 +170,20 @@ export async function executeIR(
         durationMs: now() - stepStart,
         healed: healed ? { from: healed.from, to: healed.to } : undefined,
       });
+
+      // Assertions about THIS step's immediate effect. A failure stops the run:
+      // the state it described is transient and will not exist later.
+      const here = positional.get(step.order);
+      if (here) {
+        let allPassed = true;
+        for (const assertion of here) {
+          if (!(await evaluate(assertion))) allPassed = false;
+        }
+        if (!allPassed) {
+          failed = true;
+          break;
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.warn(`Step ${step.order} failed: ${message}`);
@@ -161,31 +216,18 @@ export async function executeIR(
   stepResults.sort((a, b) => a.order - b.order);
 
   if (!failed) {
-    for (const assertion of [...ir.assertions].sort((a, b) => a.order - b.order)) {
-      const aStart = now();
-      try {
-        await checkAssertion(driver, assertion, { locatorUsages, currentUrl, captured });
-        assertionResults.push({
-          order: assertion.order,
-          description: assertion.description,
-          status: 'passed',
-          durationMs: now() - aStart,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        assertionResults.push({
-          order: assertion.order,
-          description: assertion.description,
-          status: 'failed',
-          durationMs: now() - aStart,
-          error: message,
-        });
-        failed = true;
-        errorMessage ??= message;
-      }
+    // Deferred assertions all run even if one fails: each is an independent
+    // question about the same final state, and knowing every answer beats
+    // knowing the first.
+    for (const assertion of deferred) {
+      if (!(await evaluate(assertion))) failed = true;
     }
-  } else {
-    for (const assertion of ir.assertions) {
+  }
+
+  // Anything never reached is reported as skipped rather than omitted.
+  const evaluated = new Set(assertionResults.map((a) => a.order));
+  for (const assertion of ir.assertions) {
+    if (!evaluated.has(assertion.order)) {
       assertionResults.push({
         order: assertion.order,
         description: assertion.description,
@@ -194,6 +236,7 @@ export async function executeIR(
       });
     }
   }
+  assertionResults.sort((a, b) => a.order - b.order);
 
   return {
     testId: ir.id,

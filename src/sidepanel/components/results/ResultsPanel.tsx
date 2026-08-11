@@ -1,12 +1,18 @@
 import React from 'react';
-import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film, Shield, ArrowRight } from 'lucide-react';
+import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film, Shield, ArrowRight, Accessibility } from 'lucide-react';
 import { TestReport } from './TestReport';
 import { TestDashboard } from './TestDashboard';
 import { ExecutionTimeline } from './ExecutionTimeline';
 import { Button } from '../shared/Button';
 import { useTestStore } from '../../stores/test-store';
 import { useNavigationStore } from '../../stores/navigation-store';
-import { generateHtmlReport, generateJUnitXml } from '../../../utils/html-reporter';
+import { generateHtmlReport } from '../../../utils/html-reporter';
+import { toJUnitXml } from '../../../core/report/junit-export';
+import {
+  approximateTestability,
+  toExportRun,
+} from '../../../core/report/result-adapter';
+import { formatTestabilityReport } from '../../../core/report/heal-ledger';
 import { generateJsonReport } from '../../../utils/report-exporter';
 
 type ViewMode = 'results' | 'timeline' | 'dashboard';
@@ -52,10 +58,22 @@ export function ResultsPanel() {
   };
 
   const handleExportJUnit = () => {
+    // §11 exporter: carries the NEEDS_REVIEW verdict, per-step heal records and
+    // testability context that the previous generator dropped.
     downloadBlob(
-      generateJUnitXml(results),
+      toJUnitXml(toExportRun(results, { testability: approximateTestability(results) })),
       `pathfinder-junit-${Date.now()}.xml`,
       'application/xml'
+    );
+  };
+
+  const handleExportTestability = () => {
+    // §5: which elements lack stable identifiers is actionable output for the
+    // team that owns the app, not a Pathfinder failure report.
+    downloadBlob(
+      formatTestabilityReport(approximateTestability(results)),
+      `pathfinder-testability-${Date.now()}.txt`,
+      'text/plain'
     );
   };
 
@@ -101,6 +119,13 @@ export function ResultsPanel() {
             icon={<Download size={11} />}
             onClick={handleExportJson}
             title="Export JSON report"
+          />
+          <Button
+            variant="ghost"
+            size="xs"
+            icon={<Accessibility size={11} />}
+            onClick={handleExportTestability}
+            title="Export testability report (elements lacking stable test ids)"
           />
           <Button
             variant="ghost"

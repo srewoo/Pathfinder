@@ -5,7 +5,7 @@ import {
   assertWithinBudget,
   getBudgetState,
   BudgetExceededError,
-} from '../../../src/core/ai/budget-guard';
+} from '../../../src/core/budget/budget-guard';
 import { resetTokenUsage, recordChatUsage } from '../../../src/core/ai/token-tracker';
 
 beforeEach(() => {

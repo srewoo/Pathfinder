@@ -4,6 +4,9 @@ import { learnFlows } from '../core/flow/flow-learner';
 import { generateTestsForFlow } from '../core/test-gen/test-generator';
 import { expandAndSaveTestCase, expandImportedTests, importAndExpandTests, validateImportFile, regenerateTestCaseSteps } from '../core/test-gen/test-importer';
 import { executeTest, executeAllTests } from '../core/executor/test-executor';
+import { describeDropped, testCaseToIR } from '../core/ir/ir-bridge';
+import { serializeIR } from '../core/ir/test-ir';
+import { createAiExecutionServices } from '../core/planner/ai-execution-services';
 import { summarizePreflightIssues, validateExecutionPreflight } from '../core/executor/preflight';
 import { getAllFlows } from '../core/flow/flow-store';
 import { testCaseDB, planDB, clearAllData } from '../storage/indexed-db';
@@ -19,7 +22,11 @@ import type { RecordedAction } from '../core/recorder/recorder';
 import { parseOpenAPISpec, extractValidationRules } from '../core/openapi/openapi-parser';
 import { compareScreenshots } from '../utils/visual-diff';
 import { verifyAuthState } from '../core/executor/auth-manager';
-import { generateHtmlReport, generateJUnitXml } from '../utils/html-reporter';
+import { generateHtmlReport } from '../utils/html-reporter';
+import { toJUnitXml } from '../core/report/junit-export';
+import { approximateTestability, toExportRun } from '../core/report/result-adapter';
+import { buildRunTrace, formatTraceSummary, serializeTrace } from '../core/report/run-trace';
+import { formatTestabilityReport } from '../core/report/heal-ledger';
 import { generateJsonReport, computeTestTrends, getRunResults } from '../utils/report-exporter';
 import { notifyTestComplete, notifySuiteComplete, testWebhook } from '../core/executor/webhook-notifier';
 import { startScreencast, stopScreencast } from '../core/cdp/screencast';
@@ -29,10 +36,12 @@ import { validateAgainstSpec, formatContractReport } from '../core/analysis/api-
 import type { ParsedAPISpec } from '../core/openapi/openapi-parser';
 import { installPumpListener, resumeInterruptedJobs } from './job-pump';
 import { installScheduleListener, syncAlarms } from './scheduled-runs';
+import { installCrawlExecutors } from './crawl-job-executor';
 // Side-effect import: registers the CDP step executor with the core port
 // (fix.md §2/§3). Must happen before any step runs, so it lives at top level.
 import '../drivers/step-runner';
 import '../drivers/cdp-cookies';
+import '../drivers/cdp-safety';
 
 const log = createLogger('service-worker');
 
@@ -59,6 +68,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // listener registrations do not.
 installPumpListener();
 installScheduleListener();
+// Executors must be registered on EVERY worker start, before any alarm fires —
+// a restarted worker with no executor would fail a perfectly resumable job.
+installCrawlExecutors();
 void resumeInterruptedJobs().catch((err) =>
   log.warn('Could not check for interrupted jobs at startup', err)
 );
@@ -485,7 +497,7 @@ async function handleMessage(
       // Start screencast recording for this test
       startScreencast(tabId).catch(() => {});
 
-      executeTest(testCase, aiClient, tabId, {
+      executeTest(testCase, createAiExecutionServices(aiClient, { aiAssertions: true }), tabId, {
         planningMode: settings.planningMode ?? 'auto',
         signal: testSignal,
         targetOrigin: message.payload.targetOrigin,
@@ -562,7 +574,7 @@ async function handleMessage(
 
       const concurrency = message.payload.concurrency ?? settings.testConcurrency ?? 1;
 
-      executeAllTests(aiClient, {
+      executeAllTests(createAiExecutionServices(aiClient, { aiAssertions: true }), {
         concurrency,
         planningMode: settings.planningMode ?? 'auto',
         testCaseIds: message.payload.testCaseIds,
@@ -643,7 +655,7 @@ async function handleMessage(
 
       const concurrency = message.payload?.concurrency ?? settings.testConcurrency ?? 1;
 
-      executeAllTests(aiClient, {
+      executeAllTests(createAiExecutionServices(aiClient), {
         rerunAll,
         concurrency,
         signal: allTestSignal,
@@ -810,6 +822,50 @@ async function handleMessage(
         const error = String(err);
         broadcastToSidebar({ type: 'IMPORT_ERROR', payload: { error } });
         return { success: false, error };
+      }
+    }
+
+    case 'EXPORT_TEST_IR': {
+      // §6: the IR is the reviewable artifact — committable, diffable, and
+      // re-importable. Converting on export makes it available before generation
+      // has fully migrated to emitting IR directly.
+      try {
+        const cases = await testCaseDB.getAll();
+        const wanted = message.payload?.testCaseIds?.length
+          ? cases.filter((c) => message.payload!.testCaseIds!.includes(c.id))
+          : cases;
+
+        const irs: unknown[] = [];
+        const rejected: Array<{ id: string; title: string; errors: string[] }> = [];
+        const lossy: Array<{ id: string; dropped: string }> = [];
+
+        for (const tc of wanted) {
+          const plan = await planDB.getByTestCaseId(tc.id);
+          // `tc.steps` is natural-language prose, not executable steps — the
+          // runnable form is the cached plan, or `preplan` for grounded tests.
+          const planSteps = plan?.steps ?? tc.preplan ?? [];
+          if (planSteps.length === 0) continue;
+
+          const { ir, errors, dropped } = testCaseToIR(tc, planSteps);
+          if (!ir) {
+            // Never silently omit: a test missing from the export looks like a
+            // test that does not exist.
+            rejected.push({ id: tc.id, title: tc.title, errors });
+            continue;
+          }
+          if (dropped.length > 0) lossy.push({ id: tc.id, dropped: describeDropped(dropped) });
+          irs.push(JSON.parse(serializeIR(ir)));
+        }
+
+        return {
+          success: true,
+          ir: JSON.stringify({ schema: 'pathfinder.ir/1', tests: irs }, null, 2),
+          exported: irs.length,
+          rejected,
+          lossy,
+        };
+      } catch (err) {
+        return { success: false, error: String(err) };
       }
     }
 
@@ -983,8 +1039,72 @@ async function handleMessage(
       try {
         const results = await getRunResults(message.payload.runId);
         if (results.length === 0) return { success: false, error: 'No results found' };
-        const xml = generateJUnitXml(results);
+        // Uses the §11 exporter: adds the NEEDS_REVIEW verdict, per-step heal
+        // records, and testability context that the previous generator dropped.
+        const xml = toJUnitXml(
+          toExportRun(results, {
+            runId: message.payload.runId ?? 'run',
+            testability: approximateTestability(results),
+          })
+        );
         return { success: true, xml };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+
+    case 'EXPORT_RUN_TRACE': {
+      // §11 trace bundle: results + heals + testability + network, in one
+      // artifact, so a failure can be diagnosed after the fact.
+      try {
+        const results = await getRunResults(message.payload.runId);
+        if (results.length === 0) return { success: false, error: 'No results found' };
+        const testability = approximateTestability(results);
+        const run = toExportRun(results, { runId: message.payload.runId ?? 'run', testability });
+        const trace = buildRunTrace({
+          runId: message.payload.runId ?? 'run',
+          createdAt: new Date().toISOString(),
+          run,
+          heals: [],
+          mutationSummary: {
+            mutationsPermitted: 0,
+            requestsRefused: 0,
+            refusedByOrigin: 0,
+            refusedByMethod: 0,
+            changedEndpoints: [],
+          },
+          mutationEntries: [],
+          testability,
+          network: results.flatMap((r) =>
+            (r.harEntries ?? []).map((n) => ({
+              url: n.url,
+              method: n.method,
+              status: n.status,
+              durationMs: n.duration,
+            }))
+          ),
+          screenshots: Object.fromEntries(
+            results.flatMap((r) =>
+              (r.steps ?? [])
+                .filter((st) => st.screenshot)
+                .map((st) => [`${r.testCaseId}:${st.step.order}`, st.screenshot as string])
+            )
+          ),
+        });
+        return { success: true, trace: serializeTrace(trace), summary: formatTraceSummary(trace) };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+
+    case 'EXPORT_TESTABILITY_REPORT': {
+      // §5: telling a team which elements lack stable identifiers is a product
+      // output, not a failure report.
+      try {
+        const results = await getRunResults(message.payload.runId);
+        if (results.length === 0) return { success: false, error: 'No results found' };
+        const report = approximateTestability(results);
+        return { success: true, report, text: formatTestabilityReport(report) };
       } catch (err) {
         return { success: false, error: String(err) };
       }

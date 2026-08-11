@@ -99,6 +99,16 @@ export const AssertionSchema = z.object({
    * false-positive risk, so they are labelled rather than hidden.
    */
   confidence: z.enum(['grounded', 'doc_asserted', 'inferred']).default('inferred'),
+  /**
+   * Evaluate immediately AFTER this step order, rather than at the end of the run.
+   *
+   * Required for faithfulness: a test that clicks Save, asserts a success banner,
+   * then navigates away is asserting about INTERMEDIATE state. Deferring that
+   * assertion to the end would check a page the test never claimed anything
+   * about — passing or failing for the wrong reason. Omitted means "after all
+   * steps", which is the common case.
+   */
+  afterStep: z.number().int().nonnegative().optional(),
 });
 export type Assertion = z.infer<typeof AssertionSchema>;
 
@@ -327,6 +337,7 @@ function canonicalize(ir: TestIR): unknown {
         kind: a.kind,
         description: a.description,
         confidence: a.confidence,
+        afterStep: a.afterStep,
         locator: a.locator,
         expected: a.expected,
         attribute: a.attribute,

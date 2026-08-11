@@ -17,6 +17,9 @@ import { getAgentActions } from './action-ranker';
 import { detectSPARoutes } from './spa-detector';
 import { sendToContentScript, getActiveTabId } from '../../messaging/messenger';
 import { executeStep as executeStepViaPort } from '../step-executor';
+import { createMutationLedger } from '../safety/mutation-ledger';
+import { describePolicy, isPolicyEmpty, resolvePolicy } from '../safety/policy-resolver';
+import { installRunSafety } from '../safety/safety-port';
 import { attach, detach, isAttached, startHARCapture, getHAREntries, captureFullPageScreenshot, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
 import type { HAREntry } from '../cdp/cdp-client';
 import { ensureAuthenticated } from '../executor/auth-manager';
@@ -440,6 +443,34 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     startOrigin = new URL(startUrl).origin;
   } catch {
     // non-standard URL — allow without constraint
+  }
+
+  // ── §7 request enforcement, per worker tab ──────────────────────────────────
+  // Installed here rather than at attach time because the allowlist derives from
+  // startUrl, which is only known now. `submitForms` is the existing, explicit
+  // mutation opt-in, so it maps directly onto the method gate: a read-only
+  // exploration cannot issue a POST even if the app's own JS tries.
+  const explorePolicy = resolvePolicy({
+    startUrl,
+    allowMutations: submitForms,
+  });
+  const exploreLedger = createMutationLedger();
+  const safetyHandles: Array<{ dispose(): Promise<void> }> = [];
+  if (isPolicyEmpty(explorePolicy)) {
+    log.warn(
+      `Could not resolve an origin from "${startUrl}" — request enforcement is NOT active for this exploration.`
+    );
+  } else {
+    for (const w of workers) {
+      const handle = await installRunSafety(w.tabId, explorePolicy, exploreLedger).catch((err) => {
+        log.warn(`Could not install request enforcement on tab ${w.tabId}`, err);
+        return null;
+      });
+      if (handle) safetyHandles.push(handle);
+    }
+    log.info(
+      `Exploration enforcement: ${describePolicy(explorePolicy)} across ${safetyHandles.length} tab(s)`
+    );
   }
 
   // ── Re-explore: snapshot first, then wipe stale data for this page ──────────
@@ -973,7 +1004,25 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
   await persist(() => saveGraph(graph));
   await saveChain;
 
-  // ── Detach CDP + close dedicated tabs ─────────────────────────────────────
+  // ── Dispose enforcement, detach CDP, close dedicated tabs ─────────────────
+  // Enforcement first: the Fetch listener must go before the session it watches
+  // (CLAUDE.md §11.1 — an orphaned listener is a leak).
+  for (const handle of safetyHandles) {
+    try { await handle.dispose(); } catch { /* non-fatal */ }
+  }
+  const exploreLedgerSummary = exploreLedger.summary();
+  if (exploreLedgerSummary.mutationsPermitted > 0 || exploreLedgerSummary.requestsRefused > 0) {
+    log.info(
+      `Exploration changed ${exploreLedgerSummary.mutationsPermitted} endpoint(s); ` +
+        `refused ${exploreLedgerSummary.requestsRefused} request(s) ` +
+        `(${exploreLedgerSummary.refusedByOrigin} off-allowlist, ` +
+        `${exploreLedgerSummary.refusedByMethod} blocked verb)`
+    );
+    if (exploreLedgerSummary.changedEndpoints.length > 0) {
+      log.warn(`Endpoints this exploration wrote to: ${exploreLedgerSummary.changedEndpoints.join(', ')}`);
+    }
+  }
+
   for (const w of workers) {
     if (isAttached(w.tabId)) {
       try { await detach(w.tabId); } catch { /* non-fatal */ }

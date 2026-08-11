@@ -4,14 +4,6 @@ import type { TestResult } from '../storage/schemas';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 function escapeHtml(text: string): string {
   return text
@@ -283,40 +275,3 @@ export function generateHtmlReport(results: TestResult[]): string {
 </html>`;
 }
 
-// ---------------------------------------------------------------------------
-// Public: generateJUnitXml
-// ---------------------------------------------------------------------------
-
-export function generateJUnitXml(results: TestResult[]): string {
-  const total   = results.length;
-  const failures = results.filter((r) => r.status === 'failed').length;
-  const errors   = results.filter((r) => r.status === 'error').length;
-  const totalMs  = results.reduce((sum, r) => sum + (r.duration ?? 0), 0);
-  const totalSec = (totalMs / 1000).toFixed(3);
-  const timestamp = new Date().toISOString();
-
-  const testCases = results.map((r) => {
-    const timeSec = (( r.duration ?? 0) / 1000).toFixed(3);
-    const name    = escapeXml(r.testCaseTitle);
-
-    let inner = '';
-    if (r.status === 'failed' && r.errorMessage) {
-      const short = escapeXml(r.errorMessage.split('\n')[0] ?? r.errorMessage);
-      const full  = escapeXml(r.errorMessage);
-      inner = `\n      <failure message="${short}" type="AssertionError">${full}</failure>`;
-    } else if (r.status === 'error' && r.errorMessage) {
-      const short = escapeXml(r.errorMessage.split('\n')[0] ?? r.errorMessage);
-      const full  = escapeXml(r.errorMessage);
-      inner = `\n      <error message="${short}" type="Error">${full}</error>`;
-    }
-
-    return `    <testcase name="${name}" classname="pathfinder" time="${timeSec}">${inner}\n    </testcase>`;
-  }).join('\n');
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="pathfinder" tests="${total}" failures="${failures}" errors="${errors}" time="${totalSec}">
-  <testsuite name="pathfinder" tests="${total}" failures="${failures}" errors="${errors}" time="${totalSec}" timestamp="${timestamp}">
-${testCases}
-  </testsuite>
-</testsuites>`;
-}

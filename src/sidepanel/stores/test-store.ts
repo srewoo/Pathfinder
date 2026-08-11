@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { hasPermissionFor, requestPermissionFor } from '../../drivers/host-permissions';
 import type { TestCase, TestResult, Flow } from '../../storage/schemas';
 import { testCaseDB, testResultDB } from '../../storage/indexed-db';
 import { getAllFlows } from '../../core/flow/flow-store';
@@ -288,6 +289,23 @@ export const useTestStore = create<TestState>((set, get) => ({
   },
 
   runAllTests: async (options = {}) => {
+    // fix.md §7.5: access is granted per app, from the user's click. Without it
+    // every request in the run would be blocked, which presents as a
+    // hard-to-diagnose wall of failures rather than a permission problem.
+    const targets = get().testCases.map((t) => t.startUrl).filter((u): u is string => Boolean(u));
+    if (targets.length > 0 && !(await hasPermissionFor(targets))) {
+      const granted = await requestPermissionFor(targets);
+      if (!granted) {
+        set({
+          isRunning: false,
+          error:
+            'Pathfinder needs permission to access the sites these tests target. ' +
+            'Grant access when prompted, then run again.',
+        });
+        return;
+      }
+    }
+
     set({
       isRunning: true,
       runMode: 'suite',

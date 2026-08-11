@@ -16,17 +16,13 @@
  */
 
 /**
- * §6 — legacy executor files that still import the AI layer.
+ * §6 — CLEARED. No exemptions remain.
  *
- * These are the reason §6 exists: `test-executor` calls an LLM on the execution
- * path, so a run is not reproducible. They are replaced by `ir-executor.ts`,
- * which consumes validated IR and imports no AI at all. Remove each entry as its
- * call sites migrate; the rule already blocks new violations.
+ * `core/executor/**` no longer imports the AI layer at all. Planning, healing and
+ * assertion generation arrive through the ports in
+ * `core/executor/execution-ports.ts`, implemented in
+ * `core/planner/ai-execution-services.ts`, so any reintroduction fails the build.
  */
-const BURN_DOWN_AI_IN_EXECUTOR = [
-  'src/core/executor/test-executor.ts',
-  'src/core/executor/assertion-generator.ts',
-];
 
 /** §2 — files under src/core that still reach for chrome.* directly. */
 const BURN_DOWN_CHROME_IN_CORE = [
@@ -112,7 +108,8 @@ module.exports = {
     // ── §6: the executor may not reach for the AI layer ─────────────────────
     {
       files: ['src/core/executor/**/*.ts'],
-      excludedFiles: BURN_DOWN_AI_IN_EXECUTOR,
+      // NO excludedFiles: the §6 burn-down is empty, and passing an empty array
+      // here silently disables the whole override.
       rules: {
         'no-restricted-imports': [
           'error',

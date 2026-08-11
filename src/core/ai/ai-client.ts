@@ -5,7 +5,7 @@ import { GoogleProvider } from './google-provider';
 import { embedTextsLocally, isLocalEmbeddingBroken } from './local-embedder';
 import { partitionByCache, mergeEmbeddings } from './embedding-cache';
 import { isCacheable, buildCacheKey, getCached, setCached } from './response-cache';
-import { assertWithinBudget } from './budget-guard';
+import { assertWithinBudget } from '../budget/budget-guard';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('ai-client');

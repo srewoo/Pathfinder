@@ -1,10 +1,9 @@
 import type { TestCase, TestResult, StepResult, ExecutionStep } from '../../storage/schemas';
-import type { AIClientInterface } from '../ai/ai-client';
-import { planTest } from '../planner/test-planner';
 import type { PlanningMode } from '../planner/test-planner';
+import type { ExecutionServices } from './execution-ports';
 import { runStep, navigateTab } from './action-runner';
 import { initCDPSession, teardownCDPSession, getAXContext } from '../cdp/cdp-session';
-import { healStep, registerHealedSelector } from '../healing/self-healer';
+import { registerHealedSelector } from '../healing/self-healer';
 import { getPageSnapshot } from '../explorer/page-scanner';
 import { testCaseDB, testResultDB, planDB } from '../../storage/indexed-db';
 import { getActiveTabId } from '../../messaging/messenger';
@@ -12,11 +11,10 @@ import { captureTab } from '../../utils/screenshot';
 import { captureFullPageScreenshot, isAttached, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
 import { generateId, generateRunId } from '../../utils/hash';
 import { createLogger } from '../../utils/logger';
-import { generatePostStepAssertion, assertionToStep } from './assertion-generator';
 import { ensureAuthenticated, recoverSessionIfExpired } from './auth-manager';
 import { executeConditionalStep, executeLoopStep, executeCaptureValue, resolveStepVariables } from './step-extensions';
 import { loadGraph as loadGraphForTimeout } from '../explorer/interaction-graph';
-import { configureBudget, BudgetExceededError } from '../ai/budget-guard';
+import { configureBudget, BudgetExceededError } from '../budget/budget-guard';
 
 const log = createLogger('test-executor');
 
@@ -29,6 +27,17 @@ const log = createLogger('test-executor');
 const MAX_TEST_RETRIES = 2;
 
 export interface ExecutionOptions {
+  /**
+   * Extra origins this run may reach beyond the test's own (fix.md §7) — a
+   * separate API host, for example. Opt-in only; never inferred, because a
+   * wrongly-widened allowlist fails silently.
+   */
+  allowedOrigins?: string[];
+  /**
+   * Permit mutating HTTP verbs (POST/PUT/PATCH/DELETE). Default false: running a
+   * saved test is not by itself permission to write to the target.
+   */
+  allowMutations?: boolean;
   onStepResult?: (testCaseId: string, stepOrder: number, result: StepResult) => void;
   onTestStart?: (testCase: TestCase) => void;
   onTestComplete?: (result: TestResult) => void;
@@ -77,7 +86,7 @@ export interface ExecutionOptions {
 // ---------------------------------------------------------------------------
 export async function executeTest(
   testCase: TestCase,
-  aiClient: AIClientInterface,
+  services: ExecutionServices,
   tabId: number,
   options: ExecutionOptions = {}
 ): Promise<TestResult> {
@@ -90,7 +99,15 @@ export async function executeTest(
   // Initialize CDP session for trusted event dispatch + HAR capture
   let cdpActive = false;
   if (useCDP) {
-    cdpActive = await initCDPSession(tabId);
+    // Scope request enforcement to this test's own origin (fix.md §7). Tests are
+    // read-only with respect to the network unless a run explicitly opts in —
+    // executing a saved test is not, by itself, permission to mutate.
+    cdpActive = await initCDPSession(tabId, {
+      startUrl: testCase.startUrl,
+      extraOrigins: options.allowedOrigins,
+      allowMutations: options.allowMutations === true,
+      additionalUrls: options.targetOrigin ? [options.targetOrigin] : undefined,
+    });
   }
 
   try {
@@ -105,7 +122,7 @@ export async function executeTest(
     const freshPlan = attempt === 2;
     const timeoutMultiplier = attempt === 1 ? 2 : 1;
 
-    const result = await attemptExecution(testCase, aiClient, tabId, runId, startedAt, { ...options, cdpActive }, freshPlan, timeoutMultiplier);
+    const result = await attemptExecution(testCase, services, tabId, runId, startedAt, { ...options, cdpActive }, freshPlan, timeoutMultiplier);
 
     // Stop on success, after the last attempt, or once aborted (per-test ceiling
     // / user stop) — don't burn further attempts on a test we've abandoned.
@@ -157,7 +174,7 @@ export async function executeTest(
 // Execute all pending test cases — supports parallel execution via tab pool
 // ---------------------------------------------------------------------------
 export async function executeAllTests(
-  aiClient: AIClientInterface,
+  services: ExecutionServices,
   options: ExecutionOptions = {}
 ): Promise<TestResult[]> {
   const { concurrency = 1 } = options;
@@ -183,10 +200,10 @@ export async function executeAllTests(
   log.info(`Starting run: ${toRun.length} tests, concurrency=${effectiveConcurrency}`);
 
   if (effectiveConcurrency === 1) {
-    return runSequential(toRun, aiClient, { ...options, runId });
+    return runSequential(toRun, services, { ...options, runId });
   }
 
-  return runParallel(toRun, aiClient, { ...options, runId }, effectiveConcurrency);
+  return runParallel(toRun, services, { ...options, runId }, effectiveConcurrency);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +212,7 @@ export async function executeAllTests(
 // ---------------------------------------------------------------------------
 async function executeTestBounded(
   testCase: TestCase,
-  aiClient: AIClientInterface,
+  services: ExecutionServices,
   tabId: number,
   options: ExecutionOptions,
 ): Promise<TestResult> {
@@ -212,7 +229,7 @@ async function executeTestBounded(
   }, ceiling);
 
   try {
-    return await executeTest(testCase, aiClient, tabId, { ...options, signal: controller.signal });
+    return await executeTest(testCase, services, tabId, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', onParentAbort);
@@ -224,7 +241,7 @@ async function executeTestBounded(
 // ---------------------------------------------------------------------------
 async function runSequential(
   tests: TestCase[],
-  aiClient: AIClientInterface,
+  services: ExecutionServices,
   options: ExecutionOptions
 ): Promise<TestResult[]> {
   const tabId = await getActiveTabId();
@@ -245,7 +262,7 @@ async function runSequential(
     }
 
     try {
-      const result = await executeTestBounded(tc, aiClient, tabId, options);
+      const result = await executeTestBounded(tc, services, tabId, options);
       results.push(result);
     } catch (err) {
       if (err instanceof BudgetExceededError) {
@@ -265,7 +282,7 @@ async function runSequential(
 // ---------------------------------------------------------------------------
 async function runParallel(
   tests: TestCase[],
-  aiClient: AIClientInterface,
+  services: ExecutionServices,
   options: ExecutionOptions,
   concurrency: number
 ): Promise<TestResult[]> {
@@ -317,7 +334,7 @@ async function runParallel(
       }
 
       try {
-        resultsByIndex[index] = await executeTestBounded(tc, aiClient, tabId, options);
+        resultsByIndex[index] = await executeTestBounded(tc, services, tabId, options);
       } catch (err) {
         if (err instanceof BudgetExceededError) {
           log.warn('Budget cap reached — stopping parallel run.');
@@ -349,7 +366,7 @@ async function runParallel(
 // ---------------------------------------------------------------------------
 async function attemptExecution(
   testCase: TestCase,
-  aiClient: AIClientInterface,
+  services: ExecutionServices,
   tabId: number,
   runId: string,
   startedAt: string,
@@ -404,7 +421,14 @@ async function attemptExecution(
 
   let plan;
   try {
-    plan = await planTest(testCase, aiClient, tabId, freshPlan, axContext ? { accessibilityContext: axContext } : undefined, options.planningMode ?? 'auto');
+    // §6: the only place a model may shape what runs, and it is injected rather
+    // than imported — the executor holds no AI dependency.
+    plan = await services.plan(testCase, {
+      tabId,
+      forceFresh: freshPlan,
+      planningMode: options.planningMode ?? 'auto',
+      accessibilityContext: axContext,
+    });
   } catch (err) {
     const [screenshot, snapshot] = await Promise.all([
       captureTab(tabId).catch(() => undefined),
@@ -542,9 +566,13 @@ async function attemptExecution(
       // Heal + retry using the SAME runner the test is using (CDP trusted events
       // when a CDP session is live), so validation matches real execution.
       const activeRunner = runStep;
-      const healed = await healStep(step, result.error ?? '', tabId, aiClient, activeRunner);
+      // Healing is a capability the caller supplies. Absent = a failed step stays
+      // failed, which is a supported mode rather than a broken one (§6).
+      const healed = services.heal
+        ? await services.heal(step, result.error ?? '', tabId, activeRunner)
+        : null;
 
-      if (healed.success && healed.healedStep) {
+      if (healed && healed.success && healed.healedStep) {
         const retriedResult = await activeRunner(healed.healedStep, tabId);
         result = { ...retriedResult, healingAttempt: healed.attempt };
         if (retriedResult.status === 'passed') {
@@ -575,8 +603,12 @@ async function attemptExecution(
           result.screenshot = failScreenshot;
           aborted = true;
         }
-      } else {
+      } else if (healed) {
         result = { ...result, healingAttempt: healed.attempt, screenshot: failScreenshot };
+        aborted = true;
+      } else {
+        // No healer supplied — the step failure stands, with its screenshot.
+        result.screenshot = failScreenshot;
         aborted = true;
       }
     } else if (result.status === 'failed') {
@@ -596,9 +628,14 @@ async function attemptExecution(
       const nextStep = steps[stepIndex + 1];
       const nextIsAssert = nextStep?.action === 'assert';
       if (!nextIsAssert) {
-        const assertion = await generatePostStepAssertion(tabId, step, preStepUrl, aiClient).catch(() => null);
-        if (assertion) {
-          const autoStep = assertionToStep(assertion, step.order + 0.5);
+        // §6: supplied by the caller, not imported. Absent = no auto-assertions.
+        const autoStep = services.suggestAssertion
+          ? await services
+              .suggestAssertion(tabId, step, preStepUrl)
+              .catch(() => null)
+          : null;
+        if (autoStep) {
+          autoStep.order = step.order + 0.5;
           const executeStep = runStep;
           const assertResult = await executeStep(autoStep, tabId).catch(() => null);
           if (assertResult) {

@@ -14,6 +14,7 @@ import type { OriginPolicy } from '../core/safety/origin-policy';
 import { decide, isMutating } from '../core/safety/origin-policy';
 import type { MutationLedger } from '../core/safety/mutation-ledger';
 import { entryFor } from '../core/safety/mutation-ledger';
+import { registerSafetyInstaller } from '../core/safety/safety-port';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('cdp-safety');
@@ -158,3 +159,7 @@ async function failRequest(tabId: number, requestId: string): Promise<void> {
 function send(tabId: number, method: string, params: object): Promise<unknown> {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
+
+// Register with the core port so `src/core` never imports this module (fix.md §2).
+// Session setup calls installRunSafety(), which lands here.
+registerSafetyInstaller((tabId, policy, ledger) => installSafety(tabId, policy, ledger));

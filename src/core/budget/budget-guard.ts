@@ -1,4 +1,13 @@
 /**
+ * Per-run spend ceiling (fix.md §6, §9).
+ *
+ * Moved out of `core/ai/` deliberately. This module never calls a model — it
+ * counts what other code spent and refuses once a cap is hit. Living under
+ * `core/ai/` made it look like an AI dependency, which meant the executor could
+ * not enforce a budget without importing the AI layer and tripping §6's
+ * boundary. The rule was right; the file was in the wrong place.
+ */
+/**
  * Per-session budget guard.
  *
  * Tests can run away with cost when self-healing or interactive planning
@@ -6,7 +15,7 @@
  * default — must be explicitly enabled via configureBudget().
  */
 
-import { estimateCost, getTokenUsage } from './token-tracker';
+import { estimateCost, getTokenUsage } from '../ai/token-tracker';
 
 export interface BudgetState {
   /** USD cap; null disables enforcement. */

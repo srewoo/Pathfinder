@@ -508,29 +508,65 @@ which is legitimate and unrelated to the deleted engines; §16.1's "no
 `playwright-core` anywhere" refers to the duplicate engines only. Decide
 separately whether to add the dev dependency or drop `test/e2e/`.
 
-### Phase 1 — Make correctness measurable — ⛔ SKIPPED (by instruction)
+### Phase 1 — Make correctness measurable — ✅ DONE (built after Phases 2–5)
 
-- §10 fixture suite + scoring harness, wired into CI
-- Record **baseline** recall / false-positive / cost / flake for v1.4
-- **Exit:** a number to regress against. Every later phase is judged by it.
+Built out of order, at the point where it became clear the remaining work would
+change what tests get generated and how results are judged — exactly the class of
+change that needs a before/after number.
 
-**Consequence, recorded rather than hidden.** Phases 2–4 were written with exits
-that reference this benchmark ("flake rate ~0 on benchmark reruns", "identical IR
-across 3 runs on a fixture", "recall held flat"). Those specific gates are
-**unverified** — no false-positive baseline exists, so no later phase can prove it
-did not regress one.
+- §10 fixture suite + scoring harness + CI gate: `test/benchmark/`
+- `npm run benchmark`; runs in the normal `vitest run` sweep too
 
-Substitute verification actually used:
+**Design.** Fixtures come in PAIRS — a `correct` variant and a `broken` variant
+with exactly one injected defect. The same detector set runs against both, so:
 
-- 226 new unit/integration tests (785 total, up from 559), including an
-  end-to-end path `TestIR → ir-executor → Driver → fake-driver` with no browser
-- Determinism asserted directly where it is cheap to do so: byte-identical IR
-  serialization, byte-identical constraint generation, byte-identical result JSON
-- The existing 559-test suite as a regression net
+- catching the defect on `broken` = **recall**
+- any finding at all on `correct` = **false positive**
 
-This is weaker than the benchmark in exactly one way that matters: it measures
-*self-consistency*, not *whether Pathfinder finds real bugs without crying wolf*.
-Phase 1 remains the highest-priority outstanding work.
+Pairing is what makes the false-positive rate measurable. A broken-only suite can
+only report recall, and recall alone is the metric a noisy tool optimises while
+becoming useless.
+
+**First baseline (v1.4 + Phases 2–5, deterministic detectors):**
+
+```
+Fixtures:            7
+Recall:              100%  (7 caught, 0 missed)
+False positives:     0  (rate 0%)
+Precision:           100%
+Tokens:              0
+Wall-clock:          373ms
+Flake:               0% across 3 identical runs
+```
+
+Defect classes covered: validation bypass (×2 — malformed input and a maxlength
+boundary), 500-on-submit, dead control, state not persisted, missing accessible
+name, broken link.
+
+**The harness caught a real problem on its first run** — a false positive traced
+to the `state-not-persisted` fixture accidentally containing a *second* defect (an
+unlabelled input). The fixture was at fault, not the detector, which is precisely
+the kind of error a benchmark exists to surface before it becomes a wrong number.
+
+**Fidelity, stated so the number is not over-read.** `test/benchmark/jsdom-driver.ts`
+evaluates the *same* injected page scripts the CDP driver sends to a real browser,
+so the production locator ladder, accessible-name computation and assertion
+semantics are genuinely exercised. What it cannot exercise:
+
+- trusted input events and real layout (jsdom has neither, so geometry checks are
+  relaxed — the harness cannot catch layout-caused flake)
+- LLM-generated tests, which need an API key; the token/cost columns read 0
+- multi-page crawling; each fixture is a single page
+
+**Gate:** zero false positives (zero-tolerance — these are mechanical checks
+against ground truth, so a spurious finding is a detector bug), recall ≥ 80%,
+zero flake. The scoring logic has its own 23 unit tests, because a scoring bug
+that flatters the tool is worse than no benchmark.
+
+**New product code this required:** `src/core/analysis/deterministic-detectors.ts`
+— six zero-token detectors, each returning evidence alongside its message. They
+take a `Driver`, so the code that produces the benchmark number is the code that
+ships.
 
 ### Phase 2 — Substrate and safety — ✅ DONE
 
@@ -616,25 +652,70 @@ Two real bugs were caught here by the tests, both worth recording:
    migration including v3. Invisible in production (we always open at
    `DB_VERSION`) but wrong, and it made the "upgrade from v1" test fail.
 
-### Phase 4 — Determinism and cost — 🟡 DONE, one exit unverifiable
+### Phase 4 — Determinism and cost — ✅ DONE
 
 - §6 `src/core/ir/test-ir.ts` — zod `TestIR`, canonical serialization,
-  `parseTestIR` as the single gate; `src/core/executor/ir-executor.ts` consumes IR
-  and imports no AI, enforced by lint
-- §5 `src/core/locator.ts` (three-tier ladder) + `src/core/report/heal-ledger.ts`
-  (heal recording, `NEEDS_REVIEW` at ≥2 healed locators, testability report)
-- §9 `src/core/ir/constraint-ir-generator.ts` — negative tests from HTML
-  constraints at **zero tokens**
-- **Exit:** identical IR across runs ✅ (asserted byte-for-byte). Token drop with
-  recall held flat ⛔ — recall is unmeasurable without Phase 1.
+  `parseTestIR` as the single gate
+- §6 `src/core/ir/ir-bridge.ts` — legacy `ExecutionStep[]` ⇄ `TestIR`, the
+  migration seam
+- §6 `src/core/executor/execution-ports.ts` + `core/planner/ai-execution-services.ts`
+  — the executor's AI dependencies inverted into injected ports
+- §5 `src/core/locator.ts` + `core/report/heal-ledger.ts` +
+  `core/report/result-adapter.ts` (heal recording, `NEEDS_REVIEW`, testability)
+- §9 constraint tests at zero tokens — already satisfied by
+  `test-gen/constraint-test-generator.ts`; the cap now discloses truncation
+- **Exit met:** identical IR across runs ✅ (asserted byte-for-byte). Executor
+  contains zero AI ✅ (lint with no exemptions + a source-level test).
 
-Two design decisions worth flagging:
+#### How the §6 boundary was actually achieved
 
-- **`wait` is not in the IR vocabulary.** §8 moved waiting into the driver, so a
-  step needing a wait is a driver bug. Leaving `wait` available would let
-  generators paper over real flake with sleeps.
-- **A test with no assertions is rejected at parse time.** It would always pass,
-  which is worse than not having it.
+The executor could not simply stop importing the AI layer — it genuinely needed
+planning, healing and assertion generation mid-run. Moving files would have been
+cosmetic. So the dependency was **inverted**:
+
+| Before | After |
+|---|---|
+| `test-executor` → `planner/test-planner` (AI) | `test-executor` → `PlanProvider` type |
+| `test-executor` → `healing/self-healer` (AI) | `test-executor` → `StepHealer` type |
+| `test-executor` → `executor/assertion-generator` (AI) | `test-executor` → `AssertionSuggester` type |
+| `test-executor` → `ai/budget-guard` | `test-executor` → `budget/budget-guard` |
+
+`executeTest(testCase, aiClient, …)` became `executeTest(testCase, services, …)`.
+The caller composes services; `createAiExecutionServices(aiClient)` supplies the
+AI-backed set, and `DETERMINISTIC_SERVICES` / `storedPlanServices()` supply sets
+that make **no model calls at all** — which is what lets execution be measured
+without an API key.
+
+Two files moved because they were in the wrong place, not because the rule was
+inconvenient:
+
+- `ai/budget-guard.ts` → `budget/budget-guard.ts`. It never calls a model; it
+  counts what others spent. Living under `ai/` made a spend cap look like an AI
+  dependency.
+- `executor/assertion-generator.ts` → `planner/assertion-generator.ts`. It is a
+  generation concern that needs a model.
+
+**The §6 burn-down list is now empty**, and the ESLint override carries no
+`excludedFiles`.
+
+#### Three things worth recording
+
+- **An empty `excludedFiles: []` silently disables an ESLint override.** Emptying
+  the burn-down list switched the §6 rule OFF rather than tightening it. Caught by
+  re-running the deliberate-violation probe. The key is now omitted entirely, and
+  `test/integration/execution-boundary.test.ts` asserts the boundary at source
+  level too, so a disabled rule cannot hide it again.
+- **The IR needed positional assertions.** Legacy plans interleave assertions with
+  actions, asserting about *intermediate* state. The original IR ran all
+  assertions at the end, which would have silently changed what every migrated
+  test checks. `Assertion.afterStep` pins an assertion to a step; the executor
+  honours it and stops the run when a positional assertion fails, because the
+  state it described is transient.
+- **Conversion is lossy, and says so.** `wait`, `if_visible`, `loop` and
+  `use_captured` have no IR equivalent. Each is reported in
+  `ConversionResult.dropped` with a reason rather than silently omitted — a step
+  that vanishes in conversion is a test that quietly stops checking something.
+  `use_captured` is preserved as `{{placeholder}}` interpolation.
 
 ### Phase 5 — Output — ✅ DONE
 
@@ -649,6 +730,63 @@ Two design decisions worth flagging:
 `NEEDS_REVIEW` is emitted as a passing testcase with a `<system-out>` note, not a
 failure. Downgrading a real pass to a failure would train teams to ignore the
 signal, which defeats its purpose.
+
+---
+
+## 14b. Wiring pass (post-audit)
+
+An audit after Phases 2–5 found that **10 of 28 new modules had no caller**. They
+were correct and tested in isolation while contributing nothing to the running
+product — the gap between "the architecture exists" and "the product uses it".
+Phase status had been reported as ✅ on the strength of tests alone, which was
+misleading.
+
+| Module | Before | Now |
+|---|---|---|
+| §7 origin allowlist + method gate | ❌ inert | ✅ installed in `initCDPSession` and per explorer tab |
+| §7 mutation ledger | ❌ inert | ✅ per-run, summarised at teardown |
+| §7 runtime host permissions | ❌ inert | ✅ requested from the user's click |
+| §5 `NEEDS_REVIEW` verdict | ❌ inert | ✅ computed from legacy heal records |
+| §5 testability report | ❌ inert | ✅ export handler + UI button |
+| §11 JUnit exporter | ❌ inert (duplicate) | ✅ replaced the old generator |
+| §11 run trace | ❌ inert | ✅ `EXPORT_RUN_TRACE` handler |
+| §4 job executors | ❌ inert | ✅ `crawl` + `explore` registered at startup |
+| §6 `ir-executor` | ❌ inert | ❌ **still inert** — see below |
+| §9 `constraint-ir-generator` | ❌ inert | ❌ deliberately inert (successor, not a parallel) |
+
+### Three things the audit exposed
+
+**1. A regression I had introduced.** Dropping `<all_urls>` for
+`optional_host_permissions` without wiring the grant flow left the extension with
+**no host access at all** — every run would have failed on every request. Now
+requested per app from the user's click, in both the explorer and the test runner.
+
+**2. Two more duplicate implementations**, the §3 mistake repeated in other
+layers:
+
+- `utils/html-reporter.ts` already had a `generateJUnitXml`. My §11 exporter was a
+  second one. The old one is **deleted**; the richer exporter (verdicts, heal
+  records, testability context, XML-safety) is now the only one.
+- `test-gen/constraint-test-generator.ts` already derived constraint tests
+  deterministically and was **already wired**. §9's "should need no tokens" was
+  therefore already satisfied in the product. `constraint-ir-generator.ts` is
+  documented as its IR-emitting successor — to replace it, not run beside it.
+
+**3. §5 was a reporting gap, not a missing feature.** `StepResult.healingAttempt`
+and `TestResult.healingAttempts` have always recorded heals; nothing surfaced
+them. `report/result-adapter.ts` computes `NEEDS_REVIEW` from data the legacy
+executor already produced — so §5's guarantee is live without waiting for the IR
+migration.
+
+Also fixed: the constraint-test generator capped output at 25 per flow and logged
+only what it kept. A silent cap reads as full coverage, so the drop is now
+reported.
+
+### What remains inert, and why
+
+`ir-executor.ts` (§6). Wiring it means changing what `test-generator.ts` and
+`test-importer.ts` emit — from `ExecutionStep` to `TestIR` — which is the last
+large migration. The benchmark now exists to measure it, which is the right order.
 
 ---
 
@@ -733,31 +871,34 @@ CSP-safe).
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | One package. No `cli/`, no `MCP/`, no `playwright-core` anywhere. | ✅ |
-| 2 | `src/core/**` imports zero `chrome.*`, enforced by lint. | 🟡 Rule active and blocking new violations. Core imports **zero driver modules** ✅, but 9 pre-existing files still call `chrome.*` directly and remain on the burn-down list. |
-| 3 | One action implementation (CDP). `dom-actions.ts` deleted. | ✅ Both duplicates deleted (`dom-actions.ts` 1464 lines, `cdp-action-runner.ts` 447 lines). Zero `EXECUTE_ACTION` dispatch; `all_frames` dropped. |
-| 4 | A crawl survives service-worker eviction and browser restart. | ✅ Proven by eviction-simulation tests. |
-| 5 | Executor contains zero LLM calls, enforced by lint. | 🟡 True of `ir-executor.ts`, enforced. Legacy `test-executor.ts` on the burn-down list. |
-| 6 | Manifest requests no `cookies` and no `<all_urls>`. | ✅ |
-| 7 | Benchmark in CI; false-positive rate below the v1.4 baseline. | ❌ Phase 1 skipped by instruction. No baseline exists. |
-| 8 | No file over 300 lines. | ❌ 8 legacy files still over budget (one cleared by §3); every new module is within it. |
-
-**Note on criterion 3 vs §3 step 2.** `content-script.ts` is 1028 lines, not the
-"under 300" §3 aspired to. But everything remaining in it is precisely what §3
-step 2 says to *keep* — page-structure extraction (`GET_ELEMENTS`,
-`GET_FORM_FIELDS`, `SCAN_PAGE`, `GET_PAGE_METADATA`, …), DOM observation, SPA
-route signals, and recording. It executes no actions. The line count is a
-file-budget concern (§13, criterion 8), not a substrate one.
+| 1 | One package, no duplicate engines | ✅ |
+| 2 | `src/core` imports zero `chrome.*` | 🟡 Core imports zero DRIVER modules ✅ (via ports); 9 files still call `chrome.*` — burn-down list |
+| 3 | One action implementation (CDP) | ✅ `dom-actions.ts` (1464) + `cdp-action-runner.ts` (447) deleted |
+| 4 | Crawl survives eviction | ✅ Machinery proven in tests AND executors registered, so a durable crawl is now runnable |
+| 5 | Executor has zero LLM calls | ✅ `core/executor/**` imports no AI at all. Lint rule has **no exemptions**; a source-level test backs it up |
+| 6 | No `cookies`, no `<all_urls>` | ✅ — and the runtime grant flow `<all_urls>` was hiding is now wired |
+| 7 | Benchmark in CI, FP rate measured | ✅ **7 fixtures · recall 100% · 0 false positives · 0 flake · 0 tokens** |
+| 8 | No file over 300 lines | ❌ **36** files over budget (31 `.ts` + 5 `.tsx`). An earlier count of 12 in this document was wrong — it came from a truncated listing. Every NEW module is within budget. |
 
 ### Remaining work, in priority order
 
-1. **§10 benchmark (Phase 1).** Still the highest-value item, and now the only
-   thing standing between "self-consistent" and "known to work". Everything else
-   is verified against itself, not against real bugs or real false positives.
-2. **§6 completion.** Route generation through `TestIR` end to end and retire
-   `test-executor.ts` in favour of `ir-executor.ts`, clearing the §6 burn-down.
-3. **§4 migration.** Move crawl/explore off the in-memory orchestrators onto the
-   job pump. This retires the service-worker keepalive, decomposes the two largest
-   files, removes most of the §2 `chrome.*` burn-down list, and lets
-   `core/step-executor.ts`'s registry be replaced by explicit driver injection.
-4. **§12 completion.** Split `storage/schemas.ts` (741 lines) per domain.
+1. **Generators emit IR directly.** `ir-bridge.ts` converts on the way out, which
+   makes the IR canonical without rewriting generation. The remaining step is for
+   `test-generator.ts` / `test-importer.ts` to produce `TestIR` natively, at which
+   point `constraint-ir-generator.ts` replaces its legacy predecessor and
+   `approximateTestability()` can be replaced by exact numbers (structured
+   locators instead of inferred tiers).
+2. **Route execution through `ir-executor`.** The ports are in place and the
+   legacy executor is AI-free, so this is now a swap rather than a redesign —
+   measured against the benchmark at each step.
+3. **Grow the benchmark.** 7 fixtures is a floor. Add one for every confirmed
+   field-reported false positive (§15), and add LLM-generated tests once an API key
+   is available in CI so cost and flake stop reading zero.
+4. **§4 migration.** Move the explorer's click/modal/form interaction onto job
+   steps. Retires the service-worker keepalive, decomposes the two largest files,
+   clears most of the §2 `chrome.*` burn-down, and lets the step-executor registry
+   be replaced by explicit driver injection.
+5. **§12 completion.** Split `storage/schemas.ts` (741 lines) per domain.
+6. **§13 file budget.** 36 files remain over 300 lines — 31 `.ts` and 5 `.tsx`.
+   Items 1 and 4 address the largest `.ts` offenders; the `.tsx` sidepanel
+   components are untouched by this plan and need their own pass.

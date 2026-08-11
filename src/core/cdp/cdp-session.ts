@@ -26,6 +26,11 @@ import {
 } from './cdp-client';
 import type { HAREntry } from './cdp-client';
 import { releaseTab } from '../step-executor';
+import type { OriginPolicy } from '../safety/origin-policy';
+import type { MutationLedger } from '../safety/mutation-ledger';
+import { createMutationLedger } from '../safety/mutation-ledger';
+import { describePolicy, isPolicyEmpty, resolvePolicy, type PolicyInput } from '../safety/policy-resolver';
+import { installRunSafety, isSafetyInstallerRegistered, type SafetyHandle } from '../safety/safety-port';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('cdp-session');
@@ -38,12 +43,20 @@ const log = createLogger('cdp-session');
  * no longer a "degrade to synthetic events" signal — it means the tab cannot be
  * driven at all, and the caller must surface that rather than proceed.
  */
-export async function initCDPSession(tabId: number): Promise<boolean> {
+export async function initCDPSession(
+  tabId: number,
+  safety?: PolicyInput
+): Promise<boolean> {
   try {
     await attach(tabId);
     await enableDialogAutoDismiss(tabId);
     registerDialogHandler(tabId);
     await startHARCapture(tabId);
+
+    // §7: enforcement is part of opening a session, not an option a caller
+    // passes. Installing it here is what makes it unbypassable.
+    await installSafetyForRun(tabId, safety);
+
     log.info(`CDP session initialized for tab ${tabId}`);
     return true;
   } catch (err) {
@@ -54,6 +67,61 @@ export async function initCDPSession(tabId: number): Promise<boolean> {
     );
     return false;
   }
+}
+
+// ── §7 safety wiring ────────────────────────────────────────────────────────
+
+interface RunSafety {
+  policy: OriginPolicy;
+  ledger: MutationLedger;
+  handle: SafetyHandle | null;
+}
+
+const runSafety = new Map<number, RunSafety>();
+
+async function installSafetyForRun(tabId: number, input?: PolicyInput): Promise<void> {
+  const policy = resolvePolicy(input ?? {});
+  const ledger = createMutationLedger();
+
+  if (isPolicyEmpty(policy)) {
+    // Failing closed would abort every request and look like a broken network.
+    // Skipping enforcement silently would be worse. So: no interception, and a
+    // loud warning naming the cause.
+    log.warn(
+      `No origin could be resolved for this run — request enforcement is NOT active. ` +
+        `Pass a startUrl to scope the run (fix.md §7).`
+    );
+    runSafety.set(tabId, { policy, ledger, handle: null });
+    return;
+  }
+
+  if (!isSafetyInstallerRegistered()) {
+    log.error(
+      'No safety installer registered — this run is UNPROTECTED. ' +
+        'The driver layer must import drivers/cdp-safety at startup.'
+    );
+    runSafety.set(tabId, { policy, ledger, handle: null });
+    return;
+  }
+
+  const handle = await installRunSafety(tabId, policy, ledger);
+  runSafety.set(tabId, { policy, ledger, handle });
+  log.info(`Request enforcement active on tab ${tabId}: ${describePolicy(policy)}`);
+}
+
+/** The mutation ledger for a run, for the report. Null when never installed. */
+export function getRunLedger(tabId: number): MutationLedger | null {
+  return runSafety.get(tabId)?.ledger ?? null;
+}
+
+/** The resolved policy for a run, for the report. */
+export function getRunPolicy(tabId: number): OriginPolicy | null {
+  return runSafety.get(tabId)?.policy ?? null;
+}
+
+/** True when interception is genuinely active — not merely configured. */
+export function isEnforcementActive(tabId: number): boolean {
+  return runSafety.get(tabId)?.handle !== null && runSafety.has(tabId);
 }
 
 /** Tear down the session and return the captured HAR. Safe to call twice. */
@@ -67,6 +135,23 @@ export async function teardownCDPSession(tabId: number): Promise<HAREntry[]> {
   }
 
   unregisterDialogHandler(tabId);
+
+  // Dispose enforcement before detaching — the Fetch listener outlives the
+  // session otherwise (CLAUDE.md §11.1: listener accumulation is a leak).
+  const safety = runSafety.get(tabId);
+  if (safety?.handle) {
+    const summary = safety.ledger.summary();
+    if (summary.mutationsPermitted > 0 || summary.requestsRefused > 0) {
+      log.info(
+        `Run changed ${summary.mutationsPermitted} endpoint(s); ` +
+          `refused ${summary.requestsRefused} request(s) ` +
+          `(${summary.refusedByOrigin} off-allowlist, ${summary.refusedByMethod} blocked verb)`
+      );
+    }
+    await safety.handle.dispose().catch(() => undefined);
+  }
+  runSafety.delete(tabId);
+
   // Drop the cached driver so a closed tab does not leak one (CLAUDE.md §11.1).
   releaseTab(tabId);
 

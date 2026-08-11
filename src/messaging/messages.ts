@@ -89,6 +89,9 @@ export type BackgroundMessage =
   // Reporting & Export
   | { type: 'EXPORT_HTML_REPORT'; payload: { runId?: string } }
   | { type: 'EXPORT_JUNIT_XML'; payload: { runId?: string } }
+  | { type: 'EXPORT_RUN_TRACE'; payload: { runId?: string } }
+  | { type: 'EXPORT_TESTABILITY_REPORT'; payload: { runId?: string } }
+  | { type: 'EXPORT_TEST_IR'; payload?: { testCaseIds?: string[] } }
   | { type: 'EXPORT_JSON_REPORT'; payload: { runId?: string } }
   | { type: 'GET_TEST_TRENDS' }
   // Video recording

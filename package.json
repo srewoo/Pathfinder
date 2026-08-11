@@ -9,14 +9,15 @@
     "build": "tsc --noEmit && vite build",
     "build:no-type-check": "vite build",
     "icons": "node scripts/generate-icons.mjs",
-    "build:chrome": "node scripts/generate-icons.mjs && vite build && echo '\n✓ Extension built. Load the dist/ folder in chrome://extensions (Developer mode → Load unpacked)'",
+    "build:chrome": "node scripts/generate-icons.mjs && vite build && echo '\n\u2713 Extension built. Load the dist/ folder in chrome://extensions (Developer mode \u2192 Load unpacked)'",
     "build:zip": "node scripts/generate-icons.mjs && vite build && node scripts/pack-extension.mjs",
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",
     "test:e2e": "playwright test test/e2e/",
     "lint": "eslint src --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "benchmark": "vitest run test/benchmark/"
   },
   "dependencies": {
     "@xenova/transformers": "^2.17.2",

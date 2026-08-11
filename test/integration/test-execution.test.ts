@@ -95,12 +95,13 @@ const chromeMock = {
 vi.stubGlobal('chrome', chromeMock);
 
 import { executeTest, executeAllTests } from '../../src/core/executor/test-executor';
+import { createAiExecutionServices } from '../../src/core/planner/ai-execution-services';
 import { testCaseDB, testResultDB } from '../../src/storage/indexed-db';
 import { getPageSnapshot } from '../../src/core/explorer/page-scanner';
 import { runStep } from '../../src/core/executor/action-runner';
 import { healStep } from '../../src/core/healing/self-healer';
 import { recoverSessionIfExpired } from '../../src/core/executor/auth-manager';
-import { configureBudget, BudgetExceededError } from '../../src/core/ai/budget-guard';
+import { configureBudget, BudgetExceededError } from '../../src/core/budget/budget-guard';
 import type { TestCase, ExecutionStep, StepResult, HealingAttempt } from '../../src/storage/schemas';
 
 const mockPlanSteps: ExecutionStep[] = [
@@ -115,6 +116,13 @@ const mockAIClient = {
   chat: vi.fn().mockResolvedValue(validAIPlanResponse),
   embed: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
 };
+
+/**
+ * The executor now takes injected services rather than an AI client (fix.md §6).
+ * Building them from the mock keeps these tests exercising the real
+ * planTest → runStep → healStep path they were written for.
+ */
+const services = () => createAiExecutionServices(mockAIClient as never);
 
 function makeTestCase(id = 'tc-001'): TestCase {
   return {
@@ -158,7 +166,7 @@ describe('executeTest', () => {
 
   it('given valid test case when all steps pass then result status is passed', async () => {
     const tc = makeTestCase();
-    const result = await executeTest(tc, mockAIClient as never, MOCK_TAB_ID);
+    const result = await executeTest(tc, services(), MOCK_TAB_ID);
 
     expect(result.status).toBe('passed');
     expect(result.steps).toHaveLength(3);
@@ -185,7 +193,7 @@ describe('executeTest', () => {
     });
 
     const tc = makeTestCase();
-    const result = await executeTest(tc, mockAIClient as never, MOCK_TAB_ID);
+    const result = await executeTest(tc, services(), MOCK_TAB_ID);
 
     expect(result.status).toBe('failed');
     expect(result.steps.find((s) => s.step.selector === '#login-btn')?.status).toBe('failed');
@@ -214,7 +222,7 @@ describe('executeTest', () => {
     });
 
     const tc = makeTestCase();
-    const result = await executeTest(tc, mockAIClient as never, MOCK_TAB_ID);
+    const result = await executeTest(tc, services(), MOCK_TAB_ID);
 
     expect(result.status).toBe('passed');
     expect(result.healingAttempts).toHaveLength(1);
@@ -225,7 +233,7 @@ describe('executeTest', () => {
     mockAIClient.chat.mockRejectedValue(new Error('API unavailable'));
 
     const tc = makeTestCase();
-    const result = await executeTest(tc, mockAIClient as never, MOCK_TAB_ID);
+    const result = await executeTest(tc, services(), MOCK_TAB_ID);
 
     expect(result.status).toBe('error');
     expect(result.errorMessage).toContain('API unavailable');
@@ -237,7 +245,7 @@ describe('executeTest', () => {
 
     const tc = makeTestCase('tc-persist');
     await testCaseDB.put(tc);
-    await executeTest(tc, mockAIClient as never, MOCK_TAB_ID);
+    await executeTest(tc, services(), MOCK_TAB_ID);
 
     const results = await testResultDB.getAll();
     expect(results.some((r) => r.testCaseId === 'tc-persist')).toBe(true);
@@ -248,7 +256,7 @@ describe('executeTest', () => {
 
     const tc = makeTestCase('tc-status');
     await testCaseDB.put(tc);
-    await executeTest(tc, mockAIClient as never, MOCK_TAB_ID);
+    await executeTest(tc, services(), MOCK_TAB_ID);
 
     const saved = await testCaseDB.get('tc-status');
     expect(saved?.status).toBe('passed');
@@ -260,7 +268,7 @@ describe('executeTest', () => {
     vi.mocked(runStep).mockResolvedValue(makeFailedStep(stepNoSelector));
 
     const tc = makeTestCase('tc-no-sel');
-    const result = await executeTest(tc, mockAIClient as never, MOCK_TAB_ID);
+    const result = await executeTest(tc, services(), MOCK_TAB_ID);
 
     expect(result.status).toBe('failed');
     expect(healStep).not.toHaveBeenCalled();
@@ -271,7 +279,7 @@ describe('executeTest', () => {
     const onStepResult = vi.fn();
 
     const tc = makeTestCase();
-    await executeTest(tc, mockAIClient as never, MOCK_TAB_ID, { onStepResult });
+    await executeTest(tc, services(), MOCK_TAB_ID, { onStepResult });
 
     expect(onStepResult).toHaveBeenCalledTimes(3);
     expect(onStepResult).toHaveBeenCalledWith('tc-001', expect.any(Number), expect.objectContaining({ status: 'passed' }));
@@ -299,14 +307,14 @@ describe('executeAllTests', () => {
     await testCaseDB.put(makeTestCase('tc-a'));
     await testCaseDB.put(makeTestCase('tc-b'));
 
-    const results = await executeAllTests(mockAIClient as never);
+    const results = await executeAllTests(services());
 
     expect(results).toHaveLength(2);
     expect(results.every((r) => r.status === 'passed')).toBe(true);
   });
 
   it('given no test cases when executeAllTests then returns empty array', async () => {
-    const results = await executeAllTests(mockAIClient as never);
+    const results = await executeAllTests(services());
     expect(results).toEqual([]);
   });
 
@@ -314,7 +322,7 @@ describe('executeAllTests', () => {
     await testCaseDB.put(makeTestCase('tc-1'));
     await testCaseDB.put(makeTestCase('tc-2'));
 
-    const results = await executeAllTests(mockAIClient as never);
+    const results = await executeAllTests(services());
 
     expect(results[0].runId).toBe(results[1].runId);
   });
@@ -325,7 +333,7 @@ describe('executeAllTests', () => {
     await testCaseDB.put(passed);
     await testCaseDB.put(pending);
 
-    const results = await executeAllTests(mockAIClient as never);
+    const results = await executeAllTests(services());
 
     expect(results).toHaveLength(1);
     expect(results[0].testCaseId).toBe('tc-pending');
@@ -335,7 +343,7 @@ describe('executeAllTests', () => {
     const passed = { ...makeTestCase('tc-done'), status: 'passed' as const };
     await testCaseDB.put(passed);
 
-    const results = await executeAllTests(mockAIClient as never, { rerunAll: true });
+    const results = await executeAllTests(services(), { rerunAll: true });
 
     expect(results).toHaveLength(1);
   });
@@ -365,7 +373,7 @@ describe('executeAllTests — run controls (budget, ordering, ceiling)', () => {
     );
     vi.mocked(healStep).mockRejectedValue(new BudgetExceededError(1, 1.5, 10));
 
-    const results = await executeAllTests(mockAIClient as never, { concurrency: 1 });
+    const results = await executeAllTests(services(), { concurrency: 1 });
 
     // Run aborted before completing both tests.
     expect(results.length).toBeLessThan(2);
@@ -377,7 +385,7 @@ describe('executeAllTests — run controls (budget, ordering, ceiling)', () => {
     await testCaseDB.put(makeTestCase('tc-2'));
     await testCaseDB.put(makeTestCase('tc-3'));
 
-    const results = await executeAllTests(mockAIClient as never, { concurrency: 2 });
+    const results = await executeAllTests(services(), { concurrency: 2 });
 
     expect(results.map((r) => r.testCaseId)).toEqual(['tc-1', 'tc-2', 'tc-3']);
   });
@@ -385,7 +393,7 @@ describe('executeAllTests — run controls (budget, ordering, ceiling)', () => {
   it('given a tiny per-test ceiling when executing then the test is aborted and marked failed', async () => {
     await testCaseDB.put(makeTestCase('tc-ceil'));
 
-    const results = await executeAllTests(mockAIClient as never, { maxTestDurationMs: 5 });
+    const results = await executeAllTests(services(), { maxTestDurationMs: 5 });
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe('failed');

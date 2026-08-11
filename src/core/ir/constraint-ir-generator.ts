@@ -8,6 +8,13 @@
  *
  * Zero tokens. Same input, byte-identical IR — which also makes it the only test
  * generator that can be regression-tested exactly.
+ *
+ * RELATIONSHIP TO `test-gen/constraint-test-generator.ts`: that module already
+ * does this deterministically and is already wired into `generateTestsForFlow`.
+ * This is its IR-emitting SUCCESSOR, not a parallel implementation — it is not
+ * called in production yet, and when §6's IR path lands it REPLACES the legacy
+ * one rather than running alongside it. Two live constraint generators would be
+ * the §3 mistake repeated in the generation layer.
  */
 import type { FormField } from '../../storage/schemas';
 import type { Assertion, Step, TestIR } from './test-ir';

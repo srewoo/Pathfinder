@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { InteractionGraph, ExplorationProgress, ExplorationCoverage, Flow } from '../../storage/schemas';
 import { loadGraph } from '../../core/explorer/interaction-graph';
 import { getAllFlows } from '../../core/flow/flow-store';
+import { hasPermissionFor, requestPermissionFor } from '../../drivers/host-permissions';
 import { sendToBackground } from '../../messaging/messenger';
 import {
   exportExploration,
@@ -70,6 +71,25 @@ interface ExplorerState {
   setFlowsLearned: (count: number) => void;
 }
 
+/**
+ * Ensure host access for the tab the user is looking at.
+ *
+ * Checks first so an already-granted origin never re-prompts, then requests.
+ * Returns false when the user declines — the caller must surface that rather
+ * than starting a run that will fail on every request.
+ */
+async function ensureHostAccessForActiveTab(): Promise<boolean> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const url = tab?.url;
+    if (!url) return false;
+    if (await hasPermissionFor([url])) return true;
+    return await requestPermissionFor([url]);
+  } catch {
+    return false;
+  }
+}
+
 export const useExplorerStore = create<ExplorerState>((set, get) => ({
   graph: null,
   flows: [],
@@ -103,6 +123,22 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
 
   startExploration: async () => {
     const { explorationDepth, singlePageOnly, singlePageStrict, submitForms, freshRescan } = get();
+
+    // fix.md §7.5: the manifest no longer asks for <all_urls>, so access is
+    // granted per app at the moment it is needed. This MUST run from the user's
+    // click — Chrome silently rejects permissions.request outside a gesture,
+    // which is indistinguishable from the user declining.
+    const granted = await ensureHostAccessForActiveTab();
+    if (!granted) {
+      set({
+        isExploring: false,
+        error:
+          'Pathfinder needs permission to access this site before it can explore it. ' +
+          'Grant access when prompted, then start again.',
+      });
+      return;
+    }
+
     set({ isExploring: true, error: null, progress: null, coverage: null, explorationJustCompleted: false });
     const resp = await sendToBackground({
       type: 'START_EXPLORATION',
@@ -119,6 +155,11 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
   },
 
   reexplorePage: async (url: string) => {
+    const granted = await requestPermissionFor([url]).catch(() => false);
+    if (!granted && !(await hasPermissionFor([url]))) {
+      set({ error: `Pathfinder needs permission to access ${url}.` });
+      return;
+    }
     set({ isExploring: true, reexploringUrl: url, error: null, progress: null });
     const resp = await sendToBackground({
       type: 'REEXPLORE_PAGE',

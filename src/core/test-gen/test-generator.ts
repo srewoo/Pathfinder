@@ -176,13 +176,26 @@ export async function generateTestsForFlow(
     // Collect all observed form outcomes to ground assertions in real selectors
     const allFormOutcomes = graph?.nodes.flatMap((n) => n.formOutcomes ?? []) ?? [];
     const constraintSpecs = deriveConstraintTests(rawFormFields, flow.name, allFormOutcomes);
+    const CONSTRAINT_CAP = 25;
     const constraintTests = await saveConstraintTests(
-      constraintSpecs.slice(0, 25), // cap at 25 per flow
+      constraintSpecs.slice(0, CONSTRAINT_CAP),
       flow.flowId,
       flow.startUrl
     );
     saved.push(...constraintTests);
-    log.info(`Generated ${constraintTests.length} constraint-based tests for flow "${flow.name}"`);
+    log.info(
+      `Generated ${constraintTests.length} constraint-based tests for flow "${flow.name}" ` +
+        `(zero AI cost)`
+    );
+    if (constraintSpecs.length > CONSTRAINT_CAP) {
+      // Never let a cap read as "that was everything" — a silently truncated
+      // suite looks like full coverage of the form's constraints.
+      log.warn(
+        `Capped constraint tests at ${CONSTRAINT_CAP} for flow "${flow.name}": ` +
+          `${constraintSpecs.length - CONSTRAINT_CAP} derivable case(s) were NOT generated. ` +
+          `The form has more constraints than the per-flow cap allows.`
+      );
+    }
   }
 
   const constraintCount = saved.length - parsed.length - projectedTests.length;
