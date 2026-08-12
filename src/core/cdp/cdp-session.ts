@@ -19,6 +19,8 @@ import {
   registerDialogHandler,
   unregisterDialogHandler,
   startHARCapture,
+  setBodyCaptureOrigins,
+  setBodyRetention,
   stopHARCapture,
   getHAREntries,
   getAccessibilityTree,
@@ -26,6 +28,7 @@ import {
 } from './cdp-client';
 import type { HAREntry } from './cdp-client';
 import { releaseTab } from '../step-executor';
+import { settingsStorage } from '../../storage/chrome-storage';
 import type { OriginPolicy } from '../safety/origin-policy';
 import type { MutationLedger } from '../safety/mutation-ledger';
 import { createMutationLedger } from '../safety/mutation-ledger';
@@ -56,6 +59,17 @@ export async function initCDPSession(
     // §7: enforcement is part of opening a session, not an option a caller
     // passes. Installing it here is what makes it unbypassable.
     await installSafetyForRun(tabId, safety);
+
+    // Response bodies may only be read for origins this run is scoped to (ADR 001).
+    // Derived from the SAME allowlist that gates requests, so schema capture can
+    // never reach further than the run itself is allowed to.
+    const runPolicy = getRunPolicy(tabId);
+    setBodyCaptureOrigins(tabId, runPolicy?.allowedOrigins ?? []);
+
+    // Debug body retention is opt-in per run (ADR 001 phase 4). Read here rather than
+    // defaulted anywhere, so leaving the setting alone can never start storing payloads.
+    const settings = await settingsStorage.get().catch(() => undefined);
+    setBodyRetention(tabId, settings?.retainResponseBodies === true);
 
     log.info(`CDP session initialized for tab ${tabId}`);
     return true;

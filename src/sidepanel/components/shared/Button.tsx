@@ -1,7 +1,7 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
 
-type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
+type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-quiet';
 type Size = 'xs' | 'sm' | 'md';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -12,19 +12,36 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   fullWidth?: boolean;
 }
 
+/**
+ * Weight follows consequence.
+ *
+ * `danger` used to be a 10%-opacity tint with a 30%-opacity border while
+ * `secondary` was a solid fill — so "Delete" was visually LIGHTER than "Cancel",
+ * which is exactly backwards for the pair that matters most. A confirmed
+ * destructive action now carries the heaviest treatment in the set.
+ *
+ * `danger-quiet` exists for the other destructive case: an icon-only affordance in
+ * a dense row, where a solid red fill per row would turn a list into an alarm.
+ *
+ * `success` was removed. A green button is not a hierarchy tier — if it means "the
+ * confirming choice", that is `primary`.
+ */
 const variantClasses: Record<Variant, string> = {
-  primary: 'bg-primary hover:bg-primary-hover text-white border-transparent shadow-sm shadow-primary/20',
+  primary: 'bg-primary hover:bg-primary-hover text-white border-transparent shadow-sm shadow-primary/25',
+  danger: 'bg-error hover:bg-error/90 text-white border-transparent shadow-sm shadow-error/25',
   secondary: 'bg-surface-2 hover:bg-surface-3 text-text-primary border-border-light',
+  'danger-quiet': 'bg-transparent hover:bg-error/10 text-error-text border-transparent',
   ghost: 'bg-transparent hover:bg-surface-2 text-text-secondary hover:text-text-primary border-transparent',
-  danger: 'bg-error/10 hover:bg-error/20 text-error border-error/30',
-  success: 'bg-success/10 hover:bg-success/20 text-success border-success/30',
 };
 
 const sizeClasses: Record<Size, string> = {
-  xs: 'h-6 px-2 text-xs gap-1 rounded',
+  xs: 'h-6 px-2 text-2xs gap-1 rounded-sm',
   sm: 'h-7 px-3 text-xs gap-1.5 rounded-md',
   md: 'h-8 px-4 text-sm gap-2 rounded-lg',
 };
+
+/** The spinner was a fixed 12px, so on `md` it was visibly smaller than the icon. */
+const spinnerSize: Record<Size, number> = { xs: 10, sm: 12, md: 14 };
 
 export function Button({
   variant = 'secondary',
@@ -52,7 +69,7 @@ export function Button({
       ].join(' ')}
     >
       {loading ? (
-        <Loader2 className="animate-spin" size={12} />
+        <Loader2 className="animate-spin" size={spinnerSize[size]} />
       ) : (
         icon && <span className="flex-shrink-0">{icon}</span>
       )}

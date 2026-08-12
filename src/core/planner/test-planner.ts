@@ -10,6 +10,7 @@ import { serializeCompressedDOM } from '../../utils/dom-compress';
 import { computePlanHash, getCachedPlan, cachePlan } from './plan-cache';
 import { interactivePlan } from './interactive-planner';
 import { validateAndRepairPlan } from './plan-validator';
+import { enrichAssertions } from '../test-gen/assertion-enricher';
 import { testCaseDB } from '../../storage/indexed-db';
 import { createLogger } from '../../utils/logger';
 
@@ -93,6 +94,7 @@ export async function planTest(
     if (steps.length > 0) {
       const startUrl = extractStartUrl(steps, pageUrl);
       if (startUrl && !testCase.startUrl) await testCaseDB.put({ ...testCase, startUrl });
+      steps = await deepenAssertions(steps, testCase, startUrl ?? pageUrl);
       log.info(`Using deterministic preplan (${steps.length} captured-selector steps) for "${testCase.title}"`);
       return cachePlan(testCase.id, hash, { steps });
     }
@@ -211,10 +213,60 @@ export async function planTest(
     await testCaseDB.put({ ...testCase, startUrl });
   }
 
+  steps = await deepenAssertions(steps, testCase, startUrl ?? pageUrl);
+
   const plan = await cachePlan(testCase.id, hash, { steps });
 
   log.info(`Planned test "${testCase.title}" with ${steps.length} steps (startUrl: ${startUrl})`);
   return plan;
+}
+
+/**
+ * Add grounded multi-channel assertions to a plan (deeper oracles).
+ *
+ * Runs on EVERY plan path — preplan and LLM alike — because a shallow assertion
+ * set is the product's binding constraint regardless of how the steps were
+ * produced. Zero tokens: everything added is derived from what exploration
+ * actually observed.
+ *
+ * Never throws. A plan that could not be deepened is still a runnable plan, and
+ * failing generation over a missing enrichment would be a worse outcome than a
+ * shallower test.
+ */
+async function deepenAssertions(
+  steps: ExecutionStep[],
+  testCase: TestCase,
+  pageUrl: string
+): Promise<ExecutionStep[]> {
+  try {
+    const graph = (await loadGraph()) ?? undefined;
+    // Negative tests assert the opposite: no write, and the app's real error.
+    const negative = isNegativeTest(testCase);
+    const result = enrichAssertions(steps, graph, { pageUrl, negative });
+    if (result.added.length > 0) {
+      log.info(
+        `Deepened "${testCase.title}": +${result.added.length} grounded assertion(s), ` +
+          `channels [${result.channels.join(', ')}] (zero AI cost)`
+      );
+    }
+    return result.steps;
+  } catch (err) {
+    log.warn('Assertion enrichment failed — using the plan as generated', err);
+    return steps;
+  }
+}
+
+/**
+ * Is this a negative test?
+ *
+ * Uses the schema's own `type` field rather than parsing the title. That matters
+ * because a misclassification FLIPS the network assertion from "must be called"
+ * to "must NOT be called" — turning a correct app into a failure. Title-sniffing
+ * would get that wrong on a title like "Login rejects empty password" vs
+ * "Error page loads correctly".
+ */
+function isNegativeTest(testCase: TestCase): boolean {
+  return testCase.type === 'negative';
 }
 
 function extractStartUrl(steps: ExecutionStep[], currentUrl: string): string | undefined {

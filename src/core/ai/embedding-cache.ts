@@ -121,11 +121,3 @@ function evictOldest(): void {
 
   if (oldestKey) cache.delete(oldestKey);
 }
-
-export function clearEmbeddingCache(): void {
-  cache.clear();
-}
-
-export function getEmbeddingCacheStats(): { size: number; maxSize: number } {
-  return { size: cache.size, maxSize: MAX_ENTRIES };
-}

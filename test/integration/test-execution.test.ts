@@ -42,6 +42,18 @@ vi.mock('../../src/utils/dom-compress', () => ({
   serializeCompressedDOM: vi.fn().mockReturnValue('<dom/>'),
 }));
 
+// The executor reaches the driver through the core port; without these the
+// state-diff oracles cannot observe and are (correctly) skipped.
+vi.mock('../../src/core/step-executor', () => ({
+  executeStep: vi.fn().mockResolvedValue({ success: true }),
+  canExecuteStep: vi.fn().mockReturnValue(true),
+  releaseTab: vi.fn(),
+  evaluateInTab: vi.fn().mockResolvedValue(undefined),
+  driverForTab: vi.fn(() => {
+    throw new Error('no driver in this test');
+  }),
+}));
+
 vi.mock('../../src/core/executor/action-runner', () => ({
   runStep: vi.fn(),
   navigateTab: vi.fn().mockResolvedValue(undefined),

@@ -50,8 +50,8 @@ export function FailureDetail({ result }: FailureDetailProps) {
     <div className="space-y-3 mt-2 pb-2">
       {result.errorMessage && (
         <div className="flex items-start gap-2 p-2.5 bg-error/10 border border-error/20 rounded-lg">
-          <AlertTriangle size={12} className="text-error flex-shrink-0 mt-0.5" />
-          <p className="text-xs text-error font-mono leading-relaxed">{result.errorMessage}</p>
+          <AlertTriangle size={12} className="text-error-text flex-shrink-0 mt-0.5" />
+          <p className="text-xs text-error-text font-mono leading-relaxed">{result.errorMessage}</p>
         </div>
       )}
 
@@ -77,10 +77,10 @@ export function FailureDetail({ result }: FailureDetailProps) {
                   </p>
                 )}
                 {step.error && (
-                  <p className="text-2xs text-error mt-1 pl-5">{step.error}</p>
+                  <p className="text-2xs text-error-text mt-1 pl-5">{step.error}</p>
                 )}
                 {step.healingAttempt && (
-                  <div className="mt-1 pl-5 flex items-center gap-1 text-2xs text-warning">
+                  <div className="mt-1 pl-5 flex items-center gap-1 text-2xs text-warning-text">
                     <Wrench size={10} />
                     <span>
                       Healing via {step.healingAttempt.method}:{' '}

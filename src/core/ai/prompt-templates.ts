@@ -1,5 +1,3 @@
-export const PROMPT_VERSION = '3.0';
-
 export const PROMPTS = {
   flowExtraction: {
     version: '3.0',
@@ -655,5 +653,3 @@ Respond with JSON:
 }`,
   },
 } as const;
-
-export type PromptKey = keyof typeof PROMPTS;

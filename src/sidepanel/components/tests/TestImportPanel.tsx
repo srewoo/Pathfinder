@@ -165,8 +165,8 @@ export function TestImportPanel() {
       {/* Validation error */}
       {validationError && (
         <div className="flex items-start gap-1.5 p-2 bg-error/10 border border-error/20 rounded-lg">
-          <AlertCircle size={12} className="text-error mt-0.5 shrink-0" />
-          <p className="text-2xs text-error">{validationError}</p>
+          <AlertCircle size={12} className="text-error-text mt-0.5 shrink-0" />
+          <p className="text-2xs text-error-text">{validationError}</p>
         </div>
       )}
 

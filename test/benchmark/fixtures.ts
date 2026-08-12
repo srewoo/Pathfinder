@@ -21,7 +21,10 @@ export type DefectClass =
   | 'server-error-on-submit'
   | 'a11y-missing-label'
   | 'dead-button'
-  | 'state-not-persisted';
+  | 'state-not-persisted'
+  // ── State-diff oracle classes ──
+  | 'success-without-persistence'
+  | 'success-over-failure';
 
 export interface AppVariant {
   html: string;
@@ -213,11 +216,15 @@ export const FIXTURES: readonly Fixture[] = [
           <div id="out" role="status" hidden></div>
         </main>`,
       wire(doc) {
+        // Neutral observable change, NOT a success claim. An earlier version said
+        // "Saved successfully" with nothing persisted — which is exactly the
+        // success-without-persistence defect, so the oracle correctly flagged this
+        // "correct" app. A fixture must contain exactly one defect.
         doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
           const o = doc.getElementById('out');
           if (o) {
             o.hidden = false;
-            o.textContent = 'Saved successfully';
+            o.textContent = 'Details panel opened';
           }
         });
       },
@@ -294,6 +301,170 @@ export const FIXTURES: readonly Fixture[] = [
     correct: { html: signupHtml(), wire() {} },
     // DEFECT: the email input loses its <label>, so it has no accessible name.
     broken: { html: signupHtml({ label: false }), wire() {} },
+  },
+
+  {
+    id: 'optimistic-save',
+    description: 'Saving must actually reach the server, not just render success',
+    defect: 'success-without-persistence',
+    expectedSignal: 'success shown with zero network requests and no storage write',
+    correct: {
+      html: `
+        <main>
+          <label for="note">Note</label>
+          <input id="note" data-testid="note" />
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status" hidden></div>
+        </main>`,
+      wire(doc, record) {
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          record({ url: 'https://fixture.test/api/notes', method: 'POST', status: 201 });
+          const b = doc.getElementById('banner');
+          if (b) { b.hidden = false; b.textContent = 'Note saved successfully'; }
+        });
+      },
+    },
+    broken: {
+      html: `
+        <main>
+          <label for="note">Note</label>
+          <input id="note" data-testid="note" />
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status" hidden></div>
+        </main>`,
+      wire(doc) {
+        // DEFECT: renders success and never contacts the server. The classic
+        // optimistic-UI data-loss bug — a "success banner is visible" assertion
+        // passes while the note is gone on reload.
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          const b = doc.getElementById('banner');
+          if (b) { b.hidden = false; b.textContent = 'Note saved successfully'; }
+        });
+      },
+    },
+  },
+
+  {
+    id: 'success-over-500',
+    description: 'A failed save must not be reported as success',
+    defect: 'success-over-failure',
+    expectedSignal: 'success message shown over a 5xx response',
+    correct: {
+      html: `
+        <main>
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status" hidden></div>
+        </main>`,
+      wire(doc, record) {
+        // The correct app simply succeeds. An earlier version of this fixture had
+        // the correct variant return 500 while surfacing the error nicely — but a
+        // 5xx IS a defect regardless of how gracefully it is displayed, so
+        // detectServerErrors reported it and the fixture registered a false
+        // positive against itself. A fixture must contain exactly one defect.
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          record({ url: 'https://fixture.test/api/save', method: 'POST', status: 200 });
+          const b = doc.getElementById('banner');
+          if (b) { b.hidden = false; b.textContent = 'Saved successfully'; }
+        });
+      },
+    },
+    broken: {
+      html: `
+        <main>
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status" hidden></div>
+        </main>`,
+      wire(doc, record) {
+        // DEFECT: ignores the response status and claims success anyway.
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          record({ url: 'https://fixture.test/api/save', method: 'POST', status: 500 });
+          const b = doc.getElementById('banner');
+          if (b) { b.hidden = false; b.textContent = 'Saved successfully'; }
+        });
+      },
+    },
+  },
+
+  {
+    id: 'client-side-only-save',
+    description: 'A local-first app persists to storage, not the server',
+    defect: 'success-without-persistence',
+    expectedSignal: 'success shown with no persistence of any kind',
+    correct: {
+      // TRAP for the success-without-persistence oracle: shows success and makes
+      // ZERO network requests, which is correct for a local-first app. The oracle
+      // must see the storage write and stay quiet.
+      html: `
+        <main>
+          <label for="draft">Draft</label>
+          <input id="draft" data-testid="draft" />
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status" hidden></div>
+        </main>`,
+      wire(doc) {
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          const v = (doc.getElementById('draft') as HTMLInputElement)?.value ?? '';
+          localStorage.setItem('draft', v);
+          const b = doc.getElementById('banner');
+          if (b) { b.hidden = false; b.textContent = 'Draft saved successfully'; }
+        });
+      },
+    },
+    broken: {
+      html: `
+        <main>
+          <label for="draft">Draft</label>
+          <input id="draft" data-testid="draft" />
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status" hidden></div>
+        </main>`,
+      wire(doc) {
+        // DEFECT: claims success, writes neither to storage nor the server.
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          const b = doc.getElementById('banner');
+          if (b) { b.hidden = false; b.textContent = 'Draft saved successfully'; }
+        });
+      },
+    },
+  },
+
+  {
+    id: 'stale-banner',
+    description: 'A banner already on screen says nothing about a new action',
+    defect: 'success-without-persistence',
+    expectedSignal: 'success shown with no persistence of any kind',
+    correct: {
+      // TRAP: a success banner from an EARLIER action is visible before the click.
+      // Treating it as evidence about this click is how a stale message makes a
+      // broken action look fine — the oracle must only consider NEW messages.
+      html: `
+        <main>
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status">Saved successfully</div>
+          <div id="out" hidden></div>
+        </main>`,
+      wire(doc) {
+        // This click legitimately does something benign and unrelated.
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          const o = doc.getElementById('out');
+          if (o) { o.hidden = false; o.textContent = 'Panel opened'; }
+        });
+      },
+    },
+    broken: {
+      html: `
+        <main>
+          <button type="button" data-testid="save">Save</button>
+          <div id="banner" role="status" hidden></div>
+        </main>`,
+      wire(doc) {
+        // DEFECT: a genuinely new success claim with nothing behind it.
+        doc.querySelector('[data-testid="save"]')?.addEventListener('click', () => {
+          const b = doc.getElementById('banner');
+          if (b) { b.hidden = false; b.textContent = 'Saved successfully'; }
+        });
+      },
+    },
   },
 
   {

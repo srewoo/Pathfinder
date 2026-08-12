@@ -274,7 +274,7 @@ describe('Accessibility Audit', () => {
       const r1 = await runAccessibilityAudit(1, 'https://app.com/page1', 'Page 1');
       const r2 = await runAccessibilityAudit(1, 'https://app.com/page2', 'Page 2');
       const report = formatA11yReport([r1, r2]);
-      expect(report).toContain('Pages audited:**');
+      expect(report).toContain('issue(s)** across');
       expect(report).toContain('2');
     });
   });

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film, Shield, ArrowRight, Accessibility } from 'lucide-react';
+import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film, Shield, ArrowRight, Accessibility, PlayCircle } from 'lucide-react';
 import { TestReport } from './TestReport';
 import { TestDashboard } from './TestDashboard';
 import { ExecutionTimeline } from './ExecutionTimeline';
@@ -14,6 +14,8 @@ import {
 } from '../../../core/report/result-adapter';
 import { formatTestabilityReport } from '../../../core/report/heal-ledger';
 import { generateJsonReport } from '../../../utils/report-exporter';
+import { SegmentedControl } from '../shared/SegmentedControl';
+import { generateScreencastPlayer } from '../../../core/cdp/screencast';
 
 type ViewMode = 'results' | 'timeline' | 'dashboard';
 
@@ -46,6 +48,34 @@ export function ResultsPanel() {
       JSON.stringify(report, null, 2),
       `pathfinder-report-${Date.now()}.json`,
       'application/json'
+    );
+  };
+
+  /**
+   * Recordings were captured, persisted, and unwatchable — nothing ever called
+   * the player.
+   *
+   * Downloaded rather than opened in a tab. A `blob:` URL created by an extension
+   * page inherits the extension's CSP, and the player drives playback from an
+   * inline `<script>`, so opening it produced only:
+   *
+   *   Executing inline script violates the following Content Security Policy
+   *   directive 'script-src 'self' … chrome-extension://…'
+   *
+   * Saving it means the browser opens it from `file:`, where the page's own script
+   * runs — and it matches how every other export on this toolbar behaves.
+   *
+   * Not embedded in the HTML report either: frames are base64 PNGs, and inlining
+   * them would add megabytes to every export whether or not anyone watches.
+   */
+  const recorded = results.filter((r) => (r.screencastFrames?.length ?? 0) > 0);
+  const handleWatchRecording = () => {
+    const latest = recorded[0];
+    if (!latest?.screencastFrames) return;
+    downloadBlob(
+      generateScreencastPlayer(latest.screencastFrames, latest.testCaseTitle),
+      `pathfinder-recording-${latest.testCaseTitle.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.html`,
+      'text/html'
     );
   };
 
@@ -99,6 +129,15 @@ export function ResultsPanel() {
           </p>
         </div>
         <div className="flex items-center gap-1">
+          {recorded.length > 0 && (
+            <Button
+              variant="ghost"
+              size="xs"
+              icon={<PlayCircle size={11} />}
+              onClick={handleWatchRecording}
+              title={`Download the screen recording of "${recorded[0].testCaseTitle}"`}
+            />
+          )}
           <Button
             variant="ghost"
             size="xs"
@@ -140,11 +179,11 @@ export function ResultsPanel() {
       {/* Summary stats */}
       <div className="grid grid-cols-3 gap-2 p-3 bg-surface-2 border border-border rounded-lg">
         <div className="text-center">
-          <div className="text-lg font-bold text-success">{passed}</div>
+          <div className="text-lg font-bold text-success-text">{passed}</div>
           <div className="text-2xs text-text-muted">Passed</div>
         </div>
         <div className="text-center border-x border-border">
-          <div className="text-lg font-bold text-error">{failed}</div>
+          <div className="text-lg font-bold text-error-text">{failed}</div>
           <div className="text-2xs text-text-muted">Failed</div>
         </div>
         <div className="text-center">
@@ -160,7 +199,7 @@ export function ResultsPanel() {
         className="flex items-center justify-between gap-2 px-2.5 py-2 bg-surface-2 border border-border rounded-lg hover:border-border-light transition-colors text-left"
       >
         <span className="flex items-center gap-2 min-w-0">
-          <Shield size={12} className="text-primary-light flex-shrink-0" />
+          <Shield size={12} className="text-primary-text flex-shrink-0" />
           <span className="text-xs text-text-primary truncate">Analyze API coverage, accessibility & contracts</span>
         </span>
         <span className="flex items-center gap-1 text-2xs text-text-muted flex-shrink-0">
@@ -168,27 +207,19 @@ export function ResultsPanel() {
         </span>
       </button>
 
-      {/* View mode tabs */}
-      <div className="flex gap-1 bg-surface-2 p-0.5 rounded-lg border border-border">
-        <ViewTab
-          active={viewMode === 'results'}
-          onClick={() => setViewMode('results')}
-          icon={<FileText size={10} />}
-          label="Results"
-        />
-        <ViewTab
-          active={viewMode === 'timeline'}
-          onClick={() => setViewMode('timeline')}
-          icon={<Film size={10} />}
-          label="Timeline"
-        />
-        <ViewTab
-          active={viewMode === 'dashboard'}
-          onClick={() => setViewMode('dashboard')}
-          icon={<Activity size={10} />}
-          label="Trends"
-        />
-      </div>
+      {/* One SegmentedControl: this was a tab strip with no role, no aria-selected
+          and no keyboard navigation. */}
+      <SegmentedControl
+        options={[
+          { id: 'results', icon: FileText, label: 'Results' },
+          { id: 'timeline', icon: Film, label: 'Timeline' },
+          { id: 'dashboard', icon: Activity, label: 'Trends' },
+        ]}
+        value={viewMode}
+        onChange={setViewMode}
+        stacked={false}
+        label="Results view"
+      />
 
       {/* Content based on view mode */}
       {viewMode === 'results' && <TestReport results={results} />}
@@ -203,32 +234,5 @@ export function ResultsPanel() {
 
       {viewMode === 'dashboard' && <TestDashboard />}
     </div>
-  );
-}
-
-function ViewTab({
-  active,
-  onClick,
-  icon,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={[
-        'flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-2xs font-medium transition-colors',
-        active
-          ? 'bg-primary text-white shadow-sm'
-          : 'text-text-muted hover:text-text-secondary hover:bg-surface-3',
-      ].join(' ')}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }

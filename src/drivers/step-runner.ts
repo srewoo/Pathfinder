@@ -21,6 +21,7 @@ import { createCdpDriver } from './cdp-driver';
 import { isAttached } from '../core/cdp/cdp-client';
 import { assertExpr, animationSettleExpr, type AssertOutcome } from './assert-scripts';
 import { registerStepExecutor } from '../core/step-executor';
+import { resolveNavigationTarget } from '../core/executor/navigation-target';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('step-runner');
@@ -80,10 +81,22 @@ export async function executeStepViaDriver(
     const locator = step.selector ? fromCss(step.selector, step.description) : undefined;
 
     switch (step.action) {
-      case 'navigate':
+      case 'navigate': {
         if (!step.value) return fail('navigate action requires a value (URL)');
-        await driver.navigate(step.value);
+        // Resolve against the page we are ON, the way a browser would. Passing the
+        // raw value through meant a step like "/university/command-center" was
+        // resolved against the EXTENSION's base and the tab landed on
+        // chrome-extension://<id>/university/command-center (ERR_FILE_NOT_FOUND) —
+        // after which every later step failed against a Chrome error page.
+        const here = await driver.currentUrl().catch(() => undefined);
+        const target = resolveNavigationTarget(step.value, { currentUrl: here });
+        if (!target.ok) return fail(target.error);
+        if (target.resolvedFrom) {
+          log.info(`navigate: resolved "${step.value}" to ${target.url} (base ${target.resolvedFrom})`);
+        }
+        await driver.navigate(target.url);
         return ok();
+      }
 
       case 'click':
       case 'double_click':
@@ -252,4 +265,10 @@ export function canExecute(tabId: number): boolean {
 // Register with the core port so `src/core` never imports this module directly
 // (fix.md §2). Importing this file for its side effect is intentional and done
 // once, from the service worker.
-registerStepExecutor(executeStepViaDriver, canExecute, releaseDriver);
+registerStepExecutor(
+  executeStepViaDriver,
+  canExecute,
+  releaseDriver,
+  (tabId, expression) => driverForTab(tabId).evaluate(expression),
+  driverForTab
+);

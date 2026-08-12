@@ -11,7 +11,7 @@
  */
 import type { NetworkRequest, NetworkResponse } from '../core/driver';
 import type { OriginPolicy } from '../core/safety/origin-policy';
-import { decide, isMutating } from '../core/safety/origin-policy';
+import { decide, isMutating, isPageCritical } from '../core/safety/origin-policy';
 import type { MutationLedger } from '../core/safety/mutation-ledger';
 import { entryFor } from '../core/safety/mutation-ledger';
 import { registerSafetyInstaller } from '../core/safety/safety-port';
@@ -21,9 +21,24 @@ const log = createLogger('cdp-safety');
 
 interface FetchRequestPausedEvent {
   requestId: string;
-  request: { url: string; method: string };
+  request: { url: string; method: string; headers?: Record<string, string> };
   resourceType?: string;
   responseStatusCode?: number;
+}
+
+/**
+ * `Sec-Fetch-Dest`, whatever casing the browser used.
+ *
+ * Header names are case-insensitive and CDP passes them through as received, so a
+ * fixed-case lookup silently misses — and a missed header means an embedded iframe
+ * is mistaken for the crawler navigating away.
+ */
+function fetchDestOf(headers: Record<string, string> | undefined): string | undefined {
+  if (!headers) return undefined;
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === 'sec-fetch-dest') return v;
+  }
+  return undefined;
 }
 
 export interface SafetySession {
@@ -31,6 +46,14 @@ export interface SafetySession {
   dispose(): Promise<void>;
   /** Requests aborted so far. */
   abortedCount(): number;
+  /**
+   * Aborted requests whose loss breaks the page (scripts, documents, API calls).
+   *
+   * Non-empty means the app under test may not have booted, so anything the run
+   * observed afterwards describes the policy's damage rather than the app. A
+   * caller that reports findings without checking this reports fiction.
+   */
+  criticalBlocks(): readonly string[];
 }
 
 /**
@@ -53,6 +76,13 @@ export async function installSafety(
   const now = hooks.now ?? (() => Date.now());
   let aborted = 0;
   let disposed = false;
+  /** Bounded so a page that retries a blocked bundle forever cannot grow this. */
+  const CRITICAL_BLOCK_CAP = 20;
+  const critical: string[] = [];
+  /** Distinct blocked requests already logged, so repeats stay quiet. */
+  const loggedBlocks = new Set<string>();
+  /** How many times each distinct request was blocked, reported once on dispose. */
+  const repeatedBlocks = new Map<string, number>();
 
   const listener = (
     source: chrome.debugger.Debuggee,
@@ -85,7 +115,10 @@ export async function installSafety(
       return;
     }
 
-    const decision = decide({ url, method, resourceType: ev.resourceType }, policy);
+    const decision = decide(
+      { url, method, resourceType: ev.resourceType, destination: fetchDestOf(ev.request?.headers) },
+      policy
+    );
 
     // Only mutating verbs and refusals are ledger-worthy. Recording every GET
     // would bury the signal that matters under page-load noise.
@@ -97,7 +130,27 @@ export async function installSafety(
 
     if (!decision.allow) {
       aborted++;
-      log.warn(`BLOCKED ${method} ${url} — ${decision.reason}`);
+      // One line per distinct request, not one per occurrence. A page that retries
+      // a blocked asset — or a crawl that revisits it every thirty seconds — filled
+      // the log with the same ERROR until the real output was unreadable.
+      const key = `${method} ${url}`;
+      const firstTime = !loggedBlocks.has(key);
+      if (firstTime) loggedBlocks.add(key);
+      repeatedBlocks.set(key, (repeatedBlocks.get(key) ?? 0) + 1);
+
+      if (firstTime && isPageCritical(ev.resourceType)) {
+        // Loud, not debug: this is the difference between "we declined a tracker"
+        // and "the app never loaded and everything after this is noise".
+        log.error(
+          `BLOCKED ${ev.resourceType} ${method} ${url} — ${decision.reason}. ` +
+            `The page may not function; results from this run are suspect.`
+        );
+        if (critical.length < CRITICAL_BLOCK_CAP) {
+          critical.push(`${ev.resourceType} ${method} ${url} (${decision.reason})`);
+        }
+      } else if (firstTime) {
+        log.warn(`BLOCKED ${method} ${url} — ${decision.reason}`);
+      }
       await failRequest(tabId, requestId);
       return;
     }
@@ -125,6 +178,14 @@ export async function installSafety(
     async dispose() {
       if (disposed) return;
       disposed = true;
+      // Report the repeats once, at the end. Suppressing them during the run must
+      // not mean hiding how often they happened.
+      const repeats = [...repeatedBlocks.entries()].filter(([, n]) => n > 1);
+      if (repeats.length > 0) {
+        const worst = repeats.sort((a, b) => b[1] - a[1]).slice(0, 3)
+          .map(([k, n]) => `${k} ×${n}`).join('; ');
+        log.info(`${repeats.length} blocked request(s) recurred during the run: ${worst}`);
+      }
       chrome.debugger.onEvent.removeListener(listener);
       try {
         await send(tabId, 'Fetch.disable', {});
@@ -134,6 +195,9 @@ export async function installSafety(
     },
     abortedCount() {
       return aborted;
+    },
+    criticalBlocks() {
+      return critical;
     },
   };
 }

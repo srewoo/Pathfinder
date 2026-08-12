@@ -19,7 +19,18 @@ export type FindingKind =
   | 'server-error'
   | 'a11y-missing-label'
   | 'dead-button'
-  | 'state-not-persisted';
+  | 'state-not-persisted'
+  // ── State-diff oracles (see ./state-oracles.ts) ──
+  /** UI claimed success while nothing was persisted anywhere. */
+  | 'success-without-persistence'
+  /** UI claimed success while the server returned an error. */
+  | 'success-over-failure'
+  /** A read-only run attempted to change server state. */
+  | 'unexpected-mutation'
+  /** An action expected to persist produced no evidence of it. */
+  | 'missing-persistence'
+  /** The app surfaced an error message during the step. */
+  | 'error-surfaced';
 
 export type Severity = 'high' | 'medium' | 'low';
 

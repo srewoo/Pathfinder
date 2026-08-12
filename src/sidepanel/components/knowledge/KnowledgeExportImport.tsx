@@ -65,7 +65,7 @@ export function KnowledgeExportImport() {
           {store.isExporting ? (
             <Loader size={11} className="animate-spin" />
           ) : exportSuccess ? (
-            <CheckCircle size={11} className="text-success" />
+            <CheckCircle size={11} className="text-success-text" />
           ) : (
             <Download size={11} />
           )}
@@ -90,7 +90,7 @@ export function KnowledgeExportImport() {
           {store.isImporting ? (
             <Loader size={11} className="animate-spin" />
           ) : importSuccess ? (
-            <CheckCircle size={11} className="text-success" />
+            <CheckCircle size={11} className="text-success-text" />
           ) : (
             <Upload size={11} />
           )}
@@ -109,7 +109,7 @@ export function KnowledgeExportImport() {
 
       {/* ── Status messages ── */}
       {importSuccess && (
-        <div className="flex items-center gap-1.5 text-2xs text-success">
+        <div className="flex items-center gap-1.5 text-2xs text-success-text">
           <CheckCircle size={10} />
           <span>
             {store.documents.length} docs and {store.vectorCount} vectors imported successfully.
@@ -118,7 +118,7 @@ export function KnowledgeExportImport() {
       )}
 
       {store.exportImportError && (
-        <div className="flex items-start gap-1.5 text-2xs text-error">
+        <div className="flex items-start gap-1.5 text-2xs text-error-text">
           <AlertCircle size={10} className="mt-0.5 flex-shrink-0" />
           <span>{store.exportImportError}</span>
         </div>

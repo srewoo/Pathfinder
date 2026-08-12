@@ -62,6 +62,31 @@ export function CrawlForm() {
         </div>
       </div>
 
+      {/*
+        Render-JavaScript toggle.
+
+        The crawler has always supported a tab-rendered path, but nothing exposed
+        it — so SPA documentation sites crawled as empty shells and users had no
+        way to fix that. It is also the supported route for credential-gated docs,
+        since a real tab carries the existing session.
+      */}
+      <label className="flex items-start gap-2 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={store.renderJavaScript}
+          onChange={(e) => store.setRenderJavaScript(e.target.checked)}
+          disabled={store.isCrawling}
+          className="mt-0.5 accent-primary disabled:opacity-60 disabled:cursor-not-allowed"
+        />
+        <span className="text-2xs leading-snug">
+          <span className="text-text-secondary font-medium">Render JavaScript</span>
+          <span className="block text-text-muted">
+            Slower, but required for docs sites that render client-side — and for
+            pages behind a login, which use your current session.
+          </span>
+        </span>
+      </label>
+
       {store.isCrawling && progress && (
         <div className="p-3 bg-surface-2 rounded-lg border border-border space-y-2">
           <ProgressBar
@@ -85,7 +110,7 @@ export function CrawlForm() {
 
       {store.error && (
         <div className="p-2.5 bg-error/10 border border-error/20 rounded-lg">
-          <p className="text-xs text-error">{store.error}</p>
+          <p className="text-xs text-error-text">{store.error}</p>
         </div>
       )}
     </div>

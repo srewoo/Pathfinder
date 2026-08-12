@@ -184,6 +184,15 @@ export function createCdpDriver(opts: CdpDriverOptions): DriverWithCapabilities 
     const fresh = await evaluate<ElementSample>(tabId, sampleExpr(handle.ref)).catch(() => null);
     const rect = fresh?.rect ?? handle.rect;
     if (!rect) throw new DriverError(`No geometry for ${describeLocator(handle.locator)}`);
+    if (fresh?.proxiedBy) {
+      // The rect is the proxy's, so this dispatches on the label rather than on
+      // the hidden control it owns. Logged because the distinction matters when
+      // reading a run: the click was on something else, by design.
+      log.debug(
+        `Clicking ${describeLocator(handle.locator)} via its label (${fresh.proxiedBy}) — ` +
+          `the control itself is not hit-testable.`
+      );
+    }
     return centerOf(rect);
   }
 

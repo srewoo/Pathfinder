@@ -12,6 +12,14 @@ import type { MutationLedger } from './mutation-ledger';
 export interface SafetyHandle {
   dispose(): Promise<void>;
   abortedCount(): number;
+  /**
+   * Refusals that break the page rather than merely blocking a tracker.
+   *
+   * Surfaced through the port because the run reporter needs it: a run whose
+   * scripts were blocked did not test the app, and must not be reported as
+   * though it did.
+   */
+  criticalBlocks(): readonly string[];
 }
 
 export type SafetyInstallerFn = (

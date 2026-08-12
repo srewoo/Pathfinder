@@ -11,7 +11,6 @@
  * stability check is genuinely exercised.
  */
 import type {
-  Driver,
   DriverCapabilities,
   DriverPageSnapshot,
   DriverWithCapabilities,
@@ -440,9 +439,4 @@ export function createFakeDriver(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-/** Convenience: a driver typed as the narrow port, for call sites under test. */
-export function asDriver(d: FakeDriver): Driver {
-  return d;
 }

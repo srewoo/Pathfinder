@@ -60,24 +60,6 @@ export async function captureAuthCookies(_url: string): Promise<never> {
   );
 }
 
-/**
- * Save captured cookies to an execution preset.
- */
-export async function saveCookiesToPreset(presetId: string, cookies: AuthCookie[]): Promise<void> {
-  const preset = await executionPresetStorage.getById(presetId);
-  if (!preset) {
-    throw new Error(`Preset ${presetId} not found`);
-  }
-
-  await executionPresetStorage.upsert({
-    ...preset,
-    authCookies: cookies,
-    updatedAt: new Date().toISOString(),
-  });
-
-  log.info(`Saved ${cookies.length} auth cookies to preset "${preset.name}"`);
-}
-
 // ---------------------------------------------------------------------------
 // Cookie Injection — restore saved cookies before test execution
 // ---------------------------------------------------------------------------

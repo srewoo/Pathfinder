@@ -18,7 +18,16 @@ export function chunkText(text: string, _url: string): Chunk[] {
   const sections = splitBySections(text);
 
   let chunks: Chunk[];
-  if (sections.length > 1) {
+  // Use the section-aware path whenever a heading exists — not only when there are
+  // SEVERAL sections.
+  //
+  // The previous condition (`sections.length > 1`) sent every single-section
+  // document down `chunkByCharacters`, which does not carry `parentHeading`. One
+  // topic per page is the most common documentation shape, so heading context —
+  // which this file's own comments call important for retrieval — was being
+  // dropped for the majority of real pages, silently. Caught by the retrieval
+  // benchmark.
+  if (sections.length > 1 || (sections.length === 1 && sections[0].heading)) {
     chunks = chunkSections(sections);
   } else {
     chunks = chunkByCharacters(text);

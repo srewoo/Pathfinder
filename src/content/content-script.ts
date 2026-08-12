@@ -812,8 +812,8 @@ async function handleMessage(message: ContentScriptMessage): Promise<unknown> {
     }
 
     case 'REVEAL_PAGE_CONTENT': {
-      await revealPageContent();
-      return { type: 'REVEAL_DONE' } satisfies ContentScriptResponse;
+      const revealed = await revealPageContent();
+      return { type: 'REVEAL_DONE', payload: revealed } satisfies ContentScriptResponse;
     }
 
     case 'GET_DOM_SNAPSHOT':

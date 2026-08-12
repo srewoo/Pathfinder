@@ -42,7 +42,7 @@ export function ExplorerPanel() {
 
       {store.error && (
         <div className="p-2.5 bg-error/10 border border-error/20 rounded-lg">
-          <p className="text-xs text-error">{store.error}</p>
+          <p className="text-xs text-error-text">{store.error}</p>
         </div>
       )}
 
@@ -56,7 +56,7 @@ export function ExplorerPanel() {
           className="flex items-center justify-between gap-2 px-2.5 py-2 bg-surface-2 border border-border rounded-lg hover:border-border-light transition-colors text-left"
         >
           <span className="flex items-center gap-2 min-w-0">
-            <GitBranch size={12} className="text-primary-light flex-shrink-0" />
+            <GitBranch size={12} className="text-primary-text flex-shrink-0" />
             <span className="text-xs text-text-primary truncate">
               {store.flows.length} learned flow{store.flows.length === 1 ? '' : 's'}
             </span>

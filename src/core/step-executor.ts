@@ -16,6 +16,7 @@
  * disappears. Until then it keeps the boundary enforceable by lint.
  */
 import type { ExecutionStep } from '../storage/schemas';
+import type { Driver } from './driver';
 
 export interface StepOutcome {
   success: boolean;
@@ -31,9 +32,24 @@ export type CanExecuteFn = (tabId: number) => boolean;
 /** Releases any per-tab resources the driver layer is holding. */
 export type ReleaseTabFn = (tabId: number) => void;
 
+/** Runs a page script in a tab. Supplied by the driver layer. */
+export type EvaluateInTabFn = <T>(tabId: number, expression: string) => Promise<T>;
+
+/**
+ * The `Driver` bound to a tab.
+ *
+ * Returning `Driver` — a type core OWNS — is what keeps this a port rather than a
+ * leak: core depends on the interface it defined, and the driver layer supplies an
+ * implementation. State capture and the IR executor both need the full surface, not
+ * just `evaluate`.
+ */
+export type DriverForTabFn = (tabId: number) => Driver;
+
 let executor: StepExecutorFn | null = null;
 let canExecuteImpl: CanExecuteFn | null = null;
 let releaseImpl: ReleaseTabFn | null = null;
+let evaluateImpl: EvaluateInTabFn | null = null;
+let driverImpl: DriverForTabFn | null = null;
 
 /**
  * Install the execution implementation. Called once at startup by the driver
@@ -42,11 +58,43 @@ let releaseImpl: ReleaseTabFn | null = null;
 export function registerStepExecutor(
   fn: StepExecutorFn,
   canExec: CanExecuteFn,
-  release: ReleaseTabFn
+  release: ReleaseTabFn,
+  evaluate: EvaluateInTabFn,
+  driverFor: DriverForTabFn
 ): void {
   executor = fn;
   canExecuteImpl = canExec;
   releaseImpl = release;
+  evaluateImpl = evaluate;
+  driverImpl = driverFor;
+}
+
+/**
+ * The Driver for a tab.
+ *
+ * Throws when unregistered rather than returning a stub: a no-op driver would make
+ * oracles observe nothing and report silence as "all clear".
+ */
+export function driverForTab(tabId: number): Driver {
+  if (!driverImpl) {
+    throw new Error('No driver registered — the driver layer must call registerStepExecutor().');
+  }
+  return driverImpl(tabId);
+}
+
+/**
+ * Run a page script in a tab.
+ *
+ * Throws when unregistered rather than returning undefined: a silent no-op here
+ * would make state isolation appear to succeed while clearing nothing.
+ */
+export function evaluateInTab<T>(tabId: number, expression: string): Promise<T> {
+  if (!evaluateImpl) {
+    return Promise.reject(
+      new Error('No page evaluator registered — the driver layer must call registerStepExecutor().')
+    );
+  }
+  return evaluateImpl<T>(tabId, expression);
 }
 
 /** Test/teardown helper — restores the unregistered state. */
@@ -54,6 +102,8 @@ export function clearStepExecutor(): void {
   executor = null;
   canExecuteImpl = null;
   releaseImpl = null;
+  evaluateImpl = null;
+  driverImpl = null;
 }
 
 /**
@@ -65,10 +115,6 @@ export function clearStepExecutor(): void {
  */
 export function releaseTab(tabId: number): void {
   releaseImpl?.(tabId);
-}
-
-export function isStepExecutorRegistered(): boolean {
-  return executor !== null;
 }
 
 /**

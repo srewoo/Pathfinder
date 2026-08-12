@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Play, Trash2, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
-import type { TestCase, Flow } from '../../../storage/schemas';
+import type { TestCase } from '../../../storage/schemas';
 import { Badge } from '../shared/Badge';
 import { StatusIndicator } from '../shared/StatusIndicator';
 import { Button } from '../shared/Button';
@@ -88,7 +88,7 @@ export function TestCaseList({
                   <Button
                     variant="ghost"
                     size="xs"
-                    className="text-error hover:text-error"
+                    className="text-error-text hover:text-error-text"
                     icon={<Trash2 size={10} />}
                     onClick={() => { onDeleteSelected(); setConfirmingBulkDelete(false); }}
                   >
@@ -102,7 +102,7 @@ export function TestCaseList({
                 <Button
                   variant="ghost"
                   size="xs"
-                  className="text-error hover:text-error"
+                  className="text-error-text hover:text-error-text"
                   icon={<Trash2 size={10} />}
                   onClick={() => setConfirmingBulkDelete(true)}
                   disabled={selectedTestIds.length === 0}
@@ -238,7 +238,7 @@ export function TestCaseList({
                         <ol className="mt-1.5 space-y-0.5">
                           {tc.steps.map((step, i) => (
                             <li key={i} className="text-2xs text-text-muted flex gap-1.5 items-start">
-                              <span className="text-primary-light font-mono">{i + 1}.</span>
+                              <span className="text-primary-text font-mono">{i + 1}.</span>
                               {tc.stepConfidence?.[i] && (
                                 <span className="mt-[3px]">
                                   <StepConfidenceDot confidence={tc.stepConfidence[i]} />
@@ -269,19 +269,6 @@ export function TestCaseList({
           }
         }}
       />
-    </div>
-  );
-}
-
-export function FlowList({ flows }: { flows: Flow[] }) {
-  return (
-    <div className="space-y-1">
-      {flows.map((flow) => (
-        <div key={flow.flowId} className="p-2 bg-surface-2 border border-border rounded-lg">
-          <p className="text-xs font-medium text-text-primary">{flow.name}</p>
-          <p className="text-2xs text-text-muted">{flow.steps.length} steps</p>
-        </div>
-      ))}
     </div>
   );
 }

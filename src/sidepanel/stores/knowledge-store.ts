@@ -8,6 +8,14 @@ interface KnowledgeState {
   documents: CrawledDocument[];
   vectorCount: number;
   crawlUrl: string;
+  /**
+   * Render pages in a real tab before extracting.
+   *
+   * Needed for SPA documentation sites, which return an empty shell to a plain
+   * fetch, and for credential-gated docs (the tab carries the user's session).
+   * Slower, so it is opt-in rather than default.
+   */
+  renderJavaScript: boolean;
   isCrawling: boolean;
   isExporting: boolean;
   isImporting: boolean;
@@ -18,6 +26,7 @@ interface KnowledgeState {
   justCompleted: { docCount: number; vectorCount: number } | null;
 
   setCrawlUrl: (url: string) => void;
+  setRenderJavaScript: (render: boolean) => void;
   startCrawl: () => Promise<void>;
   loadDocuments: () => Promise<void>;
   clearKnowledge: () => Promise<void>;
@@ -33,6 +42,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   documents: [],
   vectorCount: 0,
   crawlUrl: '',
+  renderJavaScript: false,
   isCrawling: false,
   isExporting: false,
   isImporting: false,
@@ -43,13 +53,15 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
 
   setCrawlUrl: (url) => set({ crawlUrl: url }),
 
+  setRenderJavaScript: (renderJavaScript) => set({ renderJavaScript }),
+
   startCrawl: async () => {
-    const { crawlUrl } = get();
+    const { crawlUrl, renderJavaScript } = get();
     if (!crawlUrl) return;
     set({ isCrawling: true, error: null, progress: null, justCompleted: null });
     const resp = await sendToBackground<{ success: boolean; error?: string }>({
       type: 'START_CRAWL',
-      payload: { url: crawlUrl },
+      payload: { url: crawlUrl, renderJavaScript },
     });
     if (!resp?.success) {
       set({ isCrawling: false, error: resp?.error ?? 'Failed to start crawl' });

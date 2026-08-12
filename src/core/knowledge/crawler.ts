@@ -772,13 +772,15 @@ async function seedAuthCookies(
   // produces a knowledge base full of login pages, which then poisons every
   // downstream generation step with bogus context.
   //
-  // Fixed properly when Phase 3 (§4) moves crawling into tab-backed job steps,
-  // where a CDP session is available. Until then, use `extraHeaders` with a
-  // bearer token for authenticated documentation.
+  // SUPPORTED ALTERNATIVE: enable `renderJavaScript`. The rendered path drives a
+  // real tab, which carries the user's own session — so credential-gated docs
+  // crawl correctly with no cookie-jar write at all. That is strictly better than
+  // the mechanism §7.3 removed, not a workaround for it.
   log.warn(
-    `Cookie-based crawl auth is unsupported (fix.md §7.3): ${cookies.length} cookie(s) ` +
-      `ignored for ${startUrl}. Use extraHeaders (e.g. Authorization) instead, or crawl ` +
-      `only public documentation.`
+    `Cookie-jar seeding was removed (fix.md §7.3): ${cookies.length} cookie(s) ignored for ` +
+      `${startUrl}. For authenticated docs, enable "Render JavaScript" — the crawl then runs ` +
+      `in a real tab using your existing session. An Authorization header via extraHeaders ` +
+      `also works.`
   );
   return 0;
 }

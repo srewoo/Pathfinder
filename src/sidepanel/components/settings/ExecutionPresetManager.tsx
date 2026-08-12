@@ -326,7 +326,7 @@ export function ExecutionPresetManager() {
                 <ol className="space-y-0.5">
                   {preset.setupSteps.map((step, index) => (
                     <li key={`${preset.id}-${index}`} className="flex gap-1.5 text-2xs text-text-muted">
-                      <span className="font-mono text-primary-light">{index + 1}.</span>
+                      <span className="font-mono text-primary-text">{index + 1}.</span>
                       <span>{step}</span>
                     </li>
                   ))}

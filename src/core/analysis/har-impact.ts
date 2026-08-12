@@ -195,29 +195,67 @@ export async function analyzeHARImpact(
  * Format the coverage report as a human-readable summary.
  */
 export function formatHARImpactReport(report: HARImpactReport): string {
-  const lines: string[] = [
-    `## API Coverage Report`,
-    ``,
-    `**Coverage:** ${report.summary.coveredEndpoints}/${report.summary.totalEndpoints} endpoints (${report.summary.coveragePercent}%)`,
-    ``,
-  ];
+  const { coveredEndpoints, totalEndpoints, coveragePercent } = report.summary;
+  const lines: string[] = ['# API Coverage', ''];
+
+  if (totalEndpoints === 0) {
+    lines.push('No API endpoints have been discovered yet.', '');
+    lines.push(
+      'Endpoints come from exploration (what the app calls) and are matched against ' +
+        'traffic captured while tests run. Explore the app first, then run tests.'
+    );
+    return lines.join('\n');
+  }
+
+  lines.push(`**${coveredEndpoints} of ${totalEndpoints} endpoints exercised (${coveragePercent}%)**`, '');
 
   if (report.gaps.length > 0) {
-    lines.push(`### Untested Endpoints (${report.gaps.length})`, ``);
+    // Gaps first: the untested endpoints are the actionable half of this report.
+    lines.push(`## Untested endpoints (${report.gaps.length})`, '');
+    lines.push('| Method | Endpoint | Discovered on |');
+    lines.push('|---|---|---|');
     for (const gap of report.gaps) {
-      const pages = gap.explorationPages.slice(0, 2).join(', ');
-      lines.push(`- \`${gap.method} ${gap.endpoint}\` — discovered on: ${pages}`);
+      const pages = gap.explorationPages.slice(0, 2).map(shortenUrl).join(', ') ||
+        '_unknown_';
+      const more = gap.explorationPages.length > 2 ? ` +${gap.explorationPages.length - 2}` : '';
+      lines.push(`| ${gap.method} | \`${gap.endpoint}\` | ${pages}${more} |`);
     }
-    lines.push(``);
+    lines.push('');
   }
 
-  if (report.endpoints.some((e) => e.isCovered)) {
-    lines.push(`### Covered Endpoints`, ``);
-    for (const ep of report.endpoints.filter((e) => e.isCovered)) {
-      const tests = ep.coveredByTestTitles.slice(0, 3).join(', ');
-      lines.push(`- \`${ep.method} ${ep.endpoint}\` — tested by: ${tests}`);
+  const covered = report.endpoints.filter((e) => e.isCovered);
+  if (covered.length > 0) {
+    lines.push(`## Covered endpoints (${covered.length})`, '');
+    lines.push('| Method | Endpoint | Exercised by |');
+    lines.push('|---|---|---|');
+    for (const ep of covered) {
+      const tests = ep.coveredByTestTitles.slice(0, 2).join(', ') || '_a test_';
+      const more = ep.coveredByTestTitles.length > 2 ? ` +${ep.coveredByTestTitles.length - 2}` : '';
+      lines.push(`| ${ep.method} | \`${ep.endpoint}\` | ${tests}${more} |`);
     }
+    lines.push('');
   }
+
+  lines.push('## How this is measured', '');
+  lines.push(
+    '- The denominator is endpoints **exploration observed the app calling** — not every ' +
+      'endpoint the API has. An endpoint no page ever calls cannot appear here.',
+    '- The numerator is endpoints seen in traffic captured while tests ran, so a test ' +
+      'that never reached its page contributes nothing.',
+    '- 100% here means "every endpoint we know about was hit", not "every endpoint was ' +
+      'verified" — see API Contracts for what the responses actually did.'
+  );
 
   return lines.join('\n');
+}
+
+/** Keep a discovered-on URL short enough to read inside a panel table. */
+function shortenUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.length > 28 ? `…${u.pathname.slice(-27)}` : u.pathname;
+    return path || '/';
+  } catch {
+    return url.length > 30 ? `…${url.slice(-29)}` : url;
+  }
 }

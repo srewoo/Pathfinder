@@ -150,12 +150,12 @@ export function FlowsPanel() {
           <button
             type="button"
             onClick={() => goTo('explore')}
-            className="text-2xs text-primary-light hover:underline mt-1"
+            className="text-2xs text-primary-text hover:underline mt-1"
           >
             Go to Explore → Start Exploration first
           </button>
         )}
-        {learnError && <p className="text-2xs text-error mt-3 max-w-xs">{learnError}</p>}
+        {learnError && <p className="text-2xs text-error-text mt-3 max-w-xs">{learnError}</p>}
       </div>
     );
   }
@@ -173,7 +173,7 @@ export function FlowsPanel() {
 
       {learnError && (
         <div className="p-2.5 bg-error/10 border border-error/20 rounded-lg">
-          <p className="text-xs text-error">{learnError}</p>
+          <p className="text-xs text-error-text">{learnError}</p>
         </div>
       )}
 
@@ -200,7 +200,7 @@ export function FlowsPanel() {
         <div className="flex-1" />
 
         <Button
-          variant={selectedFlowIds.size > 0 ? 'success' : 'ghost'}
+          variant={selectedFlowIds.size > 0 ? 'primary' : 'ghost'}
           size="xs"
           loading={progress?.mode === 'selected'}
           icon={<Wand2 size={10} />}
@@ -279,7 +279,7 @@ export function FlowsPanel() {
                   ) : (
                     <ChevronRight size={11} className="text-text-muted flex-shrink-0" />
                   )}
-                  <GitBranch size={11} className="text-primary-light flex-shrink-0" />
+                  <GitBranch size={11} className="text-primary-text flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <span className="text-xs font-medium text-text-primary">{flow.name}</span>
                     <Badge variant="neutral" className="ml-2">{flow.source}</Badge>
@@ -336,7 +336,7 @@ export function FlowsPanel() {
                         key={step.order}
                         className="flex items-start gap-2 text-2xs text-text-muted"
                       >
-                        <span className="text-primary-light font-mono w-4 flex-shrink-0">
+                        <span className="text-primary-text font-mono w-4 flex-shrink-0">
                           {step.order}.
                         </span>
                         <span className="font-mono text-text-secondary">{step.action}</span>

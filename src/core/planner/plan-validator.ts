@@ -12,6 +12,8 @@
 import type { ExecutionStep } from '../../storage/schemas';
 import type { InteractiveElement } from '../../storage/schemas';
 import { getPageSnapshot } from '../explorer/page-scanner';
+import { assessNavigationGrounding, isAbsoluteAppUrl, resolveNavigationTarget } from '../executor/navigation-target';
+import { loadGraph } from '../explorer/interaction-graph';
 import { sendToContentScript } from '../../messaging/messenger';
 import { createLogger } from '../../utils/logger';
 
@@ -44,10 +46,67 @@ export async function validateAndRepairPlan(
   const snapshot = await getPageSnapshot(tabId).catch(() => null);
   const elements: InteractiveElement[] = snapshot?.elements ?? [];
 
+  // Known routes, for judging whether a navigate target was observed or invented.
+  const graph = await loadGraph().catch(() => undefined);
+  const knownUrls = new Set<string>();
+  for (const node of graph?.nodes ?? []) {
+    knownUrls.add(node.url);
+    for (const tab of node.tabs ?? []) knownUrls.add(tab.url);
+  }
+
   const issues: ValidationIssue[] = [];
   const repairedSteps: ExecutionStep[] = [];
 
   for (const step of steps) {
+    // A navigate step carries a URL, not a selector, so it was skipped entirely —
+    // and a generated value like "/university/command-center" sailed through to
+    // execution, where it resolved against the extension and put the tab on
+    // chrome-extension://<id>/university/command-center. Repairing it here is
+    // cheaper than failing the run: the page under validation IS the app, so its
+    // URL is the right base.
+    if (step.action === 'navigate') {
+      if (step.value && !isAbsoluteAppUrl(step.value)) {
+        const target = resolveNavigationTarget(step.value, { currentUrl: snapshot?.url });
+        if (target.ok) {
+          issues.push({
+            stepOrder: step.order,
+            description: `navigate target "${step.value}" is not an absolute URL`,
+            selector: step.value,
+            fixedSelector: target.url,
+          });
+          repairedSteps.push({ ...step, value: target.url });
+        } else {
+          // Left as-is deliberately: the executor refuses it with a specific
+          // reason, which is more useful than a silently rewritten guess here.
+          issues.push({
+            stepOrder: step.order,
+            description: `navigate target cannot be resolved: ${target.error}`,
+            selector: step.value,
+          });
+          repairedSteps.push(step);
+        }
+        continue;
+      }
+      // Absolute already — but is it a URL this app actually serves? An
+      // unobserved target is reported, never rewritten: substituting a guess of
+      // our own would be the same error with a different author.
+      if (step.value) {
+        const grounding = assessNavigationGrounding(step.value, {
+          knownUrls,
+          mappedPageCount: graph?.nodes.length ?? 0,
+        });
+        if (!grounding.grounded) {
+          issues.push({
+            stepOrder: step.order,
+            description: `navigate target is not grounded in exploration data: ${grounding.reason}`,
+            selector: step.value,
+          });
+        }
+      }
+      repairedSteps.push(step);
+      continue;
+    }
+
     if (!step.selector || SKIP_ACTIONS.has(step.action)) {
       repairedSteps.push(step);
       continue;

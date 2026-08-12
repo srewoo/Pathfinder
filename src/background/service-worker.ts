@@ -23,6 +23,11 @@ import { parseOpenAPISpec, extractValidationRules } from '../core/openapi/openap
 import { compareScreenshots } from '../utils/visual-diff';
 import { verifyAuthState } from '../core/executor/auth-manager';
 import { generateHtmlReport } from '../utils/html-reporter';
+import { costBreakdown, onUsageChange, resetTokenUsage, restoreTokenUsage } from '../core/ai/token-tracker';
+import { formatCostReport } from '../core/ai/cost-report';
+import { analyzeObservedTraffic, formatObservedContractReport } from '../core/analysis/observed-contract';
+import { buildBaseline, diffAgainstBaseline, formatBaselineDiff } from '../core/analysis/api-baseline';
+import { clearBaseline, loadBaseline, saveBaseline } from '../storage/api-baseline-storage';
 import { toJUnitXml } from '../core/report/junit-export';
 import { approximateTestability, toExportRun } from '../core/report/result-adapter';
 import { buildRunTrace, formatTraceSummary, serializeTrace } from '../core/report/run-trace';
@@ -35,7 +40,6 @@ import { runAccessibilityAudit, formatA11yReport } from '../core/analysis/access
 import { validateAgainstSpec, formatContractReport } from '../core/analysis/api-contract-validator';
 import type { ParsedAPISpec } from '../core/openapi/openapi-parser';
 import { installPumpListener, resumeInterruptedJobs } from './job-pump';
-import { installScheduleListener, syncAlarms } from './scheduled-runs';
 import { installCrawlExecutors } from './crawl-job-executor';
 // Side-effect import: registers the CDP step executor with the core port
 // (fix.md §2/§3). Must happen before any step runs, so it lives at top level.
@@ -63,18 +67,31 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// Durable job pump and schedule listener. Registered at top level so a restarted
-// worker re-attaches both before any alarm can fire — alarms survive eviction,
-// listener registrations do not.
+// Token counters survive worker eviction. Chrome kills the worker after ~30s idle,
+// and without this the reported session cost silently resets to zero mid-run — and
+// the budget guard forgets everything already spent.
+const COST_KEY = 'pathfinder.cost.session';
+void (async () => {
+  try {
+    const stored = await chrome.storage.local.get(COST_KEY);
+    const saved = stored[COST_KEY] as { usage?: Record<string, number>; model?: string } | undefined;
+    if (saved?.usage) restoreTokenUsage(saved.usage, saved.model);
+  } catch { /* first run */ }
+})();
+onUsageChange((usage) => {
+  void chrome.storage.local.set({ [COST_KEY]: { usage, model: costBreakdown().model, savedAt: Date.now() } });
+});
+
+// Durable job pump. Registered at top level so a restarted worker re-attaches it
+// before any alarm can fire — alarms survive eviction, listener registrations do
+// not.
 installPumpListener();
-installScheduleListener();
 // Executors must be registered on EVERY worker start, before any alarm fires —
 // a restarted worker with no executor would fail a perfectly resumable job.
 installCrawlExecutors();
 void resumeInterruptedJobs().catch((err) =>
   log.warn('Could not check for interrupted jobs at startup', err)
 );
-void syncAlarms().catch((err) => log.warn('Could not sync schedule alarms', err));
 
 function startSWKeepalive(): void {
   // periodInMinutes: 0.5 = every 30 seconds — well within Chrome's 30s idle timeout
@@ -221,11 +238,33 @@ async function handleMessage(
         useLocalEmbeddings: settings.useLocalEmbeddings,
       });
 
+      // JS rendering: the crawler has always supported a tab-rendered path, but
+      // nothing exposed it — so SPA documentation sites crawled as empty shells.
+      // A dedicated background tab is created when requested.
+      //
+      // It also restores authenticated crawling. A real tab carries the user's own
+      // session, so credential-gated docs work WITHOUT writing to the cookie jar —
+      // which is what fix.md §7.3 removed. Better than the original mechanism, not
+      // a workaround for it.
+      const renderJavaScript = message.payload.renderJavaScript ?? false;
+      let renderTabId: number | undefined;
+      if (renderJavaScript) {
+        try {
+          const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+          renderTabId = tab.id;
+          log.info(`JS rendering enabled — crawling via background tab ${renderTabId}`);
+        } catch (err) {
+          log.warn('Could not create a render tab — falling back to static fetch', err);
+        }
+      }
+
       crawlSite(message.payload.url, aiClient, {
         maxDepth: 3,
         maxPages: settings.maxCrawlPages,
         skipEmbedRateLimit: settings.useLocalEmbeddings,
         describeImages: settings.describeImages,
+        renderJavaScript: renderJavaScript && renderTabId !== undefined,
+        tabId: renderTabId,
         signal: crawlSignal,
         onProgress: (progress) => {
           broadcastToSidebar({ type: 'CRAWL_PROGRESS', payload: progress });
@@ -239,6 +278,13 @@ async function handleMessage(
               type: 'CRAWL_COMPLETE',
               payload: { docCount: result.docCount, vectorCount: result.vectorCount, skippedCount: result.skippedCount },
             });
+          }
+        })
+        .finally(() => {
+          // The render tab must go whichever way the crawl ended, or a background
+          // tab leaks on every crawl (CLAUDE.md §11.1).
+          if (renderTabId !== undefined) {
+            chrome.tabs.remove(renderTabId).catch(() => undefined);
           }
         })
         .catch((err) => {
@@ -517,8 +563,10 @@ async function handleMessage(
         onTestComplete: async (result) => {
           // Stop screencast and attach frames to result
           const frames = await stopScreencast(tabId).catch(() => []);
+          // Typed field, not an `as any` cast — the player reads this, and an
+          // untyped field is how it stayed unread for so long.
           if (frames.length > 0) {
-            (result as any).screencastFrames = frames;
+            result.screencastFrames = frames;
           }
           broadcastToSidebar({
             type: 'TEST_COMPLETE',
@@ -1199,14 +1247,44 @@ async function handleMessage(
 
     // ── Analysis: API Contract Validation ────────────────────────────────
     case 'VALIDATE_API_CONTRACTS': {
-      if (!parsedApiSpec) {
-        return { success: false, error: 'No OpenAPI spec loaded. Upload a spec first via Settings.' };
-      }
       try {
         const results = await getRunResults(message.payload?.runId);
         const allHar = results.flatMap((r) => (r.harEntries ?? []) as import('../storage/schemas').CapturedNetworkEntry[]);
         if (allHar.length === 0) {
-          return { success: false, error: 'No HAR entries captured. Run tests with CDP enabled first.' };
+          return { success: false, error: 'No API traffic captured. Run tests with the debugger attached first.' };
+        }
+        // No spec is no longer a dead end. The traffic captured during every run can
+        // be compared against ITSELF — mixed statuses, mixed content types, server
+        // errors — which needs no spec and was previously thrown away.
+        if (!parsedApiSpec) {
+          // A baseline beats self-consistency when one exists: it can say a field
+          // VANISHED, which comparing a run against itself never can.
+          const origin = originOfEntries(allHar);
+          const baseline = origin ? await loadBaseline(origin) : undefined;
+          if (baseline && origin) {
+            const diff = diffAgainstBaseline(baseline, buildBaseline(allHar, { origin }));
+            broadcastToSidebar({
+              type: 'CONTRACT_VALIDATION_COMPLETE',
+              payload: {
+                violations: diff.summary.breaking + diff.summary.additive,
+                errors: diff.summary.breaking,
+                warnings: diff.summary.additive,
+                report: formatBaselineDiff(diff),
+              },
+            });
+            return { success: true };
+          }
+          const observed = analyzeObservedTraffic(allHar);
+          broadcastToSidebar({
+            type: 'CONTRACT_VALIDATION_COMPLETE',
+            payload: {
+              violations: observed.findings.length,
+              errors: observed.findings.filter((f) => f.severity === 'high').length,
+              warnings: observed.findings.filter((f) => f.severity !== 'high').length,
+              report: formatObservedContractReport(observed),
+            },
+          });
+          return { success: true };
         }
         const report = validateAgainstSpec(allHar, parsedApiSpec);
         const formatted = formatContractReport(report);
@@ -1225,9 +1303,67 @@ async function handleMessage(
       }
     }
 
+    case 'CAPTURE_API_BASELINE': {
+      const results = await getRunResults();
+      const allHar = results.flatMap((r) => (r.harEntries ?? []) as import('../storage/schemas').CapturedNetworkEntry[]);
+      const withSchema = allHar.filter((e) => e.responseSchema);
+      if (withSchema.length === 0) {
+        return {
+          success: false,
+          error:
+            'No response schemas captured. Run tests with the debugger attached — only ' +
+            'JSON responses under 256KB from allowlisted origins contribute a schema.',
+        };
+      }
+      const origin = originOfEntries(allHar);
+      if (!origin) return { success: false, error: 'Could not determine the app origin from captured traffic.' };
+      const baseline = buildBaseline(allHar, { origin, label: `captured from ${results.length} result(s)` });
+      await saveBaseline(baseline);
+      return { success: true, summary: { endpoints: Object.keys(baseline.endpoints).length, origin } };
+    }
+
+    case 'CLEAR_API_BASELINE': {
+      const results = await getRunResults();
+      const origin = originOfEntries(
+        results.flatMap((r) => (r.harEntries ?? []) as import('../storage/schemas').CapturedNetworkEntry[])
+      );
+      if (origin) await clearBaseline(origin);
+      return { success: true };
+    }
+
+    case 'GET_COST_REPORT': {
+      const settings = await settingsStorage.get();
+      const report = formatCostReport(
+        { startedAt: (await chrome.storage.local.get(COST_KEY))[COST_KEY]?.savedAt
+            ? new Date((await chrome.storage.local.get(COST_KEY))[COST_KEY].savedAt).toISOString()
+            : undefined },
+        settings.model
+      );
+      broadcastToSidebar({ type: 'COST_REPORT_COMPLETE', payload: { report } });
+      return { success: true };
+    }
+
+    case 'RESET_COST_COUNTERS': {
+      resetTokenUsage();
+      await chrome.storage.local.remove(COST_KEY);
+      return { success: true };
+    }
+
     default:
       return { success: false, error: 'Unknown message type' };
   }
+}
+
+/** The origin most of the captured traffic belongs to — the app under test. */
+function originOfEntries(entries: readonly { url: string }[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const e of entries) {
+    try {
+      const origin = new URL(e.url).origin;
+      counts.set(origin, (counts.get(origin) ?? 0) + 1);
+    } catch { /* skip unparseable */ }
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 }
 
 async function getSelectedTests(testCaseIds: string[]) {

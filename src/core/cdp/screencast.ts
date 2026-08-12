@@ -11,7 +11,7 @@ import { createLogger } from '../../utils/logger';
 
 const log = createLogger('screencast');
 
-interface ScreencastFrame {
+export interface ScreencastFrame {
   data: string;         // base64 PNG
   timestamp: number;    // ms since recording start
   sessionId: number;    // CDP session frame ID
@@ -82,20 +82,6 @@ export async function stopScreencast(tabId: number): Promise<ScreencastFrame[]> 
 
   log.info(`Screencast stopped for tab ${tabId}: ${session.frames.length} frames captured`);
   return session.frames;
-}
-
-/**
- * Check if screencast is active for a tab.
- */
-export function isScreencastActive(tabId: number): boolean {
-  return activeSessions.has(tabId);
-}
-
-/**
- * Get current frame count for a tab.
- */
-export function getFrameCount(tabId: number): number {
-  return activeSessions.get(tabId)?.frames.length ?? 0;
 }
 
 // Handle incoming screencast frames from CDP

@@ -1,4 +1,5 @@
 import type { AIClientInterface, Message, ChatOptions, MessageContent } from './ai-client';
+import { recordChatUsage } from './token-tracker';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('google');
@@ -64,12 +65,20 @@ export class GoogleProvider implements AIClientInterface {
       candidates: Array<{
         content: { parts: Array<{ text: string }> };
       }>;
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
     };
 
     const text = data.candidates[0]?.content?.parts[0]?.text;
     if (!text) throw new Error('Google AI returned empty response');
 
-    log.debug('Chat completed', { model: this.model });
+    if (data.usageMetadata) {
+      recordChatUsage(
+        this.model,
+        data.usageMetadata.promptTokenCount ?? 0,
+        data.usageMetadata.candidatesTokenCount ?? 0
+      );
+    }
+    log.debug('Chat completed', { model: this.model, usage: data.usageMetadata });
     return text;
   }
 

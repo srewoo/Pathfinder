@@ -85,8 +85,8 @@ function TimelineStep({ step, isLast }: { step: StepResult; isLast: boolean }) {
     <div className={`flex gap-2 ${isLast ? '' : 'pb-1.5'}`}>
       {/* Icon */}
       <div className="flex-shrink-0 z-10 bg-surface-2">
-        {step.status === 'passed' && <CheckCircle size={18} className="text-success" />}
-        {step.status === 'failed' && <XCircle size={18} className="text-error" />}
+        {step.status === 'passed' && <CheckCircle size={18} className="text-success-text" />}
+        {step.status === 'failed' && <XCircle size={18} className="text-error-text" />}
         {step.status === 'skipped' && <MinusCircle size={18} className="text-text-muted" />}
       </div>
 
@@ -114,7 +114,7 @@ function TimelineStep({ step, isLast }: { step: StepResult; isLast: boolean }) {
         {showDetails && (
           <div className="mt-1.5 space-y-1">
             {step.error && (
-              <div className="text-2xs bg-error/10 border border-error/20 rounded px-2 py-1 text-error font-mono break-all">
+              <div className="text-2xs bg-error/10 border border-error/20 rounded px-2 py-1 text-error-text font-mono break-all">
                 {step.error}
               </div>
             )}
@@ -147,9 +147,9 @@ function TimelineStep({ step, isLast }: { step: StepResult; isLast: boolean }) {
 
 function StatusBadge({ status }: { status: string }) {
   const config = {
-    passed: { bg: 'bg-success/15', text: 'text-success', label: 'PASS' },
-    failed: { bg: 'bg-error/15', text: 'text-error', label: 'FAIL' },
-    error: { bg: 'bg-warning/15', text: 'text-warning', label: 'ERR' },
+    passed: { bg: 'bg-success/15', text: 'text-success-text', label: 'PASS' },
+    failed: { bg: 'bg-error/15', text: 'text-error-text', label: 'FAIL' },
+    error: { bg: 'bg-warning/15', text: 'text-warning-text', label: 'ERR' },
     running: { bg: 'bg-info/15', text: 'text-info', label: 'RUN' },
   }[status] ?? { bg: 'bg-surface-3', text: 'text-text-muted', label: '?' };
 

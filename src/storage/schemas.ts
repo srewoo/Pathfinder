@@ -1,3 +1,5 @@
+import type { InferredSchema } from '../core/analysis/schema-infer';
+
 export type AIProvider = 'openai' | 'anthropic' | 'google';
 export type Theme = 'dark' | 'light';
 
@@ -48,6 +50,14 @@ export interface Settings {
   testPersonality?: TestPersonalityId;
   /** Free-text personality description when testPersonality is 'custom'. */
   customPersonalityPrompt?: string;
+  /**
+   * Retain redacted response bodies for 24h to debug contract findings (ADR 001 phase 4).
+   *
+   * Off by default. Schemas alone drive baseline diffing; bodies are only for a human
+   * inspecting why a check fired. Values are redacted before storage and never included
+   * in an export.
+   */
+  retainResponseBodies?: boolean;
 }
 
 export interface VectorRecord {
@@ -185,6 +195,30 @@ export interface PageAction {
   kind: 'navigation' | 'action' | 'toggle' | 'menu' | 'external';
 }
 
+/**
+ * What became available once something was selected.
+ *
+ * Bulk actions are usually the highest-consequence controls on a list page and
+ * they do not exist until a row is checked, so nothing that only reads the
+ * initial DOM can find them.
+ */
+export interface SelectionDiscovery {
+  /** Selector of the checkbox/toggle that was clicked. */
+  triggerSelector: string;
+  /** Human label for the trigger (aria-label, nearby text, or the selector). */
+  triggerLabel: string;
+  /** Controls that appeared only after selection. */
+  revealedActions: PageAction[];
+  /**
+   * Whether the toggle was successfully returned to its original state.
+   *
+   * Recorded rather than assumed: a page left with rows selected changes what
+   * every later step on that page does, and a reader needs to know when that
+   * happened instead of inferring it from odd downstream results.
+   */
+  resetOk: boolean;
+}
+
 /** A data table or list discovered on a page */
 export interface DataTable {
   /** CSS selector of the table or list container */
@@ -265,6 +299,8 @@ export interface PageNode {
   actions?: PageAction[];
   /** Data tables or lists found on this page */
   dataTables?: DataTable[];
+  /** Bulk-action toolbars discovered by selecting rows on this page */
+  selectionActions?: SelectionDiscovery[];
   /** API endpoints observed during page load */
   apiEndpoints?: ObservedAPI[];
   /** Whether this page appears to be an error page (404, 500, etc.) */
@@ -574,6 +610,23 @@ export interface CapturedNetworkEntry {
   mimeType: string;
   duration: number;
   bodySize: number;
+  /**
+   * Request body, when the browser captured one (10KB cap).
+   *
+   * Already captured in memory by the CDP client and previously dropped at this
+   * boundary. Kept now because GraphQL endpoint identity depends on it — every
+   * operation shares one URL, so `operationName` is the only way to tell them apart.
+   */
+  requestBody?: string;
+  /**
+   * Structure of the response body — NOT the body itself (ADR 001).
+   *
+   * Storing the shape instead of the payload is what makes baseline diffing safe to
+   * ship: a schema holds no tokens, emails or salaries, is a few hundred bytes for a
+   * 400KB list, and only changes when the contract changes. Two bodies differ on every
+   * run through ids and timestamps.
+   */
+  responseSchema?: InferredSchema;
 }
 
 export interface TestResult {
@@ -589,7 +642,30 @@ export interface TestResult {
   errorMessage?: string;
   domSnapshot?: string;
   healingAttempts: HealingAttempt[];
+  /**
+   * Findings from the state-diff oracles (core/analysis/state-oracles.ts).
+   *
+   * These are defects the test's own assertions did not necessarily catch — e.g.
+   * the UI reported success while the server was never contacted. A test can PASS
+   * and still carry findings, which is exactly the point: "no assertion failed" is
+   * a weaker statement than "nothing went wrong".
+   */
+  oracleFindings?: Array<{
+    kind: string;
+    severity: 'high' | 'medium' | 'low';
+    message: string;
+    evidence: string;
+    stepOrder?: number;
+    url?: string;
+  }>;
   runId: string;
+  /**
+   * Screencast frames captured while this test ran, when recording was enabled.
+   *
+   * Was attached with an `as any` cast and read by nothing: frames were captured,
+   * persisted, and unwatchable. Typed here so the player can find them.
+   */
+  screencastFrames?: Array<{ data: string; timestamp: number; sessionId: number }>;
   /** Network HAR entries captured via CDP during test execution */
   harEntries?: CapturedNetworkEntry[];
   /** Visual diff result when comparing against a baseline screenshot */
@@ -641,6 +717,48 @@ export interface InteractiveElement {
   name?: string;
   /** Whether this is a contenteditable element */
   contentEditable?: boolean;
+  /**
+   * `href` for anchors, absolute where the browser resolved it.
+   *
+   * Carried so a link can be judged by where it GOES, not only by what it says.
+   * A `<a href="/logout"><i class="icon"></i></a>` has no text and no label; the
+   * URL is the only thing that reveals it ends the session.
+   */
+  href?: string;
+  /**
+   * True when this element is the representative click target for a clickable
+   * table/grid row — the way list pages reach a record's detail page.
+   *
+   * One per row, not one per cell: a measured page had 450 pointer-cursor cells
+   * that were really 50 rows × 9 cells, and the rows carried no `<a href>` at all,
+   * so nothing but a click could discover the destination.
+   */
+  rowNavigation?: boolean;
+  /**
+   * Class tokens of icons inside this element (e.g. `bi-trash`, `fa-pencil`).
+   *
+   * The only signal available for an icon-only control. A `<button>` whose sole
+   * content is `<i class="oxd-icon bi-trash">` has no text, no aria-label and no
+   * title, so a text-based danger check is blind to it — on a real app, 50 delete
+   * buttons per page looked identical to 50 harmless ones.
+   */
+  iconClasses?: string[];
+  /**
+   * The element's tabindex, when it has one.
+   *
+   * A design-system dropdown is often a `<div tabindex="0">` with no role. It is
+   * focusable and clickable for a user, so tabindex is what distinguishes it from
+   * decorative markup.
+   */
+  tabIndex?: number;
+  /**
+   * True when the element sits inside a table/grid/list region.
+   *
+   * Used to tell a row-selection checkbox (safe to toggle — it changes only
+   * client-side selection) apart from a settings toggle (which often persists
+   * immediately via PATCH). The two look identical in the DOM otherwise.
+   */
+  inDataRegion?: boolean;
   visible: boolean;
   position: { x: number; y: number; width: number; height: number };
 }
@@ -722,6 +840,19 @@ export interface ExplorationCoverage {
    *    coverage deduction.
    */
   coverageRatio: number;
+  /**
+   * RISK-WEIGHTED coverage in [0,1].
+   *
+   * `coverageRatio` above is self-referential — it measures how much of what the
+   * crawler discovered it went on to visit, so an explorer that finds one page and
+   * visits it scores 1.0. This weights pages by the risk they carry (forms,
+   * required and sensitive fields, observed mutating endpoints, wizards, auth
+   * gating), so skipping a checkout page costs far more than skipping an about
+   * page. See core/explorer/risk-coverage.ts.
+   */
+  riskCoverageRatio?: number;
+  /** Unexplored pages carrying above-average risk. The actionable number. */
+  highRiskGaps?: number;
   /**
    * True when the run was scoped to a single page (no link following). Signals
    * consumers that `coverageRatio` measures only the anchored page and that

@@ -11,10 +11,10 @@ interface StatusIndicatorProps {
 }
 
 const config: Record<Status, { icon: React.ElementType; color: string; label: string }> = {
-  passed: { icon: CheckCircle2, color: 'text-success', label: 'Passed' },
-  failed: { icon: XCircle, color: 'text-error', label: 'Failed' },
-  error: { icon: AlertCircle, color: 'text-error', label: 'Error' },
-  running: { icon: Loader2, color: 'text-primary-light', label: 'Running' },
+  passed: { icon: CheckCircle2, color: 'text-success-text', label: 'Passed' },
+  failed: { icon: XCircle, color: 'text-error-text', label: 'Failed' },
+  error: { icon: AlertCircle, color: 'text-error-text', label: 'Error' },
+  running: { icon: Loader2, color: 'text-primary-text', label: 'Running' },
   pending: { icon: Clock, color: 'text-text-muted', label: 'Pending' },
   skipped: { icon: MinusCircle, color: 'text-text-muted', label: 'Skipped' },
 };

@@ -115,13 +115,3 @@ export const executionPresetStorage = {
     return next;
   },
 };
-
-export const crawlStorage = {
-  async getCrawlUrl(): Promise<string | undefined> {
-    return chromeGet<string>(STORAGE_KEYS.crawlUrl);
-  },
-
-  async setCrawlUrl(url: string): Promise<void> {
-    await chromeSet(STORAGE_KEYS.crawlUrl, url);
-  },
-};

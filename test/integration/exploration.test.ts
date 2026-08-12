@@ -23,14 +23,31 @@ vi.mock('../../src/messaging/messenger', () => ({
   getActiveTabId: vi.fn().mockResolvedValue(1),
 }));
 
-vi.mock('../../src/core/explorer/page-scanner', () => ({
+vi.mock('../../src/core/explorer/page-scanner', () => {
+  // The explorer calls partitionExplorationTargets; these tests drive
+  // selectExplorationTargets. Delegating keeps one stub as the single source of
+  // truth for "what is on this page" instead of two that can disagree.
+  const selectExplorationTargets = vi.fn().mockReturnValue([]);
+  return {
   scanPage: vi.fn().mockResolvedValue([]),
   scanFormFields: vi.fn().mockResolvedValue([]),
   scanPageLinks: vi.fn().mockResolvedValue([]),
   scanPageMetadata: vi.fn().mockResolvedValue({ headings: [] }),
-  revealPageContent: vi.fn().mockResolvedValue(undefined),
+  // Returns the elements seen during the reveal sweep — an ARRAY, always.
+  revealPageContent: vi.fn().mockResolvedValue([]),
   getPageSnapshot: vi.fn().mockResolvedValue({ url: START, title: 'Home' }),
-  selectExplorationTargets: vi.fn().mockReturnValue([]),
+  selectExplorationTargets,
+  partitionExplorationTargets: vi.fn((els: unknown, visited: unknown, opts: unknown) => ({
+    targets: (selectExplorationTargets as (a: unknown, b: unknown, c: unknown) => unknown[])(els, visited, opts),
+    sessionEnding: [],
+    destructive: [],
+    unidentified: [],
+    overCap: 0,
+    rowNavigationsSkipped: 0,
+  })),
+  // Selection/bulk-action discovery is covered on its own in
+  // test/unit/core/selection-explorer.test.ts; neutralised here.
+  selectToggleTargets: vi.fn().mockReturnValue([]),
   detectModal: vi.fn().mockResolvedValue({ found: false }),
   scanPageActions: vi.fn().mockResolvedValue([]),
   scanDataTables: vi.fn().mockResolvedValue([]),
@@ -38,7 +55,8 @@ vi.mock('../../src/core/explorer/page-scanner', () => ({
   scanFieldErrors: vi.fn().mockResolvedValue([]),
   scanWizardSteps: vi.fn().mockResolvedValue([]),
   scanConditionalFields: vi.fn().mockResolvedValue([]),
-}));
+  };
+});
 
 // Execution now routes through the CDP driver (fix.md §3), not the content
 // script. Actions are asserted against this mock instead of EXECUTE_ACTION
@@ -47,6 +65,10 @@ vi.mock('../../src/core/step-executor', () => ({
   executeStep: vi.fn().mockResolvedValue({ success: true }),
   canExecuteStep: vi.fn().mockReturnValue(true),
   releaseTab: vi.fn(),
+  // The explorer reads the post-click URL through the evaluator now (a full DOM
+  // snapshot per click dominated the cost of a page). Rejecting here exercises the
+  // snapshot fallback, which is what the URL assertions below rely on.
+  evaluateInTab: vi.fn().mockRejectedValue(new Error('no evaluator in this harness')),
 }));
 vi.mock('../../src/core/explorer/action-ranker', () => ({ getAgentActions: vi.fn().mockResolvedValue([]) }));
 vi.mock('../../src/core/explorer/spa-detector', () => ({ detectSPARoutes: vi.fn().mockResolvedValue([]) }));
@@ -66,6 +88,14 @@ vi.mock('../../src/core/executor/auth-manager', () => ({
 
 vi.mock('../../src/core/analysis/accessibility-audit', () => ({
   runAccessibilityAudit: vi.fn().mockResolvedValue({ issues: [], summary: { total: 0, critical: 0, serious: 0 } }),
+}));
+
+// Checkpoint persistence is stubbed so a resume can be driven deterministically.
+// `loadCheckpoint` returning undefined (the default) is the "no checkpoint" case.
+vi.mock('../../src/storage/checkpoint-storage', () => ({
+  loadCheckpoint: vi.fn().mockResolvedValue(undefined),
+  persistCheckpoint: vi.fn().mockResolvedValue(undefined),
+  clearCheckpoint: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Real interaction-graph, but stub persistence (no IndexedDB writes).
@@ -121,6 +151,8 @@ function clickedSelectors(): string[] {
     .map(([step]) => step.selector ?? '');
 }
 const graphMod = await import('../../src/core/explorer/interaction-graph');
+const checkpointStore = await import('../../src/storage/checkpoint-storage');
+const { createCheckpoint, hashOptions } = await import('../../src/core/explorer/exploration-checkpoint');
 
 describe('exploreApp — single-page vs full-app coverage', () => {
   let chromeMock: ReturnType<typeof makeChromeMock>;
@@ -515,5 +547,169 @@ describe('exploreApp — coverage / health reporting', () => {
     expect(coverage.pagesScanned).toBe(0);
     expect(graph.nodes).toHaveLength(0);
     expect(coverage.warnings.some((w) => w.includes('Broken/error page'))).toBe(true);
+  });
+});
+
+describe('exploreApp — resuming an interrupted run (fix.md §4)', () => {
+  /**
+   * The point of writing checkpoints. Before this was wired, the frontier was
+   * persisted on every page and then ignored: every interrupted crawl restarted
+   * from the seed, paying the cost of durability for none of the benefit.
+   */
+  const OPTS = { maxDepth: 2, maxPages: 10, submitForms: false, agentMode: false };
+
+  const checkpointFor = (over: Partial<Parameters<typeof createCheckpoint>[0]> = {}) =>
+    createCheckpoint({
+      runId: 'explore-prev',
+      startUrl: START,
+      optionsHash: hashOptions(OPTS),
+      frontier: [{ url: `${ORIGIN}/queued`, depth: 1 }],
+      visited: [START, `${ORIGIN}/already-done`],
+      pagesScanned: 2,
+      now: Date.now(),
+      ...over,
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('chrome', makeChromeMock());
+    vi.mocked(scanner.scanPage).mockResolvedValue([]);
+    vi.mocked(scanner.scanFormFields).mockResolvedValue([]);
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([]);
+    vi.mocked(scanner.scanPageMetadata).mockResolvedValue({ headings: [] });
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([]);
+    vi.mocked(scanner.detectModal).mockResolvedValue({ found: false } as never);
+    vi.mocked(scanner.scanPageType).mockResolvedValue({ pageType: 'other', isErrorPage: false } as never);
+    // Each navigation reports the URL it was asked for, so scanned pages are
+    // distinguishable in the resulting graph.
+    vi.mocked(scanner.getPageSnapshot).mockImplementation(async (tabId: number) => {
+      void tabId;
+      const calls = vi.mocked(chrome.tabs.update).mock.calls;
+      const last = calls[calls.length - 1]?.[1] as { url?: string } | undefined;
+      return { url: last?.url ?? START, title: 'Page' } as never;
+    });
+  });
+
+  it('given_a_valid_checkpoint_then_the_frontier_is_resumed_and_visited_pages_are_NOT_rescanned', async () => {
+    vi.mocked(checkpointStore.loadCheckpoint).mockResolvedValue(checkpointFor());
+
+    const { graph, coverage } = await exploreApp({
+      startUrl: START, ...OPTS, useDedicatedTab: false,
+    });
+
+    const scanned = graph.nodes.map((n) => n.url);
+    // The queued page was picked up …
+    expect(scanned).toContain(`${ORIGIN}/queued`);
+    // … and neither page the previous segment already mapped was re-walked.
+    expect(scanned).not.toContain(`${ORIGIN}/already-done`);
+    expect(coverage.pagesScanned).toBe(1);
+  });
+
+  it('given_a_resume_then_it_is_reported_as_a_warning_not_silently', async () => {
+    // A resume changes what the coverage numbers mean, so it has to be visible.
+    vi.mocked(checkpointStore.loadCheckpoint).mockResolvedValue(checkpointFor());
+    const { coverage } = await exploreApp({ startUrl: START, ...OPTS, useDedicatedTab: false });
+    expect(coverage.warnings.join(' ')).toMatch(/Resumed from a checkpoint/i);
+  });
+
+  it('given_fresh_true_then_the_checkpoint_is_ignored', async () => {
+    // "fresh" means re-walk everything; honouring a checkpoint would contradict it.
+    vi.mocked(checkpointStore.loadCheckpoint).mockResolvedValue(checkpointFor());
+    const { graph } = await exploreApp({
+      startUrl: START, ...OPTS, useDedicatedTab: false, fresh: true,
+    });
+    expect(graph.nodes.map((n) => n.url)).toContain(START);
+    expect(vi.mocked(checkpointStore.loadCheckpoint)).not.toHaveBeenCalled();
+  });
+
+  it('given_a_checkpoint_for_a_DIFFERENT_start_url_then_it_starts_fresh', async () => {
+    vi.mocked(checkpointStore.loadCheckpoint).mockResolvedValue(
+      checkpointFor({ startUrl: 'https://other.test/' })
+    );
+    const { graph, coverage } = await exploreApp({ startUrl: START, ...OPTS, useDedicatedTab: false });
+    expect(graph.nodes.map((n) => n.url)).toContain(START);
+    expect(coverage.warnings.join(' ')).not.toMatch(/Resumed from a checkpoint/i);
+  });
+
+  it('given_changed_options_then_it_starts_fresh_rather_than_mislabelling_coverage', async () => {
+    vi.mocked(checkpointStore.loadCheckpoint).mockResolvedValue(
+      checkpointFor({ optionsHash: hashOptions({ ...OPTS, submitForms: true }) })
+    );
+    const { graph } = await exploreApp({ startUrl: START, ...OPTS, useDedicatedTab: false });
+    expect(graph.nodes.map((n) => n.url)).toContain(START);
+  });
+
+  it('given_a_stale_checkpoint_then_it_starts_fresh', async () => {
+    vi.mocked(checkpointStore.loadCheckpoint).mockResolvedValue(
+      checkpointFor({ now: Date.now() - 1000 * 60 * 60 * 72 })
+    );
+    const { graph } = await exploreApp({ startUrl: START, ...OPTS, useDedicatedTab: false });
+    expect(graph.nodes.map((n) => n.url)).toContain(START);
+  });
+
+  it('given_no_checkpoint_then_the_run_starts_normally', async () => {
+    vi.mocked(checkpointStore.loadCheckpoint).mockResolvedValue(undefined);
+    const { graph } = await exploreApp({ startUrl: START, ...OPTS, useDedicatedTab: false });
+    expect(graph.nodes.map((n) => n.url)).toContain(START);
+  });
+});
+
+describe('exploreApp — never ends the session', () => {
+  /**
+   * A logout is not just another destructive click. It invalidates every page the
+   * crawl visits afterwards: the crawler lands on the login screen, maps that, and
+   * the run keeps reporting pages as explored.
+   *
+   * Links are ENQUEUED without being clicked, so the click-set classifier never
+   * sees them — this is the only place a `/logout` href can be stopped.
+   */
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('chrome', makeChromeMock());
+    vi.mocked(scanner.scanPage).mockResolvedValue([]);
+    vi.mocked(scanner.scanFormFields).mockResolvedValue([]);
+    vi.mocked(scanner.scanPageMetadata).mockResolvedValue({ headings: [] });
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([]);
+    vi.mocked(scanner.detectModal).mockResolvedValue({ found: false } as never);
+    vi.mocked(scanner.scanPageType).mockResolvedValue({ pageType: 'other', isErrorPage: false } as never);
+    vi.mocked(scanner.getPageSnapshot).mockResolvedValue({ url: START, title: 'Home' } as never);
+  });
+
+  it('given_a_logout_link_on_the_page_then_it_is_never_enqueued_or_recorded_as_an_edge', async () => {
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([
+      { url: `${ORIGIN}/settings`, text: 'Settings' },
+      { url: `${ORIGIN}/auth/logout`, text: 'Logout' },
+    ]);
+
+    const { graph } = await exploreApp({
+      startUrl: START, maxDepth: 1, maxPages: 5, agentMode: false, useDedicatedTab: false,
+    });
+
+    const edges = graph.edges.map((e) => e.to);
+    expect(edges).toContain(`${ORIGIN}/settings`);
+    expect(edges).not.toContain(`${ORIGIN}/auth/logout`);
+    expect(graph.nodes.map((n) => n.url)).not.toContain(`${ORIGIN}/auth/logout`);
+  });
+
+  it('given_an_unlabelled_logout_link_then_the_URL_alone_is_enough', async () => {
+    // An icon-only <a href="/logout"> has no text to match on.
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([
+      { url: `${ORIGIN}/users/sign_out`, text: '' },
+    ]);
+    const { graph } = await exploreApp({
+      startUrl: START, maxDepth: 1, maxPages: 5, agentMode: false, useDedicatedTab: false,
+    });
+    expect(graph.edges.map((e) => e.to)).not.toContain(`${ORIGIN}/users/sign_out`);
+  });
+
+  it('given_a_page_whose_path_merely_contains_logout_then_it_is_still_crawled', async () => {
+    // False positives here silently drop real content from the map.
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([
+      { url: `${ORIGIN}/blog/logout-best-practices`, text: 'Article' },
+    ]);
+    const { graph } = await exploreApp({
+      startUrl: START, maxDepth: 1, maxPages: 5, agentMode: false, useDedicatedTab: false,
+    });
+    expect(graph.edges.map((e) => e.to)).toContain(`${ORIGIN}/blog/logout-best-practices`);
   });
 });

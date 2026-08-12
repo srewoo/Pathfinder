@@ -16,6 +16,9 @@ import { executeStep as executeStepViaPort } from '../step-executor';
 import { serializeCompressedDOM } from '../../utils/dom-compress';
 import { PROMPTS } from '../ai/prompt-templates';
 import { createLogger } from '../../utils/logger';
+import { captureState, diffState, type StateSnapshot } from '../analysis/state-diff';
+import { deriveDocGroundedAssertions } from './doc-grounded-oracle';
+import { driverForTab } from '../step-executor';
 
 const log = createLogger('interactive-planner');
 const DEFAULT_MAX_STEPS = 20;
@@ -130,11 +133,33 @@ export async function interactivePlan(
 
     log.info(`Step ${step.order}: [${step.action}] ${step.description.slice(0, 60)}`);
 
-    // Execute the step via content script
+    // Interactive planning is the ONE place a real state diff is available at
+    // generation time: it executes each step and observes the result. That is what
+    // makes doc-grounded assertions possible — the docs say what should happen, the
+    // diff says what did, and the assertion is written against the documented
+    // expectation.
+    const before = await tryCapture(tabId);
     const succeeded = await executeStep(tabId, step);
 
     if (succeeded) {
       completedSteps.push(step);
+
+      if (before) {
+        const derived = await deriveAssertionsFor(
+          tabId,
+          step,
+          before,
+          currentUrl,
+          completedSteps.length - 1,
+          aiClient
+        );
+        // Emitted as ordinary assert steps so the rest of the pipeline needs no
+        // special case, and each carries the documentation that justifies it.
+        for (const assertStep of derived) {
+          completedSteps.push({ ...assertStep, order: completedSteps.length + 1 });
+        }
+      }
+
       await delay(300); // brief pause for SPA state updates
       continue;
     }
@@ -295,4 +320,77 @@ function buildStep(parsed: ParsedAction, order: number): ExecutionStep {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+// ── Doc-grounded assertions (deeper oracles) ─────────────────────────────────
+
+/** Capture state, or null when it cannot be observed. Never throws. */
+async function tryCapture(tabId: number): Promise<StateSnapshot | null> {
+  try {
+    return await captureState(driverForTab(tabId));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask the documentation what this step should have done, and emit assertions.
+ *
+ * The model converts documented prose into `Assertion` objects; it never returns a
+ * verdict, and the assertions are schema-validated before they become steps (§6,
+ * §8.0). When the docs say nothing about this action, nothing is emitted — that
+ * silence is the guard that keeps this from inventing expectations.
+ *
+ * Only runs for steps that could change something: asking the docs what a `type`
+ * step should have done wastes a call and invites a fabricated answer.
+ */
+async function deriveAssertionsFor(
+  tabId: number,
+  step: ExecutionStep,
+  before: StateSnapshot,
+  pageUrl: string,
+  afterStep: number,
+  aiClient: AIClientInterface
+): Promise<ExecutionStep[]> {
+  if (step.action !== 'click' && step.action !== 'press_key') return [];
+
+  try {
+    const driver = driverForTab(tabId);
+    const after = await captureState(driver);
+    const diff = diffState(before, after, driver.networkLog());
+
+    const result = await deriveDocGroundedAssertions(
+      {
+        actionDescription: step.description,
+        pageUrl,
+        diff,
+        afterStep,
+      },
+      aiClient
+    );
+
+    if (result.assertions.length === 0) return [];
+
+    log.info(
+      `Doc-grounded: +${result.assertions.length} assertion(s) for "${step.description}" ` +
+        `from ${result.expectations.length} doc source(s)`
+    );
+
+    return result.assertions.map((a) => ({
+      order: 0,
+      action: 'assert' as const,
+      assertType: a.kind as ExecutionStep['assertType'],
+      selector: a.locator?.structural?.css ?? a.locator?.testid,
+      assertExpected: a.expected,
+      attribute: a.attribute,
+      // The citation travels with the assertion: a doc-grounded check is only
+      // trustworthy if a reader can see which document required it.
+      description: `${a.description} [documented]`,
+    }));
+  } catch (err) {
+    // A missing driver, a failed snapshot or an AI error must not stop planning.
+    log.debug('Doc-grounded assertion derivation skipped', err);
+    return [];
+  }
 }

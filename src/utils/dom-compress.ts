@@ -132,14 +132,6 @@ function filterStableClasses(className: string | SVGAnimatedString): string {
   return stable.length > 0 ? `.${stable.join('.')}` : '';
 }
 
-export function compressDOMString(html: string): string {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
-  // For strings, window.getComputedStyle throws, so this environment needs mocking if used in Node.
-  // Fortunately Pathfinder runs in browser where DOMParser creates proper objects, but we must protect window access
-  return JSON.stringify(compressDOM(doc), null, 2);
-}
-
 export function serializeCompressedDOM(compressed: CompressedDOM): string {
   return `URL: ${compressed.url}
 Title: ${compressed.title}

@@ -33,7 +33,7 @@ export function ApiKeyConfig({ value, onChange, provider }: ApiKeyConfigProps) {
           href={docsLinks[provider] ?? '#'}
           target="_blank"
           rel="noreferrer"
-          className="text-2xs text-primary-light hover:underline"
+          className="text-2xs text-primary-text hover:underline"
         >
           Get key →
         </a>
@@ -64,7 +64,7 @@ export function ApiKeyConfig({ value, onChange, provider }: ApiKeyConfigProps) {
       </div>
 
       {value && (
-        <p className="text-2xs text-success flex items-center gap-1">
+        <p className="text-2xs text-success-text flex items-center gap-1">
           <span className="w-1 h-1 rounded-full bg-success inline-block" />
           API key saved locally — verify it is valid on the provider dashboard
         </p>

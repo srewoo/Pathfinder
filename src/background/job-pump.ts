@@ -39,10 +39,6 @@ export function registerExecutor(kind: JobKind, executor: StepExecutor): void {
   executors[kind] = executor;
 }
 
-export function registeredKinds(): JobKind[] {
-  return Object.keys(executors) as JobKind[];
-}
-
 /** Start pumping. Safe to call repeatedly — the alarm is replaced, not stacked. */
 export async function armPump(): Promise<void> {
   await chrome.alarms.create(PUMP_ALARM, { periodInMinutes: 0.5 });

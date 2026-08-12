@@ -89,3 +89,19 @@ if (originalCrypto && !originalCrypto.subtle?.digest) {
     configurable: true,
   });
 }
+
+// jsdom does not implement `CSS.escape`, which every browser has. Selector
+// generation in the content script calls it for each element, and the caller
+// caught the resulting ReferenceError and skipped the element — so DOM detection
+// silently returned nothing under test and could never be covered. Supplying the
+// real semantics here rather than a stub, so tests exercise production behaviour.
+if (typeof (globalThis as { CSS?: unknown }).CSS === 'undefined') {
+  Object.defineProperty(globalThis, 'CSS', {
+    value: {
+      escape: (value: string): string =>
+        String(value).replace(/[^\w-]/g, (ch) => `\\${ch}`),
+    },
+    writable: true,
+    configurable: true,
+  });
+}

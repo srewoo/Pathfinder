@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bot, Play, Sparkles, Globe, ChevronDown, ChevronUp } from 'lucide-react';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import { Button } from '../shared/Button';
 import { Badge } from '../shared/Badge';
 import { useTestStore } from '../../stores/test-store';
@@ -157,42 +158,17 @@ export function OneLineTestRunner() {
               <span className="font-medium text-text-secondary">Start URL</span>
             </div>
 
-            <div className="flex gap-2">
-              <button
-                onClick={() => setStartSource('current')}
-                className={[
-                  'flex-1 rounded-md border px-2 py-1.5 text-2xs transition-colors',
-                  startSource === 'current'
-                    ? 'bg-primary text-white border-primary'
-                    : 'bg-surface-3 text-text-muted border-border hover:border-border-light',
-                ].join(' ')}
-              >
-                Current Page
-              </button>
-              <button
-                onClick={() => setStartSource('preset')}
-                disabled={!selectedPreset?.startUrl}
-                className={[
-                  'flex-1 rounded-md border px-2 py-1.5 text-2xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
-                  startSource === 'preset'
-                    ? 'bg-primary text-white border-primary'
-                    : 'bg-surface-3 text-text-muted border-border hover:border-border-light',
-                ].join(' ')}
-              >
-                Preset URL
-              </button>
-              <button
-                onClick={() => setStartSource('custom')}
-                className={[
-                  'flex-1 rounded-md border px-2 py-1.5 text-2xs transition-colors',
-                  startSource === 'custom'
-                    ? 'bg-primary text-white border-primary'
-                    : 'bg-surface-3 text-text-muted border-border hover:border-border-light',
-                ].join(' ')}
-              >
-                Custom URL
-              </button>
-            </div>
+            <SegmentedControl
+              options={[
+                { id: 'current', label: 'Current Page' },
+                { id: 'preset', label: 'Preset URL', disabled: !selectedPreset?.startUrl },
+                { id: 'custom', label: 'Custom URL' },
+              ]}
+              value={startSource}
+              onChange={setStartSource}
+              stacked={false}
+              label="Start URL source"
+            />
 
             {startSource === 'current' ? (
               <p className="text-2xs text-text-muted font-mono truncate">
@@ -264,7 +240,7 @@ export function OneLineTestRunner() {
 
           {(localError || store.error) && (
             <div className="p-2.5 bg-error/10 border border-error/20 rounded-lg">
-              <p className="text-xs text-error">{localError || store.error}</p>
+              <p className="text-xs text-error-text">{localError || store.error}</p>
             </div>
           )}
 
@@ -288,7 +264,7 @@ export function OneLineTestRunner() {
               Save As Tests
             </Button>
             <Button
-              variant="success"
+              variant="primary"
               icon={<Play size={11} />}
               onClick={() => handleImport(true)}
               loading={loadingAction === 'run'}
@@ -328,7 +304,7 @@ export function OneLineTestRunner() {
                     <ol className="space-y-1">
                       {test.steps.map((step, stepIndex) => (
                         <li key={`${test.title}-${stepIndex}`} className="flex gap-2 text-2xs text-text-secondary">
-                          <span className="text-primary-light font-mono">{stepIndex + 1}.</span>
+                          <span className="text-primary-text font-mono">{stepIndex + 1}.</span>
                           <span>{step}</span>
                         </li>
                       ))}

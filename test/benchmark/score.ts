@@ -11,6 +11,15 @@ import type { Finding } from '../../src/core/analysis/deterministic-detectors';
 export interface FixtureRun {
   fixtureId: string;
   defect: DefectClass;
+  /**
+   * Assertion channels a GENERATED test for this fixture covers (0–1).
+   *
+   * Tracked because recall and false positives say nothing about oracle DEPTH: a
+   * suite of "a banner appeared" assertions can score perfectly on both while
+   * confirming almost nothing. This is the metric that made the shallow-oracle
+   * ceiling visible instead of arguable.
+   */
+  assertionDepth?: number;
   /** Findings reported against the CORRECT variant. Any of these is a false positive. */
   onCorrect: Finding[];
   /** Findings reported against the BROKEN variant. */
@@ -36,6 +45,8 @@ export interface BenchmarkScore {
   precision: number;
   totalDurationMs: number;
   totalTokens: number
+  /** Mean assertion depth across fixtures that reported one, 0–1. */
+  meanAssertionDepth: number;
   perFixture: Array<{
     fixtureId: string;
     defect: DefectClass;
@@ -43,6 +54,7 @@ export interface BenchmarkScore {
     falsePositives: number;
     /** Findings on the broken variant unrelated to the injected defect. */
     incidentalOnBroken: number;
+    assertionDepth?: number;
   }>;
 }
 
@@ -61,6 +73,8 @@ export function matchesDefect(finding: Finding, defect: DefectClass): boolean {
     'a11y-missing-label': 'a11y-missing-label',
     'dead-button': 'dead-button',
     'state-not-persisted': 'state-not-persisted',
+    'success-without-persistence': 'success-without-persistence',
+    'success-over-failure': 'success-over-failure',
   };
   return finding.kind === map[defect];
 }
@@ -93,8 +107,13 @@ export function score(runs: readonly FixtureRun[]): BenchmarkScore {
       caught,
       falsePositives: run.onCorrect.length,
       incidentalOnBroken,
+      assertionDepth: run.assertionDepth,
     });
   }
+
+  const depths = runs.map((r) => r.assertionDepth).filter((d): d is number => typeof d === 'number');
+  const meanAssertionDepth =
+    depths.length === 0 ? 0 : depths.reduce((a, b) => a + b, 0) / depths.length;
 
   const reported = truePositives + falsePositives;
 
@@ -110,6 +129,7 @@ export function score(runs: readonly FixtureRun[]): BenchmarkScore {
     precision: reported === 0 ? 0 : truePositives / reported,
     totalDurationMs,
     totalTokens,
+    meanAssertionDepth,
     perFixture,
   };
 }
@@ -162,6 +182,7 @@ export function formatScore(s: BenchmarkScore, flake?: FlakeResult): string {
     `Precision:           ${pct(s.precision)}`,
     `Tokens:              ${s.totalTokens}`,
     `Wall-clock:          ${s.totalDurationMs}ms`,
+    `Assertion depth:     ${pct(s.meanAssertionDepth)}  (mean channels covered per generated test)`,
   ];
   if (flake) {
     lines.push(
@@ -197,6 +218,14 @@ export const THRESHOLDS = {
   maxFalsePositives: 0,
   minRecall: 0.8,
   maxFlakeRate: 0,
+  /**
+   * Mean assertion depth floor.
+   *
+   * 0.5 = two of four channels on average. Set here deliberately: a generated
+   * suite that only ever asserts on the DOM scores 0.25 and would fail, which is
+   * the point — shallow oracles should break the build, not pass quietly.
+   */
+  minAssertionDepth: 0.5,
 } as const;
 
 export interface GateResult {
@@ -215,6 +244,13 @@ export function gate(s: BenchmarkScore, flake: FlakeResult): GateResult {
   if (s.recall < THRESHOLDS.minRecall) {
     failures.push(
       `recall ${Math.round(s.recall * 100)}% below ${Math.round(THRESHOLDS.minRecall * 100)}%`
+    );
+  }
+  if (s.meanAssertionDepth > 0 && s.meanAssertionDepth < THRESHOLDS.minAssertionDepth) {
+    failures.push(
+      `assertion depth ${Math.round(s.meanAssertionDepth * 100)}% below ` +
+        `${Math.round(THRESHOLDS.minAssertionDepth * 100)}% — generated tests are asserting on too ` +
+        `few channels (a "banner appeared" suite scores 25%)`
     );
   }
   if (flake.flakeRate > THRESHOLDS.maxFlakeRate) {

@@ -7,7 +7,6 @@ import type {
   FormField,
   FormSubmissionOutcome,
 } from '../../storage/schemas';
-import { simpleHash } from '../../utils/hash';
 
 /**
  * Phase 1 of the graph-first flow design (see ADR/discussion): the interaction
@@ -62,11 +61,6 @@ function stepSignature(step: FlowStep): string {
  */
 export function flowSignature(steps: FlowStep[]): string {
   return steps.map(stepSignature).join(' > ');
-}
-
-/** Short stable id derived from the signature (e.g. for logging / future keys). */
-export function flowSignatureId(steps: FlowStep[]): string {
-  return `sk_${simpleHash(flowSignature(steps))}`;
 }
 
 /**

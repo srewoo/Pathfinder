@@ -69,23 +69,3 @@ export function broadcastToSidebar(message: SidebarMessage): void {
     // Sidebar may not be open; ignore
   });
 }
-
-export function onBackgroundMessage(
-  handler: (
-    message: BackgroundMessage,
-    sender: chrome.runtime.MessageSender,
-    sendResponse: (response?: unknown) => void
-  ) => boolean | void
-): void {
-  chrome.runtime.onMessage.addListener(handler);
-}
-
-export function onSidebarMessage(
-  handler: (
-    message: SidebarMessage,
-    sender: chrome.runtime.MessageSender,
-    sendResponse: (response?: unknown) => void
-  ) => boolean | void
-): void {
-  chrome.runtime.onMessage.addListener(handler as Parameters<typeof chrome.runtime.onMessage.addListener>[0]);
-}

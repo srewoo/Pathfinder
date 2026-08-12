@@ -8,6 +8,8 @@
  * IMPORTANT: Only one debugger session can be attached to a tab at a time.
  * Call attach() before using any CDP method, and detach() when done.
  */
+import { inferSchemaFromJson, type InferredSchema } from '../analysis/schema-infer';
+import { redactBody } from '../analysis/body-redaction';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('cdp-client');
@@ -332,6 +334,7 @@ export async function captureFullPageScreenshot(tabId: number): Promise<string |
 }
 
 // ── Network HAR Capture ─────────────────────────────────────────────────────
+// (schema inference lives in core/analysis; this module only reads the body)
 
 export interface HAREntry {
   url: string;
@@ -345,9 +348,82 @@ export interface HAREntry {
   duration: number;
   bodySize: number;
   requestBody?: string;
+  /**
+   * Structure of the response body (ADR 001). The body itself is read transiently and
+   * discarded — only its shape is kept, so a baseline can hold no tokens or PII.
+   */
+  responseSchema?: InferredSchema;
+  /**
+   * Redacted body, ONLY when debug retention is explicitly enabled (ADR 001 phase 4).
+   * Absent by default, and never the raw payload.
+   */
+  redactedBody?: { body: string; redactedCount: number; truncated: boolean };
+}
+
+/** Only these contribute a schema. See `shouldReadBody`. */
+const MAX_BODY_BYTES = 256 * 1024;
+
+/**
+ * Should we read this response body to infer its schema?
+ *
+ * Every condition here is a limit the report states rather than a silent skip:
+ * JSON only (an HTML error page is not a contract), successful only, bounded size,
+ * and allowlisted origins only — reading a third party's payload is not ours to do.
+ */
+function shouldReadBody(entry: HAREntry, allowedOrigins: readonly string[]): boolean {
+  if (entry.status < 200 || entry.status >= 300) return false;
+  if (entry.bodySize > MAX_BODY_BYTES) return false;
+  const mime = (entry.mimeType || '').toLowerCase();
+  if (!mime.includes('json')) return false;
+  if (allowedOrigins.length === 0) return false;
+  try {
+    const origin = new URL(entry.url).origin;
+    return allowedOrigins.some((allowed) => {
+      if (allowed.startsWith('*.')) {
+        return new URL(entry.url).hostname.endsWith(`.${allowed.slice(2)}`);
+      }
+      return origin === allowed || new URL(entry.url).hostname === allowed;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Origins whose bodies may be read, per tab.
+ *
+ * Set from the run's origin policy. Empty means "read nothing", which is the correct
+ * default: capture must be opt-in by configuration, not by omission.
+ */
+const bodyCaptureOrigins = new Map<number, readonly string[]>();
+
+export function setBodyCaptureOrigins(tabId: number, origins: readonly string[]): void {
+  bodyCaptureOrigins.set(tabId, origins);
+}
+
+/**
+ * Tabs retaining redacted bodies for debugging.
+ *
+ * Off unless a caller opts in per run. Defaulting to on would mean a setting change
+ * silently starts persisting payloads.
+ */
+const bodyRetention = new Set<number>();
+
+export function setBodyRetention(tabId: number, enabled: boolean): void {
+  if (enabled) bodyRetention.add(tabId);
+  else bodyRetention.delete(tabId);
 }
 
 const harBuffers = new Map<number, HAREntry[]>();
+/** Entries whose body we intend to read once the response has finished loading. */
+const awaitingBody = new Map<string, { tabId: number; entry: HAREntry }>();
+/** Bodies we meant to read and could not — reported, never silently dropped. */
+const bodyReadFailures = new Map<number, number>();
+
+/** How many response bodies could not be read for this tab. */
+export function getBodyReadFailures(tabId: number): number {
+  return bodyReadFailures.get(tabId) ?? 0;
+}
 const pendingRequests = new Map<string, { tabId: number; url: string; method: string; headers: Record<string, string>; startedAt: number; body?: string }>();
 
 /**
@@ -365,8 +441,17 @@ export async function startHARCapture(tabId: number): Promise<void> {
  * Stop capturing and return all captured HAR entries.
  */
 export async function stopHARCapture(tabId: number): Promise<HAREntry[]> {
+  // Bodies are fetched asynchronously on loadingFinished; give the in-flight reads a
+  // moment to land, or the last few entries lose their schema for no reason.
+  if ([...awaitingBody.values()].some((w) => w.tabId === tabId)) {
+    await new Promise((r) => setTimeout(r, 300));
+  }
   const entries = harBuffers.get(tabId) ?? [];
   harBuffers.delete(tabId);
+  for (const [id, w] of awaitingBody.entries()) if (w.tabId === tabId) awaitingBody.delete(id);
+  bodyCaptureOrigins.delete(tabId);
+  bodyRetention.delete(tabId);
+  bodyReadFailures.delete(tabId);
 
   // Clean up pending requests for this tab
   for (const [key, req] of pendingRequests.entries()) {
@@ -517,9 +602,40 @@ chrome.debugger.onEvent.addListener((source, method, rawParams) => {
       buffer.push(entry);
       // Cap at 500 entries to prevent memory bloat
       if (buffer.length > 500) buffer.shift();
+      // Remembered so `loadingFinished` can attach a schema to THIS entry. The body
+      // is not available yet at responseReceived.
+      if (shouldReadBody(entry, bodyCaptureOrigins.get(tabId) ?? [])) {
+        awaitingBody.set(requestId, { tabId, entry });
+      }
     }
 
     pendingRequests.delete(requestId);
+  }
+
+  if (method === 'Network.loadingFinished') {
+    const requestId = params.requestId ?? '';
+    const waiting = awaitingBody.get(requestId);
+    if (waiting && waiting.tabId === tabId) {
+      awaitingBody.delete(requestId);
+      // Read, infer, drop. The body never leaves this closure.
+      void sendCommand(tabId, 'Network.getResponseBody', { requestId })
+        .then((res) => {
+          const body = (res as { body?: string; base64Encoded?: boolean } | undefined);
+          if (!body?.body || body.base64Encoded) return;
+          const schema = inferSchemaFromJson(body.body);
+          if (schema) waiting.entry.responseSchema = schema;
+          if (bodyRetention.has(tabId)) {
+            // Redacted BEFORE it is attached to anything that gets persisted. A body
+            // that reaches storage unredacted is already a leak.
+            const redacted = redactBody(body.body);
+            if (redacted) waiting.entry.redactedBody = redacted;
+          }
+        })
+        .catch(() => {
+          // Common and benign: the buffer is evicted for large or streamed responses.
+          bodyReadFailures.set(tabId, (bodyReadFailures.get(tabId) ?? 0) + 1);
+        });
+    }
   }
 
   if (method === 'Network.loadingFailed') {
@@ -577,43 +693,6 @@ export interface ElementState {
   visible: boolean;
   enabled: boolean;
   rect: { x: number; y: number; width: number; height: number } | null;
-}
-
-/**
- * Inspect an element's actionability state (present, visible, enabled) and its
- * center-point bounds — piercing shadow DOM. Used by the actionability
- * auto-wait so we never dispatch a trusted click at an element that is hidden,
- * disabled, or off-screen.
- */
-export async function getElementState(tabId: number, selector: string): Promise<ElementState> {
-  const empty: ElementState = { found: false, visible: false, enabled: false, rect: null };
-  try {
-    const state = await evaluate<ElementState>(tabId, `
-      (() => {
-        ${DEEP_QUERY_FN}
-        const el = __deepQuery(document, ${JSON.stringify(selector)});
-        if (!el) return ${JSON.stringify(empty)};
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        const visible = r.width > 0 && r.height > 0 &&
-          style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
-        const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-        return { found: true, visible, enabled, rect: { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height } };
-      })()
-    `);
-    return state ?? empty;
-  } catch {
-    return empty;
-  }
-}
-
-/**
- * Get the bounding box of an element by selector via CDP (shadow-DOM aware).
- * Returns { x, y, width, height } in viewport coordinates, or null if not found.
- */
-export async function getElementBounds(tabId: number, selector: string): Promise<{ x: number; y: number; width: number; height: number } | null> {
-  const state = await getElementState(tabId, selector);
-  return state.found ? state.rect : null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

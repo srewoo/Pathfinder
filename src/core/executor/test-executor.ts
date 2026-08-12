@@ -10,7 +10,16 @@ import { getActiveTabId } from '../../messaging/messenger';
 import { captureTab } from '../../utils/screenshot';
 import { captureFullPageScreenshot, isAttached, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
 import { generateId, generateRunId } from '../../utils/hash';
+import { dominantOrigin, schemaFindingsForResult } from '../analysis/schema-oracle';
+import { loadBaseline } from '../../storage/api-baseline-storage';
+import { retainBodies } from '../../storage/response-body-store';
 import { createLogger } from '../../utils/logger';
+import { describeIsolation, isolateBeforeTest, type IsolationLevel } from './test-isolation';
+import { captureState, diffState, type StateSnapshot } from '../analysis/state-diff';
+import { evaluateIrPath, executeViaIr, explainPathChoice } from './ir-execution-path';
+import { runStateOracles } from '../analysis/state-oracles';
+
+import { driverForTab, evaluateInTab } from '../step-executor';
 import { ensureAuthenticated, recoverSessionIfExpired } from './auth-manager';
 import { executeConditionalStep, executeLoopStep, executeCaptureValue, resolveStepVariables } from './step-extensions';
 import { loadGraph as loadGraphForTimeout } from '../explorer/interaction-graph';
@@ -27,6 +36,32 @@ const log = createLogger('test-executor');
 const MAX_TEST_RETRIES = 2;
 
 export interface ExecutionOptions {
+  /**
+   * Client-state isolation between tests. Default 'reset'.
+   *
+   * Concurrent tests share a browser profile, so without a scrub one test's
+   * leftover storage becomes another's starting state — and the resulting failure
+   * looks like a product bug rather than cross-talk.
+   */
+  isolation?: IsolationLevel;
+  /** Extra storage keys to preserve across the scrub (e.g. a custom token key). */
+  preserveStorageKeys?: RegExp[];
+  /**
+   * Execute through the validated `TestIR` path rather than the legacy step walker.
+   *
+   * Default false. The IR path is fully deterministic and schema-gated, but does
+   * not yet carry self-healing, the retry ladder or auth recovery — so it is opted
+   * into rather than assumed, and it declines automatically when a plan cannot
+   * convert without loss.
+   */
+  useIrPath?: boolean;
+  /**
+   * Run the state-diff oracles during execution. Default true.
+   *
+   * Costs two page snapshots per mutating step, and buys findings the test's own
+   * assertions structurally cannot make.
+   */
+  stateOracles?: boolean;
   /**
    * Extra origins this run may reach beyond the test's own (fix.md §7) — a
    * separate API host, for example. Opt-in only; never inferred, because a
@@ -141,7 +176,51 @@ export async function executeTest(
             mimeType: e.mimeType,
             duration: e.duration,
             bodySize: e.bodySize,
+            // The request body (needed for GraphQL operation identity) and the
+            // response SCHEMA survive the projection now. The response body never
+            // does — see ADR 001.
+            requestBody: e.requestBody,
+            responseSchema: e.responseSchema,
           }));
+
+          // A breaking schema change on an endpoint THIS test called becomes a
+          // finding, so the existing verdict path downgrades PASS → NEEDS_REVIEW.
+          // Without this a test asserts on a UI that still renders while the contract
+          // behind it broke, and reports green (ADR 001 phase 3).
+          try {
+            const origin = dominantOrigin(result.harEntries);
+            const baseline = origin ? await loadBaseline(origin) : undefined;
+            const findings = schemaFindingsForResult(result.harEntries, baseline, origin);
+            if (findings.length > 0) {
+              result.oracleFindings = [...(result.oracleFindings ?? []), ...findings];
+              log.warn(
+                `${findings.length} endpoint(s) changed shape since the baseline during ` +
+                  `"${testCase.title}" — verdict downgraded to NEEDS_REVIEW.`
+              );
+            }
+          } catch (err) {
+            // Never fail a test over its own analysis.
+            log.debug('Schema baseline comparison failed', err);
+          }
+
+          // Redacted bodies, when the debug setting is on. Stored apart from the
+          // result so exports stay clean and the 24h TTL is enforceable.
+          try {
+            const retained = harEntries
+              .filter((e) => e.redactedBody)
+              .map((e) => ({
+                url: e.url,
+                method: e.method,
+                status: e.status,
+                body: e.redactedBody!.body,
+                redactedCount: e.redactedBody!.redactedCount,
+                truncated: e.redactedBody!.truncated,
+                capturedAt: Date.now(),
+              }));
+            if (retained.length > 0) await retainBodies(result.runId, retained);
+          } catch (err) {
+            log.debug('Could not retain response bodies', err);
+          }
         }
       }
       await finalizeResult(testCase, result);
@@ -404,6 +483,20 @@ async function attemptExecution(
       // Wait for the SPA to actually settle (network idle + DOM) rather than a
       // blind 2s sleep — faster on quick pages, more reliable on slow ones.
       await settleTab(tabId, options.cdpActive, 2000);
+
+      // Scrub client state AFTER navigating: storage is origin-scoped, so a scrub
+      // on about:blank silently does nothing. Concurrent tests share a profile —
+      // without this, a draft or cached flag left by a sibling test shows up here
+      // as a product bug.
+      if ((options.isolation ?? 'reset') !== 'none') {
+        const isolation = await isolateBeforeTest((expr) => evaluateInTab(tabId, expr), {
+          level: options.isolation ?? 'reset',
+          preserveKeys: options.preserveStorageKeys,
+        });
+        if (isolation.clearedLocalStorage + isolation.clearedSessionStorage > 0 || isolation.errors.length) {
+          log.info(describeIsolation(isolation));
+        }
+      }
     } catch (navErr) {
       log.warn('Failed to navigate to startUrl before test', navErr);
     }
@@ -444,6 +537,23 @@ async function attemptExecution(
     );
   }
 
+  // ── IR execution path (§6) ──────────────────────────────────────────────
+  //
+  // Opted into, because the legacy path still carries behaviour the IR path does
+  // not (healing, retry ladder, auth recovery). Refused automatically whenever
+  // conversion would drop a step: running the remainder would execute a DIFFERENT
+  // test than the one authored.
+  if (options.useIrPath) {
+    const decision = evaluateIrPath(testCase, plan);
+    log.info(explainPathChoice(decision, testCase.title));
+    if (decision.usable) {
+      return executeViaIr(testCase, decision.ir, tabId, {
+        runId,
+        signal: options.signal ? { aborted: options.signal.aborted } : undefined,
+      });
+    }
+  }
+
   // Apply origin rewrite to absolute navigate step values
   const rewrittenSteps = (options.targetOrigin && testCase.startUrl)
     ? plan.steps.map((s) =>
@@ -480,6 +590,7 @@ async function attemptExecution(
   let aborted = false;
   let previousStep: ExecutionStep | undefined;
   const capturedValues = new Map<string, string>();
+  const oracleFindings: NonNullable<TestResult['oracleFindings']> = [];
 
   for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
     const step = steps[stepIndex];
@@ -499,6 +610,20 @@ async function attemptExecution(
     await settleTab(tabId, options.cdpActive, getPostStepDelay(previousStep, step));
 
     const stepStart = Date.now();
+
+    // ── State-diff oracles (§ deeper oracles) ──────────────────────────────
+    //
+    // Snapshot only before steps that could change something. Every step would
+    // double the evaluate traffic for no gain: a `type` or an `assert` has nothing
+    // for these oracles to say.
+    //
+    // This is what lets a test PASS and still report a defect — "the banner said
+    // saved but nothing was persisted" is invisible to the test's own assertions.
+    const oracleWorthy = options.stateOracles !== false && isMutatingStep(step);
+    // `driverForTab` throws synchronously when no driver is registered, so the
+    // guard has to be a try/catch rather than a promise `.catch`. An oracle that
+    // cannot observe must be silent, never fatal.
+    const stateBefore = oracleWorthy ? await tryCaptureState(tabId) : null;
 
     // Handle extended action types (conditional, loop, capture)
     if (step.action === 'if_visible' || step.action === 'loop' || step.action === 'capture_value' || step.action === 'use_captured') {
@@ -623,6 +748,30 @@ async function attemptExecution(
     options.onStepResult?.(testCase.id, step.order, result);
     previousStep = step;
 
+    // Judge what the step actually did across DOM, network, storage and URL.
+    if (stateBefore && result.status === 'passed') {
+      try {
+        const driver = driverForTab(tabId);
+        const stateAfter = await captureState(driver);
+        const diff = diffState(stateBefore, stateAfter, driver.networkLog());
+        const findings = runStateOracles(diff, {
+          action: step.description || step.action,
+          // A saved test is read-only with respect to the network unless the run
+          // explicitly opted in (§7), so an observed write is worth reporting.
+          readOnly: options.allowMutations !== true,
+          expectedToWrite: options.allowMutations === true && isSubmitStep(step),
+        });
+        for (const f of findings) {
+          oracleFindings.push({ ...f, stepOrder: step.order });
+          log.warn(`Oracle [${f.kind}] step ${step.order}: ${f.message} — ${f.evidence}`);
+        }
+      } catch (err) {
+        // An oracle that cannot observe is silent, never fatal: it must not turn a
+        // passing test into a failure because a snapshot failed.
+        log.debug('State oracle evaluation failed', err);
+      }
+    }
+
     // Auto-generate assertion from live DOM after key steps (when enabled and step passed)
     if (options.useAIAssertions && result.status === 'passed') {
       const nextStep = steps[stepIndex + 1];
@@ -676,8 +825,46 @@ async function attemptExecution(
     domSnapshot: snapshot?.domCompressed,
     errorMessage: buildErrorMessage(finalStatus, aborted, signalAborted, stepResults, authWarning),
     healingAttempts: stepResults.filter((r) => r.healingAttempt).map((r) => r.healingAttempt!),
+    oracleFindings: oracleFindings.length > 0 ? oracleFindings : undefined,
     runId,
   };
+}
+
+/**
+ * Snapshot page state, or null when it cannot be observed.
+ *
+ * Swallows BOTH a synchronous missing-driver throw and an async evaluate failure.
+ * The state oracles are an additional signal layered on top of a test; a run must
+ * never fail because that signal was unavailable.
+ */
+async function tryCaptureState(tabId: number): Promise<StateSnapshot | null> {
+  try {
+    return await captureState(driverForTab(tabId));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Could this step change observable state?
+ *
+ * Conservative: only actions that can plausibly cause an effect are worth two
+ * extra snapshots. A `type` changes a field the diff would report as noise on
+ * every keystroke.
+ */
+function isMutatingStep(step: ExecutionStep): boolean {
+  return step.action === 'click' || step.action === 'double_click' || step.action === 'press_key';
+}
+
+/**
+ * Does this step look like a submit?
+ *
+ * Drives `expectedToWrite`, which flips `missing-persistence` on. Getting it wrong
+ * would fire that oracle on every navigation click, so it errs toward silence.
+ */
+function isSubmitStep(step: ExecutionStep): boolean {
+  const text = `${step.description} ${step.selector ?? ''}`.toLowerCase();
+  return /submit|save|create|sign\s?in|log\s?in|register|send|confirm|apply|update|delete/.test(text);
 }
 
 // ---------------------------------------------------------------------------

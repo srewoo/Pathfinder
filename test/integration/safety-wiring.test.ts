@@ -128,13 +128,24 @@ describe('the installed policy actually refuses the right requests', () => {
     expect(installer.calls).toHaveLength(1);
   });
 
-  it('given_a_read_only_run_then_an_offlist_GET_is_refused', async () => {
+  it('given_a_read_only_run_then_offlist_NAVIGATION_and_WRITES_are_refused', async () => {
+    // Reads the page itself issues are allowed (fonts, CDN bundles, third-party
+    // GETs) — blocking those broke the app under test without protecting anything.
+    // What the installed policy must still refuse is walking off the allowlist and
+    // writing to it.
     fakeInstaller();
     await initCDPSession(TAB, { startUrl: 'https://app.test/' });
     const policy = getRunPolicy(TAB)!;
-    const d = decide({ url: 'https://prod.corp/api', method: 'GET' }, policy);
-    expect(d.allow).toBe(false);
-    if (!d.allow) expect(d.rule).toBe('origin');
+
+    const nav = decide({ url: 'https://prod.corp/', method: 'GET', resourceType: 'Document' }, policy);
+    expect(nav.allow).toBe(false);
+    if (!nav.allow) expect(nav.rule).toBe('origin');
+
+    const write = decide({ url: 'https://prod.corp/api', method: 'POST', resourceType: 'XHR' }, policy);
+    expect(write.allow).toBe(false);
+
+    const read = decide({ url: 'https://fonts.googleapis.com/css2?family=DM+Sans', method: 'GET', resourceType: 'XHR' }, policy);
+    expect(read.allow).toBe(true);
   });
 
   it('given_an_explicit_mutation_opt_in_then_allowlisted_writes_pass_but_offlist_still_does_not', async () => {

@@ -1,4 +1,4 @@
-import { scanPage, scanFormFields, scanPageLinks, scanPageMetadata, revealPageContent, getPageSnapshot, selectExplorationTargets, detectModal, scanPageActions, scanDataTables, scanPageType, scanFieldErrors, scanWizardSteps, scanConditionalFields } from './page-scanner';
+import { scanPage, scanFormFields, scanPageLinks, scanPageMetadata, revealPageContent, getPageSnapshot, partitionExplorationTargets, type TargetPartition, detectModal, scanPageActions, scanDataTables, scanPageType, scanFieldErrors, scanWizardSteps, scanConditionalFields } from './page-scanner';
 import {
   createGraph,
   addNode,
@@ -14,17 +14,22 @@ import {
 import type { InteractionGraph, InteractiveElement, FormField, FormSubmissionOutcome, ModalDiscovery, ExplorationProgress, ExplorationCoverage, ObservedAPI } from '../../storage/schemas';
 import type { AIClientInterface } from '../ai/ai-client';
 import { getAgentActions } from './action-ranker';
+import { probeSelectionActions } from './selection-explorer';
+import { classifyControl, isSafeToClick, isSessionEndingUrl } from './danger-heuristics';
 import { detectSPARoutes } from './spa-detector';
 import { sendToContentScript, getActiveTabId } from '../../messaging/messenger';
-import { executeStep as executeStepViaPort } from '../step-executor';
+import { executeStep as executeStepViaPort, evaluateInTab } from '../step-executor';
 import { createMutationLedger } from '../safety/mutation-ledger';
 import { describePolicy, isPolicyEmpty, resolvePolicy } from '../safety/policy-resolver';
-import { installRunSafety } from '../safety/safety-port';
+import { installRunSafety, type SafetyHandle } from '../safety/safety-port';
 import { attach, detach, isAttached, startHARCapture, getHAREntries, captureFullPageScreenshot, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
 import type { HAREntry } from '../cdp/cdp-client';
 import { ensureAuthenticated } from '../executor/auth-manager';
 import { runAccessibilityAudit } from '../analysis/accessibility-audit';
 import type { A11yAuditResult } from '../analysis/accessibility-audit';
+import { computeRiskCoverage, formatRiskCoverage } from './risk-coverage';
+import { createCheckpoint, describeResume, evaluateCheckpoint, hashOptions, type ExplorationCheckpoint } from './exploration-checkpoint';
+import { clearCheckpoint, loadCheckpoint, persistCheckpoint } from '../../storage/checkpoint-storage';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('explorer');
@@ -34,6 +39,46 @@ const log = createLogger('explorer');
  * Prefers: short visible text > aria-label > AI description > selector.
  * Strips long textContent down to the first meaningful phrase.
  */
+/**
+ * Union two element inventories by selector, preferring `primary`.
+ *
+ * `primary` is the settled post-sweep scan; `extra` is what the sweep saw while
+ * scrolling. Elements only in `extra` are virtualized or lazy content that is no
+ * longer mounted — real targets, but ones a click must scroll back into view.
+ */
+function mergeElements(
+  primary: InteractiveElement[],
+  extra: InteractiveElement[]
+): InteractiveElement[] {
+  const bySelector = new Map<string, InteractiveElement>();
+  for (const el of primary) bySelector.set(el.selector, el);
+  for (const el of extra) if (!bySelector.has(el.selector)) bySelector.set(el.selector, el);
+  return [...bySelector.values()];
+}
+
+/**
+ * Read the tab's URL, cheaply.
+ *
+ * This used to go through `getPageSnapshot`, which serialises a compressed DOM and
+ * re-scans every interactive element — after EVERY click, purely to learn whether
+ * the URL changed. On a heavy SPA that single call dominated the cost of a click:
+ * a measured run averaged 11.7s per target against a 2s estimate, and only 41 of
+ * 54 targets fit in the page budget.
+ *
+ * Falls back to the snapshot when no evaluator is registered, so the behaviour is
+ * unchanged where the port is not wired.
+ */
+async function readCurrentUrl(tabId: number, fallbackUrl: string): Promise<string> {
+  try {
+    const url = await evaluateInTab<string>(tabId, 'location.href');
+    if (typeof url === 'string' && url.length > 0) return url;
+  } catch {
+    // No evaluator registered, or the frame was mid-navigation.
+  }
+  const snap = await getPageSnapshot(tabId).catch(() => null);
+  return snap?.url ?? fallbackUrl;
+}
+
 function resolveElementLabel(target: { text?: string; ariaLabel?: string; description?: string; selector: string }): string {
   // Prefer aria-label — it's usually a concise, intentional description
   if (target.ariaLabel) return target.ariaLabel;
@@ -92,23 +137,92 @@ export function classifyUrlChange(beforeUrl: string, afterUrl: string): 'none' |
 }
 
 /** Destructive labels to avoid clicking unless includeDangerous is set. */
-const DANGEROUS_LABELS = ['delete', 'remove', 'logout', 'sign out', 'cancel subscription'];
-function isDangerousLabel(text: string | undefined): boolean {
-  const t = (text ?? '').toLowerCase();
-  return DANGEROUS_LABELS.some((d) => new RegExp(`\\b${d}\\b`, 'i').test(t));
-}
 
-const ACTION_DELAY_MS = 1000;
+
+/**
+ * Pause after an exploration action.
+ *
+ * Was 1000ms. `settle()` already waits for network idle plus DOM quiet, so the
+ * flat second was belt-and-braces on top of a real signal — and it was the single
+ * largest cost per click. At ~90 interactive elements on a typical app page it
+ * alone consumed a minute and a half of the page budget.
+ */
+const ACTION_DELAY_MS = 250;
 /** Default number of pages explored in parallel (bounded tab-worker pool). */
 const DEFAULT_EXPLORE_CONCURRENCY = 3;
 /** Hard cap on parallel exploration tabs — mirrors the executor's 1-4 range. */
 const MAX_EXPLORE_CONCURRENCY = 4;
-/** Default maximum time to spend on click-exploration per page (ms). */
-const DEFAULT_PAGE_EXPLORATION_BUDGET_MS = 90_000; // 90s — override via ExploreOptions.pageBudgetMs
-/** Larger budget for the anchored page when exhaustively covering every element. */
-const EXHAUSTIVE_PAGE_BUDGET_MS = 300_000; // 5 min
+/**
+ * Per-page budgets, and how they relate to the target caps.
+ *
+ * These were flat numbers that silently contradicted the caps. 90s of budget at
+ * roughly 2.5s per click bought ~35 clicks against a cap of 100, and exhaustive
+ * mode's 300s bought ~120 against a cap of 300 — so on any real app the budget
+ * ended exploration long before the cap did, and the cap was decoration. Measured
+ * on a live app: 90 interactive elements on an ordinary list page, 205 on a longer
+ * one.
+ *
+ * Now the budget is DERIVED from the work in front of it, so the two cannot
+ * disagree: allow `PER_TARGET_BUDGET_MS` per queued target, with a floor so small
+ * pages are never rushed and a ceiling so one pathological page cannot own the run.
+ *
+ * A budget is a CEILING, not a duration — a page with 12 targets finishes in
+ * seconds regardless. Raising it costs nothing except on pages that genuinely have
+ * hundreds of controls, which are exactly the pages worth the time.
+ */
+const PER_TARGET_BUDGET_MS = 2_000;
+/** Floor for an ordinary page. */
+const DEFAULT_PAGE_EXPLORATION_BUDGET_MS = 240_000; // 4 min
+/** Ceiling for an ordinary page. */
+const MAX_PAGE_EXPLORATION_BUDGET_MS = 480_000; // 8 min
+/** Floor for the anchored page when exhaustively covering every element. */
+const EXHAUSTIVE_PAGE_BUDGET_MS = 480_000; // 8 min
+/** Ceiling for exhaustive mode — 300 targets × 2s, with headroom. */
+const MAX_EXHAUSTIVE_PAGE_BUDGET_MS = 900_000; // 15 min
 /** Max click targets when exhaustively covering a page. */
 const EXHAUSTIVE_TARGET_CAP = 300;
+
+/**
+ * Budget for a page, sized to its actual target count.
+ *
+ * `targetCount` includes only what is queued up front; clicks that reveal more
+ * targets (dropdown items, expanded panels) push against the ceiling, which is
+ * why the ceiling is well above floor + caps.
+ */
+export function budgetForPage(targetCount: number, exhaustive: boolean): number {
+  const floor = exhaustive ? EXHAUSTIVE_PAGE_BUDGET_MS : DEFAULT_PAGE_EXPLORATION_BUDGET_MS;
+  return Math.min(budgetCeiling(exhaustive), Math.max(floor, targetCount * PER_TARGET_BUDGET_MS));
+}
+
+/** Hard upper bound for one page, whatever the measured cost turns out to be. */
+export function budgetCeiling(exhaustive: boolean): number {
+  return exhaustive ? MAX_EXHAUSTIVE_PAGE_BUDGET_MS : MAX_PAGE_EXPLORATION_BUDGET_MS;
+}
+
+/**
+ * Re-estimate the budget from what clicks on THIS page actually cost.
+ *
+ * `PER_TARGET_BUDGET_MS` is a starting guess, and on a heavy SPA it was wrong by
+ * almost 6× — a measured run averaged 11.7s per target and ran out with 13 of 54
+ * targets untried, while the ceiling still had headroom to spare. Extending the
+ * deadline from the observed rate uses that headroom instead of stopping early on
+ * the strength of a constant.
+ *
+ * Only ever extends, never shrinks: a page that started slowly should not have its
+ * budget cut when a few fast clicks pull the average down.
+ */
+export function adaptBudget(
+  current: number,
+  elapsedMs: number,
+  clicksDone: number,
+  targetCount: number,
+  exhaustive: boolean
+): number {
+  if (clicksDone < 3) return current; // too few samples to mean anything
+  const perTarget = elapsedMs / clicksDone;
+  const projected = Math.ceil(perTarget * targetCount * 1.15); // 15% headroom
+  return Math.min(budgetCeiling(exhaustive), Math.max(current, projected));
+}
 /** Max elements newly revealed by clicks (dropdowns/menus) to follow per page. */
 const MAX_REVEALED_PER_PAGE = 150;
 /** Timeout for a single exploration click + modal detect cycle (ms). */
@@ -336,7 +450,9 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     submitForms = false,
     executionPresetId,
     useDedicatedTab = true,
-    pageBudgetMs = DEFAULT_PAGE_EXPLORATION_BUDGET_MS,
+    // No default: an unset budget is derived per page from its target count
+    // (budgetForPage), which a single flat number cannot do correctly.
+    pageBudgetMs,
     runBudgetMs,
     captureScreenshots = false,
     exhaustiveStartPage = false,
@@ -455,7 +571,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     allowMutations: submitForms,
   });
   const exploreLedger = createMutationLedger();
-  const safetyHandles: Array<{ dispose(): Promise<void> }> = [];
+  const safetyHandles: SafetyHandle[] = [];
   if (isPolicyEmpty(explorePolicy)) {
     log.warn(
       `Could not resolve an origin from "${startUrl}" — request enforcement is NOT active for this exploration.`
@@ -508,6 +624,51 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
   // URLs already placed in the queue. Prevents enqueueing — and double-reserving
   // a pattern slot for — the same URL discovered from multiple sources.
   const queuedUrls = new Set<string>([startUrl]);
+
+  // ── Resume an interrupted run ────────────────────────────────────────────
+  // The whole point of writing checkpoints (§4). Without this read, the crawl
+  // persisted its frontier on every page and then restarted from the seed anyway
+  // — the cost of durability with none of the benefit.
+  //
+  // Skipped for fresh/re-explore runs: those mean "ignore what we knew", so
+  // resuming would contradict the request.
+  const optionsHash = hashOptions({ maxDepth, maxPages, submitForms, agentMode });
+  const runId = `explore-${runStart}`;
+  let resumedFrom: ExplorationCheckpoint | null = null;
+  if (!fresh && !reexplorePage) {
+    const decision = evaluateCheckpoint(await loadCheckpoint(), {
+      startUrl,
+      optionsHash,
+      now: runStart,
+    });
+    // Both outcomes are stated. A silent refusal would present a full restart as
+    // a resume, and the user would watch pages be re-walked with no explanation.
+    log.info(describeResume(decision));
+    if (decision.resume) {
+      resumedFrom = decision.checkpoint;
+      for (const url of decision.checkpoint.visited) visitedUrls.add(url);
+      // Restore the frontier in its stored order, ahead of the seed. Each entry
+      // goes through tryEnqueue's bookkeeping so pattern slots stay reserved
+      // exactly once.
+      queue.length = 0;
+      queuedUrls.clear();
+      for (const entry of decision.checkpoint.frontier) {
+        if (visitedUrls.has(entry.url) || queuedUrls.has(entry.url)) continue;
+        queue.push({ url: entry.url, depth: entry.depth });
+        queuedUrls.add(entry.url);
+      }
+      // The seed goes back only if the checkpoint did not already cover it —
+      // otherwise a resumed run re-scans the page it was already past.
+      if (!visitedUrls.has(startUrl) && !queuedUrls.has(startUrl)) {
+        queue.push({ url: startUrl, depth: 0 });
+        queuedUrls.add(startUrl);
+      }
+      addWarning(
+        `Resumed from a checkpoint: ${decision.checkpoint.visited.length} page(s) already mapped, ` +
+          `${queue.length} queued. Pass fresh=true to ignore it and re-walk everything.`
+      );
+    }
+  }
   /** Reserve a pattern slot and enqueue a URL once. Returns true if enqueued. */
   const tryEnqueue = (url: string, depth: number): boolean => {
     if (visitedUrls.has(url) || queuedUrls.has(url)) return false;
@@ -602,7 +763,9 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     await settle(tabId, { idleMs: 400, fallbackMs: 300, pageLoadTimeMs });
 
     // ── 1. Reveal hidden content (hover nav, scroll lazy sections) ────────────
-    await revealPageContent(tabId);
+    // Keeps what the sweep saw: virtualized rows mounted mid-scroll are gone by
+    // the time the scan below runs, so without this they were never discovered.
+    const revealedElements = await revealPageContent(tabId);
 
     // ── 2. Read live page state. A null snapshot means the content script never
     // answered (injection failed / hard navigation error) — a SCAN FAILURE, not
@@ -655,7 +818,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
 
     // ── 3. Scan elements + forms + links + metadata + detectors in parallel ──
     const harBefore = cdpAvailable ? getHAREntries(tabId).length : 0;
-    const [elements, formFields, hrefLinks, pageMetadata, pageActions, dataTables, pageTypeInfo, wizardSteps, conditionalFields] = await Promise.all([
+    const [scannedElements, formFields, hrefLinks, pageMetadata, pageActions, dataTables, pageTypeInfo, wizardSteps, conditionalFields] = await Promise.all([
       scanPage(tabId),
       scanFormFields(tabId),
       startOrigin ? scanPageLinks(tabId, startOrigin) : Promise.resolve([] as Array<{ url: string; text: string }>),
@@ -667,6 +830,17 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
       scanConditionalFields(tabId),
     ]);
 
+    // Union of the settled scan and the sweep. Deduped by selector, with the
+    // settled sighting winning: its geometry describes the page as a user finds
+    // it, while a mid-scroll sighting describes a transient position.
+    const elements = mergeElements(scannedElements, revealedElements);
+    if (elements.length > scannedElements.length) {
+      log.info(
+        `Reveal sweep contributed ${elements.length - scannedElements.length} element(s) ` +
+          `not present in the settled scan (virtualized/lazy content)`
+      );
+    }
+
     // ── 3a. Broken/error page — record as a broken link, don't map it ──
     if (pageTypeInfo.isErrorPage) {
       brokenLinkUrls.add(currentUrl);
@@ -677,7 +851,11 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     coverage.pagesScanned++;
 
     const priorStructureHash = graph.nodes.find((n) => n.url === currentUrl)?.structureHash;
-    const structureHash = computeStructureFingerprint(elements, formFields);
+    // Fingerprint from the SETTLED scan, not the union. Which virtualized rows
+    // happen to mount during a sweep varies run to run, so hashing the union
+    // would make the fingerprint differ every time and permanently disable the
+    // skip-unchanged fast path.
+    const structureHash = computeStructureFingerprint(scannedElements, formFields);
     const structureUnchanged = fresh && !!priorStructureHash && priorStructureHash === structureHash;
 
     const node = addNode(graph, currentUrl, currentTitle, elements.length, formFields);
@@ -722,10 +900,63 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
       } catch { /* non-fatal — a11y audit failure shouldn't block exploration */ }
     }
 
+    /** State the coverage cost of every safety decision, per page. */
+    function reportWithheld(url: string, p: TargetPartition): void {
+      if (p.sessionEnding.length > 0) {
+        log.info(
+          `Withheld ${p.sessionEnding.length} session-ending control(s) on ${url} ` +
+            `(${p.sessionEnding.slice(0, 3).map((el) => classifyControl(el).risk === 'session-ending'
+              ? (classifyControl(el) as { reason: string }).reason
+              : resolveElementLabel(el)).join('; ')}). ` +
+            `These are never clicked — a logged-out crawler maps the login page.`
+        );
+      }
+      if (p.destructive.length > 0) {
+        const how = p.destructive
+          .slice(0, 3)
+          .map((el) => {
+            const v = classifyControl(el);
+            return v.risk === 'destructive' ? v.reason : resolveElementLabel(el);
+          })
+          .join('; ');
+        log.info(
+          `Withheld ${p.destructive.length} destructive control(s) on ${url} (${how}` +
+            `${p.destructive.length > 3 ? ', …' : ''}). Set includeDangerous to explore them.`
+        );
+      }
+      if (p.unidentified.length > 0) {
+        addWarning(
+          `${p.unidentified.length} unnamed control(s) in data rows on ${url} were NOT clicked — ` +
+            `no label, no title and no recognisable icon, so their effect is unknown. ` +
+            `These are commonly row-level edit/delete actions; the app should give them ` +
+            `accessible names for them to be testable.`
+        );
+      }
+      if (p.overCap > 0) {
+        addWarning(`${p.overCap} click target(s) on ${url} exceeded the per-page cap and were not tried.`);
+      }
+      if (p.rowNavigationsSkipped > 0) {
+        // Sampling rows is a deliberate choice, so it is stated as one. Rows lead
+        // to the same detail template, so a sample discovers it; the count makes
+        // clear this is not per-record coverage.
+        log.info(
+          `Sampled row navigations on ${url}: clicked up to 3, skipped ${p.rowNavigationsSkipped} ` +
+            `further row(s) leading to the same detail template.`
+        );
+      }
+    }
+
     emitProgress(currentTitle || currentUrl, 'running');
 
     // ── 4. Enqueue discovered href links (depth-independent) ─────────────
     for (const link of hrefLinks) {
+      // Never walk into a logout URL. Links are enqueued without being clicked, so
+      // the click-set classifier never sees them — this is the only place a
+      // `/logout` href can be stopped before it becomes a navigation.
+      if (isSessionEndingUrl(link.url)) {
+        log.info(`Skipping session-ending link: ${link.url}`);
+        continue;
+      }
       const change = classifyUrlChange(currentUrl, link.url);
       if (change === 'in-page') {
         if (!node.tabs) node.tabs = [];
@@ -750,27 +981,61 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
 
     // ── 5. Click-based discovery for JS-only navigation ──────────────────
     let targets: Array<{ selector: string; text?: string; ariaLabel?: string; description?: string }>;
+    const partition = partitionExplorationTargets(elements, getVisitedForPage(currentUrl), {
+      includeDangerous,
+      maxTargets: exhaustiveThisPage ? EXHAUSTIVE_TARGET_CAP : undefined,
+    });
+    // Say what was withheld. Skipping 50 delete buttons and reporting nothing
+    // looks identical to a page that had none (§13, no silent caps).
+    reportWithheld(currentUrl, partition);
+
     if (exhaustiveThisPage) {
-      targets = selectExplorationTargets(elements, getVisitedForPage(currentUrl), { includeDangerous, maxTargets: EXHAUSTIVE_TARGET_CAP });
+      targets = partition.targets;
       log.info(`Exhaustive mode: clicking all ${targets.length} interactive elements on "${currentTitle || currentUrl}"`);
     } else if (useAgentMode) {
       const agentActions = await getAgentActions(currentUrl, currentTitle, elements, visitedUrls, getVisitedForPage(currentUrl), aiClient!);
       if (agentActions.length === 0) {
         log.info(`Agent mode: no high-value actions on "${currentTitle || currentUrl}" — using standard fallback`);
-        targets = selectExplorationTargets(elements, getVisitedForPage(currentUrl), { includeDangerous });
+        targets = partition.targets;
       } else {
-        log.info(`Agent mode: clicking ${agentActions.length} AI-ranked elements on "${currentTitle || currentUrl}"`);
-        targets = agentActions.map((a) => {
+        // The ranker sees every element, so filter its picks through the same
+        // safety gate the deterministic path uses — a model suggesting "click the
+        // trash icon" must not bypass what the classifier just withheld.
+        // Session-ending selectors are excluded unconditionally; the rest respect
+        // includeDangerous. A model suggesting "click Sign out" must not be able to
+        // end the run just because destructive exploration was enabled.
+        const neverClick = new Set(partition.sessionEnding.map((e) => e.selector));
+        const withheld = new Set([...partition.destructive, ...partition.unidentified].map((e) => e.selector));
+        const allowed = agentActions.filter(
+          (a) => !neverClick.has(a.selector) && (includeDangerous || !withheld.has(a.selector))
+        );
+        if (allowed.length < agentActions.length) {
+          log.warn(
+            `Agent mode: dropped ${agentActions.length - allowed.length} AI-ranked action(s) on ` +
+              `${currentUrl} that the safety classifier withheld.`
+          );
+        }
+        log.info(`Agent mode: clicking ${allowed.length} AI-ranked elements on "${currentTitle || currentUrl}"`);
+        targets = allowed.map((a) => {
           const matchedEl = elements.find((el) => el.selector === a.selector);
           return { selector: a.selector, text: matchedEl?.text || undefined, ariaLabel: matchedEl?.ariaLabel || undefined, description: a.description };
         });
       }
     } else {
-      targets = selectExplorationTargets(elements, getVisitedForPage(currentUrl), { includeDangerous });
+      targets = partition.targets;
     }
 
     const pageExplorationStart = Date.now();
-    const effectivePageBudget = exhaustiveThisPage ? EXHAUSTIVE_PAGE_BUDGET_MS : pageBudgetMs;
+    // Sized to the work in front of it (see budgetForPage). An explicit
+    // pageBudgetMs still wins — a caller who names a number means it.
+    // Starts from the estimate and grows toward the ceiling as real click costs
+    // come in. An explicit pageBudgetMs is taken literally and never adapted — a
+    // caller who names a number means it.
+    let effectivePageBudget = pageBudgetMs ?? budgetForPage(targets.length, exhaustiveThisPage);
+    log.info(
+      `Page budget for "${currentTitle || currentUrl}": ${Math.round(effectivePageBudget / 1000)}s ` +
+        `for ${targets.length} target(s)${exhaustiveThisPage ? ' (exhaustive)' : ''}`
+    );
     // Selectors known before each click — used to detect elements REVEALED by a
     // click (dropdown menus, expanded panels) so we can click those too.
     const knownSelectors = new Set(elements.map((e) => e.selector));
@@ -779,9 +1044,24 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     for (let ti = 0; ti < targets.length; ti++) {
       const target = targets[ti];
       if (signal?.aborted) break;
-      if (Date.now() - pageExplorationStart > effectivePageBudget) {
-        log.info(`Page exploration budget exceeded on ${currentUrl}, moving on (${ti}/${targets.length} targets explored)`);
+      const elapsedOnPage = Date.now() - pageExplorationStart;
+      if (elapsedOnPage > effectivePageBudget) {
+        // A warning, not an info line: truncated exploration reads as full
+        // coverage in the report unless the shortfall is stated (§13, no silent caps).
+        // The measured rate is included because it is the actionable part — it says
+        // whether the page is slow or the budget is simply too small.
+        const perTarget = ti > 0 ? Math.round(elapsedOnPage / ti / 100) / 10 : 0;
+        addWarning(
+          `Page budget (${Math.round(effectivePageBudget / 1000)}s, the ceiling for this mode) ` +
+            `exhausted on ${currentUrl} — explored ${ti} of ${targets.length} target(s) at ` +
+            `~${perTarget}s each; ${targets.length - ti} not tried.`
+        );
         break;
+      }
+      if (pageBudgetMs === undefined) {
+        effectivePageBudget = adaptBudget(
+          effectivePageBudget, elapsedOnPage, ti, targets.length, exhaustiveThisPage
+        );
       }
 
       const pageVisited = getVisitedForPage(currentUrl);
@@ -811,8 +1091,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
           // Wait for any click-triggered XHR/route change to settle.
           await settle(tabId, { idleMs: 350 });
 
-          const afterSnap = await getPageSnapshot(tabId);
-          const afterUrl = afterSnap?.url ?? currentUrl;
+          const afterUrl = await readCurrentUrl(tabId, currentUrl);
           const change = classifyUrlChange(beforeUrl, afterUrl);
 
           if (change === 'in-page') {
@@ -892,7 +1171,13 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
               el.tag === 'button' || el.tag === 'a' ||
               el.role === 'button' || el.role === 'menuitem' || el.role === 'tab' || el.role === 'option' || el.role === 'link';
             if (!clickable) continue;
-            if (!includeDangerous && isDangerousLabel(el.text)) continue;
+            // Same classifier as the main pass. This filter used to read text
+            // only, which meant a menu that revealed an icon-only "Delete"
+            // queued it for clicking.
+            // isSafeToClick, not a raw classify: it refuses session-ending
+            // controls even when includeDangerous is set, and a user menu revealed
+            // by a click is exactly where "Sign out" lives.
+            if (!isSafeToClick(el, includeDangerous)) continue;
             targets.push({ selector: el.selector, text: el.text || undefined, ariaLabel: el.ariaLabel || undefined });
             revealedCount++;
             added++;
@@ -911,6 +1196,42 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
           log.debug(`Element interaction failed: ${target.selector}`, err);
         }
       }
+    }
+
+    // ── 5b. Selection discovery: what does checking a row reveal? ─────────────
+    // Row checkboxes are safe by default (client-side selection only). Settings
+    // toggles usually persist on change, so they ride the existing mutation gate.
+    try {
+      const selectionDiscoveries = await probeSelectionActions(
+        elements,
+        getVisitedForPage(currentUrl),
+        {
+          click: async (selector, description) => {
+            await executeStepViaPort({ order: 0, action: 'click', selector, description }, tabId);
+          },
+          scanActions: () => scanPageActions(tabId),
+          settle: () => settle(tabId, { idleMs: 350 }),
+        },
+        {
+          includeSettingsToggles: submitForms,
+          maxTargets: exhaustiveThisPage ? 8 : 3,
+        }
+      );
+      if (selectionDiscoveries.length > 0) {
+        node.selectionActions = selectionDiscoveries;
+        for (const d of selectionDiscoveries) {
+          if (!d.resetOk) {
+            addWarning(
+              `Selection via "${d.triggerLabel}" on ${currentUrl} could not be undone — ` +
+                `later findings on this page may reflect an active selection.`
+            );
+          }
+        }
+      }
+    } catch (err) {
+      addWarning(
+        `Selection exploration failed on ${currentUrl}: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
 
     // ── 6. Form interaction discovery (mutates app — gated behind submitForms) ──
@@ -936,6 +1257,28 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
   let stopReason: Error | null = null;
   const budgetExceeded = (): boolean => !!runBudgetMs && Date.now() - runStart > runBudgetMs;
 
+  /**
+   * Persist the frontier so an interrupted run can resume.
+   *
+   * The graph was already saved incrementally, so data was never lost — but the
+   * frontier and visited set lived only in these closures, so an evicted worker
+   * restarted from the seed and re-walked everything. Written on dequeue: at most
+   * one page of progress is lost, which is the honest guarantee (§4).
+   */
+  const saveCheckpoint = (): void => {
+    void persistCheckpoint(
+      createCheckpoint({
+        runId,
+        startUrl,
+        optionsHash,
+        frontier: queue,
+        visited: visitedUrls,
+        pagesScanned: coverage.pagesScanned,
+        now: Date.now(),
+      })
+    ).catch((err) => log.debug('Checkpoint save failed (non-fatal)', err));
+  };
+
   const dequeueNext = (): { url: string; depth: number } | null => {
     while (queue.length > 0) {
       if (visitedUrls.size >= maxPages) return null;
@@ -943,6 +1286,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
       if (visitedUrls.has(entry.url)) continue;
       visitedUrls.add(entry.url);
       coverage.pagesAttempted++;
+      saveCheckpoint();
       return entry;
     }
     return null;
@@ -1007,7 +1351,17 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
   // ── Dispose enforcement, detach CDP, close dedicated tabs ─────────────────
   // Enforcement first: the Fetch listener must go before the session it watches
   // (CLAUDE.md §11.1 — an orphaned listener is a leak).
+  // Report page-breaking refusals as a run-level warning, not a log line. A
+  // policy that aborted the app's own scripts means the crawl mapped a shell that
+  // never booted — a result that LOOKS valid, which is why it has to be said out
+  // loud in the report the user reads.
   for (const handle of safetyHandles) {
+    for (const blocked of handle.criticalBlocks()) {
+      addWarning(
+        `Request enforcement blocked a resource the page needs: ${blocked}. ` +
+          `The app may not have loaded — add this origin to the project allowlist and re-run.`
+      );
+    }
     try { await handle.dispose(); } catch { /* non-fatal */ }
   }
   const exploreLedgerSummary = exploreLedger.summary();
@@ -1032,11 +1386,47 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     try { await chrome.tabs.remove(id); } catch { /* tab may already be closed */ }
   }
 
+  // A completed run has nothing to resume — leaving the checkpoint would offer a
+  // stale resume on the next exploration.
+  await clearCheckpoint().catch(() => undefined);
+
   // ── Finalise coverage ─────────────────────────────────────────────────────
   coverage.untestedPaths = countUntestedPaths();
   coverage.brokenLinks = brokenLinkUrls.size;
   coverage.coverageRatio = computeCoverageRatio();
+
+  // Risk-weighted coverage alongside the legacy ratio. The legacy figure is kept
+  // for continuity, but it is self-referential — it cannot distinguish "explored
+  // the whole app" from "discovered almost nothing and explored that".
+  try {
+    const visited = new Set(graph.nodes.map((n) => n.url));
+    const discoveredNotVisited = [
+      ...new Set(graph.edges.map((e) => e.to).filter((u) => !visited.has(u))),
+    ];
+    const risk = computeRiskCoverage({ graph, discoveredNotVisited });
+    coverage.riskCoverageRatio = risk.ratio;
+    coverage.highRiskGaps = risk.highRiskGaps;
+    log.info(
+      `Coverage: ${coverage.pagesScanned} scanned, legacy ratio ${Math.round(coverage.coverageRatio * 100)}%, ` +
+        `RISK-weighted ${Math.round(risk.ratio * 100)}% (${risk.highRiskGaps} high-risk page(s) unexplored)`
+    );
+    if (risk.gaps.length > 0) {
+      log.info(formatRiskCoverage(risk));
+    }
+  } catch (err) {
+    // Coverage reporting must never fail a completed exploration.
+    log.warn('Risk coverage computation failed', err);
+  }
   coverage.complete = runCompleted;
+  if (resumedFrom) {
+    // `pagesScanned` counts THIS segment. Reporting it alone after a resume reads
+    // as the whole crawl's coverage, which understates the map on disk.
+    log.info(
+      `This segment scanned ${coverage.pagesScanned} page(s); ` +
+        `${resumedFrom.pagesScanned} were already scanned before the interruption ` +
+        `(${graph.nodes.length} node(s) in the graph).`
+    );
+  }
   log.info(
     `Coverage: ${coverage.pagesScanned} scanned, ${coverage.pagesFailed} failed, ` +
     `${coverage.untestedPaths} untested path(s), ${coverage.brokenLinks} broken link(s), ` +

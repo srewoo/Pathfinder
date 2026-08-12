@@ -44,8 +44,11 @@ describe('resolvePolicy', () => {
     });
     expect(p.allowedOrigins).toContain('https://api.app.test');
     expect(decide({ url: 'https://api.app.test/v1', method: 'GET' }, p).allow).toBe(true);
-    // A sibling subdomain that was NOT listed stays blocked.
-    expect(decide({ url: 'https://admin.app.test/', method: 'GET' }, p).allow).toBe(false);
+    // A sibling subdomain that was NOT listed stays off the allowlist — asserted
+    // by navigation, which is the act the origin gate refuses.
+    expect(
+      decide({ url: 'https://admin.app.test/', method: 'GET', resourceType: 'Document' }, p).allow
+    ).toBe(false);
   });
 
   it('given_additional_urls_then_their_origins_are_included', () => {
@@ -69,7 +72,9 @@ describe('resolvePolicy', () => {
 
   it('given_a_different_port_then_it_is_a_different_origin', () => {
     const p = resolvePolicy({ startUrl: 'http://localhost:3000/' });
-    expect(decide({ url: 'http://localhost:3001/', method: 'GET' }, p).allow).toBe(false);
+    expect(
+      decide({ url: 'http://localhost:3001/', method: 'GET', resourceType: 'Document' }, p).allow
+    ).toBe(false);
   });
 
   it('given_a_resolved_policy_then_third_party_subresources_still_load', () => {

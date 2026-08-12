@@ -29,9 +29,13 @@ export const OriginPolicySchema = z.object({
    */
   allowMutations: z.boolean().default(false),
   /**
-   * Third-party subresources (fonts, analytics, CDN images) are usually
-   * harmless and blocking them breaks page rendering, which produces false
-   * positives. Allowed by default, and only ever for non-mutating verbs.
+   * Allow the page's own cross-origin READS — fonts, CDN bundles, analytics, API
+   * GETs to third parties. On by default: blocking them breaks the app under test,
+   * and a broken app produces findings that describe our damage rather than its
+   * behaviour.
+   *
+   * Never covers mutating verbs, and never covers navigation off the allowlist.
+   * Turn it off for a hermetic run where any off-allowlist traffic should fail.
    */
   allowThirdPartySubresources: z.boolean().default(true),
 });
@@ -45,13 +49,60 @@ export type PolicyDecision =
 export interface PolicyRequest {
   url: string;
   method: string;
-  /** CDP resource type, when known. Used for the subresource exemption. */
+  /** CDP resource type, when known. */
   resourceType?: string;
+  /**
+   * The request's `Sec-Fetch-Dest`, when the browser sent one.
+   *
+   * The only precise way to tell a top-level NAVIGATION (`document`) from an
+   * EMBEDDED frame (`iframe`). CDP reports both as resourceType `Document`, so a
+   * rule based on resource type alone aborted legitimate embeds — measured against
+   * a real app, a Storybook iframe from a design-library host was refused as though
+   * the crawler had tried to walk off-site:
+   *
+   *   BLOCKED Document GET https://design-library.example/stencil-3/iframe.html
+   *
+   * An `<iframe>` is the page rendering itself; only the top frame moving is the
+   * crawler leaving the app.
+   */
+  destination?: string;
 }
 
-const SUBRESOURCE_TYPES = new Set([
-  'Image', 'Font', 'Stylesheet', 'Media', 'Manifest', 'Other',
-]);
+/** `Sec-Fetch-Dest` values that mean "embedded in the page", not "navigated to". */
+const EMBEDDED_DESTINATIONS = new Set(['iframe', 'frame', 'embed', 'object', 'fencedframe']);
+
+/**
+ * Is this request the crawler leaving the app?
+ *
+ * Prefers `Sec-Fetch-Dest` and falls back to the resource type when the header is
+ * absent, which keeps the conservative behaviour for requests the browser did not
+ * annotate.
+ */
+export function isTopLevelNavigation(req: PolicyRequest): boolean {
+  const dest = req.destination?.toLowerCase();
+  if (dest) {
+    if (EMBEDDED_DESTINATIONS.has(dest)) return false;
+    return dest === 'document';
+  }
+  return req.resourceType === 'Document';
+}
+
+/**
+ * Resource types whose loss means WE broke the page, rather than the policy doing
+ * its job. A refusal on one of these is reported loudly, because results from the
+ * run cannot be trusted afterwards.
+ *
+ * `XHR`/`Fetch` are deliberately absent. A refused POST in a read-only run is the
+ * mutation gate working exactly as intended — it is recorded in the mutation
+ * ledger, and shouting "results are suspect" for each one would train people to
+ * ignore the channel that reports real damage.
+ */
+export const PAGE_CRITICAL_TYPES = new Set(['Script', 'Document', 'Stylesheet']);
+
+/** True when refusing this request would compromise the run's validity. */
+export function isPageCritical(resourceType: string | undefined): boolean {
+  return resourceType !== undefined && PAGE_CRITICAL_TYPES.has(resourceType);
+}
 
 /** Origins that are never test targets and never worth aborting on. */
 const ALWAYS_ALLOWED_SCHEMES = new Set(['data:', 'blob:', 'about:', 'chrome-extension:']);
@@ -119,19 +170,45 @@ export function decide(req: PolicyRequest, policy: OriginPolicy): PolicyDecision
   const scheme = schemeOf(req.url);
   if (scheme && ALWAYS_ALLOWED_SCHEMES.has(scheme)) return { allow: true };
 
+  // Fail closed on an empty allowlist. An empty list means we could not work out
+  // what we are allowed to touch — not that everything is fine. Relaxing the
+  // off-allowlist rule below to permit the page's own reads must not quietly turn
+  // "we don't know" into "allow anything", so it is checked first.
+  if (policy.allowedOrigins.length === 0) {
+    return {
+      allow: false,
+      rule: 'origin',
+      reason: 'no allowed origins are configured — refusing everything (fail closed)',
+    };
+  }
+
   const onAllowlist = isOriginAllowed(req.url, policy.allowedOrigins);
   const mutating = isMutating(req.method);
 
   if (!onAllowlist) {
-    // Passive third-party subresources may load, but never with a mutating verb.
-    const isSubresource = req.resourceType ? SUBRESOURCE_TYPES.has(req.resourceType) : false;
-    if (policy.allowThirdPartySubresources && isSubresource && !mutating) {
+    // A page's own cross-origin READ is the app working, not the crawler
+    // wandering. Enumerating "safe" resource types was the wrong shape for this
+    // rule and kept failing in the same direction: first `Script` was missing and
+    // module-federation bundles were aborted; then a Google Fonts stylesheet
+    // fetched programmatically arrived typed as `XHR` and was aborted too, once
+    // every thirty seconds:
+    //
+    //   BLOCKED XHR GET https://fonts.googleapis.com/css2?family=DM+Mono…
+    //
+    // Neither request could write anything. What this gate exists to stop is the
+    // crawler NAVIGATING into production or a third-party admin panel, and any
+    // request that MUTATES an origin we were not pointed at. Those two are checked
+    // explicitly below; everything else is the page loading what it needs.
+    const navigating = isTopLevelNavigation(req);
+    if (policy.allowThirdPartySubresources && !mutating && !navigating) {
       return { allow: true };
     }
     return {
       allow: false,
       rule: 'origin',
-      reason: `origin ${originOf(req.url) ?? req.url} is not on the project allowlist`,
+      reason: navigating
+        ? `navigation to ${originOf(req.url) ?? req.url} is not on the project allowlist`
+        : `${req.method.toUpperCase()} ${originOf(req.url) ?? req.url} is not on the project allowlist`,
     };
   }
 

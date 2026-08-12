@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Trash2, Cpu, Globe, Image, Webhook, Zap, CheckCircle, XCircle, Bot, FlaskConical } from 'lucide-react';
+import { Trash2, Cpu, Globe, Image, Webhook, Zap, CheckCircle, XCircle, Bot, FlaskConical, Bug } from 'lucide-react';
 import type { PlanningMode } from '../../../storage/schemas';
 import { useSettingsStore } from '../../stores/settings-store';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import { ProviderSelect } from './ProviderSelect';
 import { ApiKeyConfig } from './ApiKeyConfig';
 import { ExecutionPresetManager } from './ExecutionPresetManager';
@@ -67,7 +68,7 @@ export function SettingsPanel() {
             <div className="flex items-center gap-1.5">
               <Cpu size={11} className="text-primary flex-shrink-0" />
               <span className="text-xs font-medium text-text-primary">Local (Free)</span>
-              <span className="text-2xs bg-success-dim text-success px-1.5 py-0.5 rounded-full font-medium">No API key</span>
+              <span className="text-2xs bg-success-dim text-success-text px-1.5 py-0.5 rounded-full font-medium">No API key</span>
             </div>
             <p className="text-2xs text-text-muted mt-0.5">
               all-MiniLM-L6-v2 · 384-dim · ~23 MB download once
@@ -112,7 +113,7 @@ export function SettingsPanel() {
             placeholder="e.g. text-embedding-3-small"
           />
           {store.provider === 'anthropic' && (
-            <p className="text-2xs text-warning">
+            <p className="text-2xs text-warning-text">
               Anthropic has no embedding API — switch to Local or use OpenAI/Google.
             </p>
           )}
@@ -143,10 +144,38 @@ export function SettingsPanel() {
             <div className="flex items-center gap-1.5">
               <Image size={11} className="text-primary flex-shrink-0" />
               <span className="text-xs font-medium text-text-primary">Describe Images (Vision AI)</span>
-              <span className="text-2xs bg-warning-dim text-warning px-1.5 py-0.5 rounded-full font-medium">API cost</span>
+              <span className="text-2xs bg-warning-dim text-warning-text px-1.5 py-0.5 rounded-full font-medium">API cost</span>
             </div>
             <p className="text-2xs text-text-muted mt-0.5">
               Use AI vision to describe screenshots and diagrams in help articles during crawl. ~$0.01-0.03 per image.
+            </p>
+          </div>
+        </button>
+      </div>
+
+      {/* ── Debug: retain redacted response bodies (ADR 001 phase 4) ── */}
+      <div className="rounded-lg border border-border overflow-hidden">
+        <button
+          onClick={() => store.setRetainResponseBodies(!store.retainResponseBodies)}
+          className={[
+            'w-full flex items-start gap-3 p-3 text-left transition-colors',
+            store.retainResponseBodies ? 'bg-primary-dim' : 'bg-surface-2 hover:bg-surface-3',
+          ].join(' ')}
+        >
+          <div className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center ${store.retainResponseBodies ? 'border-primary bg-primary' : 'border-border'}`}>
+            {store.retainResponseBodies && <div className="w-1.5 h-1.5 bg-white rounded-sm" />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <Bug size={11} className="text-primary flex-shrink-0" />
+              <span className="text-xs font-medium text-text-primary">Retain API response bodies</span>
+              <span className="text-2xs bg-warning-dim text-warning-text px-1.5 py-0.5 rounded-full font-medium">debug</span>
+            </div>
+            <p className="text-2xs text-text-muted mt-0.5">
+              Keeps redacted response bodies for 24h so you can see why a contract check fired.
+              Tokens, emails and personal fields are masked before storage; bodies are never
+              exported, and switching this off deletes them. Contract checking itself needs only
+              schemas, which are always stored.
             </p>
           </div>
         </button>
@@ -187,22 +216,17 @@ export function SettingsPanel() {
             Planning Mode
           </div>
         </label>
-        <div className="flex gap-1">
-          {(['auto', 'interactive', 'single-shot'] as PlanningMode[]).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => store.setPlanningMode(mode)}
-              className={[
-                'flex-1 py-1.5 rounded-lg text-2xs font-medium transition-colors border',
-                store.planningMode === mode
-                  ? 'bg-primary text-white border-primary'
-                  : 'bg-surface-3 text-text-muted border-border hover:border-border-light',
-              ].join(' ')}
-            >
-              {mode === 'single-shot' ? 'Single-shot' : mode.charAt(0).toUpperCase() + mode.slice(1)}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          options={[
+            { id: 'auto', label: 'Auto' },
+            { id: 'interactive', label: 'Interactive' },
+            { id: 'single-shot', label: 'Single-shot' },
+          ]}
+          value={store.planningMode}
+          onChange={(mode) => store.setPlanningMode(mode as PlanningMode)}
+          stacked={false}
+          label="Planning mode"
+        />
         <p className="text-2xs text-text-muted">
           {store.planningMode === 'auto'
             ? 'Interactive first, falls back to single-shot on retry. Best results.'
@@ -242,22 +266,17 @@ export function SettingsPanel() {
           Test Concurrency
           <span className="ml-1.5 text-2xs text-text-muted font-normal">(parallel tabs)</span>
         </label>
-        <div className="flex items-center gap-2">
-          {[1, 2, 3, 4].map((n) => (
-            <button
-              key={n}
-              onClick={() => store.setTestConcurrency(n)}
-              className={[
-                'flex-1 h-8 rounded-lg text-xs font-medium transition-colors border',
-                store.testConcurrency === n
-                  ? 'bg-primary text-white border-primary'
-                  : 'bg-surface-3 text-text-muted border-border hover:border-border-light',
-              ].join(' ')}
-            >
-              {n === 1 ? '1 (seq)' : `${n}×`}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          options={[1, 2, 3, 4].map((n) => ({
+            id: String(n) as '1' | '2' | '3' | '4',
+            label: n === 1 ? '1 (seq)' : `${n}×`,
+          }))}
+          value={String(store.testConcurrency) as '1' | '2' | '3' | '4'}
+          onChange={(n) => store.setTestConcurrency(Number(n))}
+          stacked={false}
+          size="md"
+          label="Test concurrency"
+        />
         <p className="text-2xs text-text-muted">
           {store.testConcurrency === 1
             ? 'Tests run one at a time.'
@@ -375,22 +394,17 @@ function WebhookSettings() {
 
       <div className="space-y-1.5">
         <label className="block text-xs font-medium text-text-secondary">Trigger</label>
-        <div className="flex gap-1">
-          {(['test_complete', 'suite_complete', 'both'] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTrigger(t)}
-              className={[
-                'flex-1 py-1.5 rounded-lg text-2xs font-medium transition-colors border',
-                trigger === t
-                  ? 'bg-primary text-white border-primary'
-                  : 'bg-surface-3 text-text-muted border-border hover:border-border-light',
-              ].join(' ')}
-            >
-              {t === 'test_complete' ? 'Each Test' : t === 'suite_complete' ? 'Suite End' : 'Both'}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          options={[
+            { id: 'test_complete', label: 'Each Test' },
+            { id: 'suite_complete', label: 'Suite End' },
+            { id: 'both', label: 'Both' },
+          ]}
+          value={trigger}
+          onChange={setTrigger}
+          stacked={false}
+          label="Webhook trigger"
+        />
       </div>
 
       <label className="flex items-center gap-2 text-xs text-text-primary">
@@ -410,8 +424,8 @@ function WebhookSettings() {
         <Button variant="ghost" size="xs" icon={<Webhook size={11} />} onClick={handleTest} disabled={!url.trim()}>
           Test
         </Button>
-        {testStatus === 'success' && <CheckCircle size={14} className="text-success" />}
-        {testStatus === 'error' && <XCircle size={14} className="text-error" />}
+        {testStatus === 'success' && <CheckCircle size={14} className="text-success-text" />}
+        {testStatus === 'error' && <XCircle size={14} className="text-error-text" />}
       </div>
     </div>
   );

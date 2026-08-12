@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Pathfinder - Automated UI Test Crawler",
-  "version": "1.4",
+  "version": "1.5",
   "description": "Autonomously explore your web app to map UI flows and test coverage. Find untested paths and broken links automatically.",
   "permissions": [
     "activeTab",

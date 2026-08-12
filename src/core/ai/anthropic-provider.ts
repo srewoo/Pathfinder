@@ -1,4 +1,5 @@
 import type { AIClientInterface, Message, ChatOptions, MessageContent } from './ai-client';
+import { recordChatUsage } from './token-tracker';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('anthropic');
@@ -49,12 +50,16 @@ export class AnthropicProvider implements AIClientInterface {
 
     const data = await response.json() as {
       content: Array<{ type: string; text: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
     };
 
     const text = data.content.find((c) => c.type === 'text')?.text;
     if (!text) throw new Error('Anthropic returned empty response');
 
-    log.debug('Chat completed', { model: this.model });
+    if (data.usage) {
+      recordChatUsage(this.model, data.usage.input_tokens ?? 0, data.usage.output_tokens ?? 0);
+    }
+    log.debug('Chat completed', { model: this.model, usage: data.usage });
     return text;
   }
 

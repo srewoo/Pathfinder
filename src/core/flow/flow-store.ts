@@ -37,10 +37,6 @@ export async function getAllFlows(): Promise<Flow[]> {
   return flows.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-export async function getFlow(flowId: string): Promise<Flow | undefined> {
-  return flowDB.get(flowId);
-}
-
 export function serializeFlowForAI(flow: Flow): string {
   const lines: string[] = [`## Flow: ${flow.name}`, `Description: ${flow.description}`];
 

@@ -49,17 +49,3 @@ export function ProgressBar({
     </div>
   );
 }
-
-export function IndeterminateBar({ label }: { label?: string }) {
-  return (
-    <div className="space-y-1.5">
-      {label && <span className="text-xs text-text-secondary">{label}</span>}
-      <div className="h-1.5 bg-surface-3 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full bg-primary animate-[loading_1.5s_ease-in-out_infinite]"
-          style={{ width: '40%' }}
-        />
-      </div>
-    </div>
-  );
-}

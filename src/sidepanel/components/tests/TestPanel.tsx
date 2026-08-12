@@ -27,23 +27,23 @@ export function TestPanel() {
 
       {store.error && (
         <div className="p-2.5 bg-error/10 border border-error/20 rounded-lg">
-          <p className="text-xs text-error">{store.error}</p>
+          <p className="text-xs text-error-text">{store.error}</p>
         </div>
       )}
 
       {store.preflightWarnings.length > 0 && (
         <div className="p-2.5 bg-warning/10 border border-warning/20 rounded-lg space-y-1">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-xs text-warning font-medium">Execution preflight warnings</p>
+            <p className="text-xs text-warning-text font-medium">Execution preflight warnings</p>
             <button
               onClick={store.clearPreflightWarnings}
-              className="text-2xs text-warning/80 hover:text-warning transition-colors"
+              className="text-2xs text-warning/80 hover:text-warning-text transition-colors"
             >
               Dismiss
             </button>
           </div>
           {store.preflightWarnings.map((warning) => (
-            <p key={warning} className="text-2xs text-warning leading-relaxed">
+            <p key={warning} className="text-2xs text-warning-text leading-relaxed">
               {warning}
             </p>
           ))}

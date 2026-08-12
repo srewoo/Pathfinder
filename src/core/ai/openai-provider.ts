@@ -1,4 +1,5 @@
 import type { AIClientInterface, Message, ChatOptions, MessageContent } from './ai-client';
+import { recordChatUsage, recordEmbeddingUsage } from './token-tracker';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('openai');
@@ -145,6 +146,12 @@ export class OpenAIProvider implements AIClientInterface {
       );
     }
 
+    // Record what this call cost. The tracker existed and NOTHING fed it, so
+    // `estimateCost()` always returned 0 — which also meant the cost budget guard
+    // could never fire, however low the limit was set.
+    if (result.usage) {
+      recordChatUsage(this.model, result.usage.prompt_tokens ?? 0, result.usage.completion_tokens ?? 0);
+    }
     log.debug('Chat completed', { model: this.model, usage: result.usage });
     return result.content;
   }
@@ -189,7 +196,13 @@ export class OpenAIProvider implements AIClientInterface {
 
       const data = await response.json() as {
         data: Array<{ embedding: number[] }>;
+        usage?: { prompt_tokens?: number; total_tokens?: number };
       };
+
+      // Embedding spend was invisible: a crawl that embedded thousands of chunks
+      // reported $0 because nothing counted these tokens.
+      const embeddingTokens = data.usage?.prompt_tokens ?? data.usage?.total_tokens ?? 0;
+      if (embeddingTokens > 0) recordEmbeddingUsage(this.embeddingModel, embeddingTokens);
 
       results.push(...data.data.map((d) => d.embedding));
     }

@@ -141,7 +141,7 @@ describe('§6 source-level boundary', () => {
     // Belt and braces alongside the lint rule: this fails even if the ESLint
     // override is accidentally disabled (which has happened once already — an
     // empty excludedFiles array silently switched it off).
-    const files = ['test-executor.ts', 'ir-executor.ts', 'action-runner.ts', 'assertion-engine.ts'];
+    const files = ['test-executor.ts', 'ir-executor.ts', 'action-runner.ts'];
     const fs = await import('node:fs/promises');
     for (const file of files) {
       const src = await fs.readFile(`src/core/executor/${file}`, 'utf8');

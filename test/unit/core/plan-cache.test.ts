@@ -92,11 +92,35 @@ describe('getCachedPlan', () => {
   });
 
   it('given plan exactly at TTL boundary when getting then is treated as fresh', async () => {
-    // age == TTL is not strictly greater, so still valid
-    const boundary = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-    vi.mocked(planDB.getByHash).mockResolvedValue(makePlan({ cachedAt: boundary }));
-    const result = await getCachedPlan('h', 'tc-1');
-    expect(result).toBeDefined();
+    // age == TTL is not strictly greater, so still valid.
+    //
+    // Fake timers are REQUIRED here, not a stylistic choice: with a real clock the
+    // test computed `now - 30min` and the code computed `now - cachedAt`, so it
+    // only passed when both Date.now() calls landed in the same millisecond. It
+    // was a genuinely flaky test — freezing time makes the boundary exact.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-11T12:00:00.000Z'));
+      const boundary = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      vi.mocked(planDB.getByHash).mockResolvedValue(makePlan({ cachedAt: boundary }));
+      const result = await getCachedPlan('h', 'tc-1');
+      expect(result).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('given plan one ms past the TTL then it is treated as stale', async () => {
+    // The other side of the boundary, which the flaky version could never assert.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-11T12:00:00.000Z'));
+      const stale = new Date(Date.now() - (30 * 60 * 1000 + 1)).toISOString();
+      vi.mocked(planDB.getByHash).mockResolvedValue(makePlan({ cachedAt: stale }));
+      expect(await getCachedPlan('h', 'tc-1')).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

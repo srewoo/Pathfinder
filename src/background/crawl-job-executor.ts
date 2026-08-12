@@ -11,12 +11,11 @@
  * is the frontier rather than a half-finished traversal.
  */
 import type { Job, QueuedTarget } from '../core/jobs/job-model';
-import { normalizeUrl } from '../core/jobs/job-model';
 import type { StepExecutor } from '../core/jobs/job-runner';
 import { registerExecutor } from './job-pump';
-import { scanPageLinks, scanPageMetadata, getPageSnapshot } from '../core/explorer/page-scanner';
-import { addEdge, addNode, loadGraph, createGraph, saveGraphIncremental } from '../core/explorer/interaction-graph';
-import { executeStep } from '../core/step-executor';
+import { loadGraph, createGraph, saveGraphIncremental } from '../core/explorer/interaction-graph';
+import { applyPageResult, explorePage } from '../core/explorer/explore-page-step';
+import { driverForTab } from '../core/step-executor';
 import { initCDPSession } from '../core/cdp/cdp-session';
 import { isAttached } from '../core/cdp/cdp-client';
 import { createLogger } from '../utils/logger';
@@ -57,34 +56,18 @@ async function ensureTab(job: Job): Promise<number> {
 }
 
 /**
- * Visit one target: navigate, scan, record, and report what it discovered.
+ * Explore one target: navigate, observe, record, and report what it discovered.
  *
- * Idempotent by construction (§4). Re-running a step after a mid-commit crash
- * re-navigates and re-scans the same URL, and `addNode` upserts, so the only cost
- * of a replay is time — never duplicate graph nodes or double-counted pages.
+ * Idempotent by construction (§4). A replayed step re-navigates and re-observes the
+ * same URL, and `applyPageResult` upserts, so the only cost of a replay is time —
+ * never duplicate graph nodes or double-counted pages.
  */
 export const crawlStepExecutor: StepExecutor = async (target: QueuedTarget, job: Job) => {
   const startedAt = Date.now();
   const tabId = await ensureTab(job);
-
   const maxDepth = typeof job.config.maxDepth === 'number' ? job.config.maxDepth : 2;
 
   try {
-    const nav = await executeStep(
-      { order: 0, action: 'navigate', value: target.url, description: `Visit ${target.url}` },
-      tabId
-    );
-    if (!nav.success) {
-      return {
-        outcome: {
-          url: target.url,
-          elapsedMs: Date.now() - startedAt,
-          ok: false,
-          error: nav.error ?? 'navigation failed',
-        },
-      };
-    }
-
     if (!isAttached(tabId)) {
       // No session means no execution at all now that the content-script path is
       // gone (§3). Fail the step loudly rather than recording an empty page.
@@ -93,55 +76,64 @@ export const crawlStepExecutor: StepExecutor = async (target: QueuedTarget, job:
           url: target.url,
           elapsedMs: Date.now() - startedAt,
           ok: false,
-          error: 'CDP session lost — cannot scan this page',
+          error: 'CDP session lost — cannot explore this page',
         },
       };
     }
 
-    const snapshot = await getPageSnapshot(tabId);
-    const origin = safeOrigin(target.url);
-    const links = origin ? await scanPageLinks(tabId, origin).catch(() => []) : [];
+    const origin = safeOrigin(target.url) ?? '';
+    // The real per-page exploration step, extracted from explorer-agent so the
+    // pump runs genuine exploration rather than a stripped-down navigate+scan.
+    const page = await explorePage(driverForTab(tabId), {
+      url: target.url,
+      depth: target.depth,
+      origin,
+      maxDepth,
+    });
+
+    if (page.authWall) {
+      return {
+        outcome: {
+          url: target.url,
+          elapsedMs: Date.now() - startedAt,
+          ok: false,
+          error: `Redirected to an auth wall (${page.url}) — configure a login preset`,
+        },
+      };
+    }
+
+    if (page.brokenLink) {
+      // A broken page is a FINDING, not a step failure: the crawl worked, the app
+      // is wrong. Recording it as a failure would trip the circuit breaker on a
+      // site that simply has dead links.
+      log.warn(`Broken page: ${page.url} (${page.title})`);
+    }
 
     const graph = (await loadGraph()) ?? createGraph();
-    const pageUrl = snapshot?.url ?? target.url;
-    // addNode upserts, which is what makes a replayed step harmless (§4).
-    addNode(graph, pageUrl, snapshot?.title ?? '', links.length);
-    if (target.via) {
-      addEdge(graph, target.via, pageUrl, 'link', '', target.via);
-    }
+    applyPageResult(graph, page, target.via);
     await saveGraphIncremental(graph);
 
-    // Only enqueue deeper targets while within budget — the frontier is
-    // persisted, so an unbounded one is a durable problem, not a transient one.
-    const discovered: QueuedTarget[] =
-      target.depth >= maxDepth
-        ? []
-        : links
-            .filter((l) => safeOrigin(l.url) === origin)
-            .map((l) => ({
-              url: normalizeUrl(l.url),
-              depth: target.depth + 1,
-              via: snapshot?.url ?? target.url,
-            }));
-
     log.info(
-      `Crawled ${target.url} (depth ${target.depth}) — ${discovered.length} new target(s)`
+      `Explored ${page.url} (depth ${target.depth}) — ` +
+        `${page.formFields.length} field(s), ${page.apiEndpoints.length} API(s), ` +
+        `risk ${page.risk.weight}, ${page.nextTargets.length} new target(s)`
     );
 
     return {
       outcome: {
         url: target.url,
-        discovered,
+        discovered: page.nextTargets,
         elapsedMs: Date.now() - startedAt,
         ok: true,
       },
       payload: {
-        url: pageUrl,
-        title: snapshot?.title ?? '',
-        linkCount: links.length,
-        // Persisted with the step result, so a resumed run can report what it
-        // found without re-visiting.
-        headings: (await scanPageMetadata(tabId).catch(() => ({ headings: [] }))).headings ?? [],
+        url: page.url,
+        title: page.title,
+        formFieldCount: page.formFields.length,
+        apiCount: page.apiEndpoints.length,
+        riskWeight: page.risk.weight,
+        riskReasons: page.risk.reasons,
+        brokenLink: page.brokenLink,
       },
     };
   } catch (err) {
@@ -164,18 +156,6 @@ function safeOrigin(url: string): string | null {
   }
 }
 
-/** Release the crawl tab. Called when a job finishes or is abandoned. */
-export async function closeCrawlTab(): Promise<void> {
-  if (crawlTabId === null) return;
-  const id = crawlTabId;
-  crawlTabId = null;
-  try {
-    await chrome.tabs.remove(id);
-  } catch {
-    // Already gone.
-  }
-}
-
 /**
  * Register the executors.
  *
@@ -186,8 +166,9 @@ export async function closeCrawlTab(): Promise<void> {
  */
 export function installCrawlExecutors(): void {
   registerExecutor('crawl', crawlStepExecutor);
-  // Exploration reuses the same step for now: navigate, scan, enqueue. The
-  // richer click/modal/form interaction still lives in the in-memory explorer
-  // and moves here as part of its decomposition (§4/§13).
+  // Exploration and crawling share the step: both map pages read-only. The
+  // click/modal interaction that MUTATES page state stays in the in-memory
+  // explorer for now — moving it here would mean claiming a decomposition that
+  // has not happened.
   registerExecutor('explore', crawlStepExecutor);
 }

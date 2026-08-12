@@ -10,15 +10,15 @@ interface BadgeProps {
 }
 
 const variantClasses: Record<BadgeVariant, string> = {
-  primary: 'bg-primary/15 text-primary-light border-primary/20',
-  success: 'bg-success/15 text-success border-success/25',
-  error: 'bg-error/15 text-error border-error/25',
-  warning: 'bg-warning/15 text-warning border-warning/25',
+  primary: 'bg-primary/15 text-primary-text border-primary/20',
+  success: 'bg-success/15 text-success-text border-success/25',
+  error: 'bg-error/15 text-error-text border-error/25',
+  warning: 'bg-warning/15 text-warning-text border-warning/25',
   info: 'bg-info/15 text-info border-info/25',
   neutral: 'bg-surface-3 text-text-secondary border-border',
-  positive: 'bg-success/15 text-success border-success/25',
-  negative: 'bg-error/15 text-error border-error/25',
-  edge: 'bg-warning/15 text-warning border-warning/25',
+  positive: 'bg-success/15 text-success-text border-success/25',
+  negative: 'bg-error/15 text-error-text border-error/25',
+  edge: 'bg-warning/15 text-warning-text border-warning/25',
 };
 
 const dotColors: Record<BadgeVariant, string> = {

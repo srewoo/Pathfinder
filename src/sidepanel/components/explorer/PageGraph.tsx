@@ -88,7 +88,7 @@ export function PageGraph({ graph }: PageGraphProps) {
                     }
                     return (
                       <div key={i} className="flex items-center gap-1 text-2xs text-text-muted overflow-hidden">
-                        <span className="text-primary-light flex-shrink-0">→</span>
+                        <span className="text-primary-text flex-shrink-0">→</span>
                         <span className="truncate min-w-0 flex-1">{toLabel}</span>
                         {edge.label && (
                           <span className="text-text-muted opacity-60 flex-shrink-0 truncate max-w-[6rem]">

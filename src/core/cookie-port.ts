@@ -29,10 +29,6 @@ export function registerCookieInjector(fn: CookieInjectorFn): void {
   injector = fn;
 }
 
-export function clearCookieInjector(): void {
-  injector = null;
-}
-
 /**
  * Inject preset cookies into the tab's session.
  *

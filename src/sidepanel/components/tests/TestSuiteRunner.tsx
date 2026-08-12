@@ -43,11 +43,11 @@ export function TestSuiteRunner({
           <div className="text-2xs text-text-muted">Total</div>
         </div>
         <div>
-          <div className="text-sm font-bold text-success">{passed}</div>
+          <div className="text-sm font-bold text-success-text">{passed}</div>
           <div className="text-2xs text-text-muted">Passed</div>
         </div>
         <div>
-          <div className="text-sm font-bold text-error">{failed}</div>
+          <div className="text-sm font-bold text-error-text">{failed}</div>
           <div className="text-2xs text-text-muted">Failed</div>
         </div>
         <div>
@@ -87,7 +87,7 @@ export function TestSuiteRunner({
 
       <div className="grid grid-cols-2 gap-2">
         <Button
-          variant={selectedCount > 0 ? 'success' : 'ghost'}
+          variant={selectedCount > 0 ? 'primary' : 'ghost'}
           icon={<PackageOpen size={11} />}
           onClick={onRunSelected}
           disabled={isRunning || selectedCount === 0}

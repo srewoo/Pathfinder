@@ -14,6 +14,7 @@
 
 import type { AXNode } from '../cdp/cdp-client';
 import { getAccessibilityTree, isAttached, evaluate } from '../cdp/cdp-client';
+import { assessContrast, type ContrastSample } from './contrast';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('a11y-audit');
@@ -286,39 +287,93 @@ async function checkFormLabels(tabId: number, issues: A11yIssue[]): Promise<void
   } catch { /* non-fatal */ }
 }
 
+/**
+ * Real contrast checking (SC 1.4.3).
+ *
+ * Replaces a rule that only fired when foreground and background were IDENTICAL —
+ * a condition that essentially never occurs in shipped CSS, while it cited
+ * "1.4.3 Contrast (Minimum)" in the report. Grey-on-grey at 1.2:1 passed.
+ *
+ * The page script's only job is to report colours; the ratio and the threshold are
+ * computed in `contrast.ts`, where they are unit-tested against the WCAG formula.
+ */
 async function checkContrastSample(tabId: number, issues: A11yIssue[]): Promise<void> {
   try {
     const result = await evaluate(tabId, `
       (() => {
-        const textElements = document.querySelectorAll('p, span, a, button, label, h1, h2, h3, h4, li, td, th');
-        const problems = [];
-        const checked = new Set();
-        for (const el of Array.from(textElements).slice(0, 50)) {
-          const text = el.textContent?.trim();
-          if (!text || text.length < 2) continue;
-          const style = getComputedStyle(el);
-          const color = style.color;
-          const bg = style.backgroundColor;
-          // Simple check: if both are the same, there's a contrast issue
-          if (color === bg && color !== 'rgba(0, 0, 0, 0)') {
-            const key = color + ':' + bg;
-            if (checked.has(key)) continue;
-            checked.add(key);
-            problems.push({ color, bg, text: text.slice(0, 30) });
+        const els = document.querySelectorAll('p, span, a, button, label, h1, h2, h3, h4, h5, h6, li, td, th, div');
+        const out = [];
+        const seen = new Set();
+        for (const el of Array.from(els)) {
+          if (out.length >= 60) break;
+          // Only elements with their OWN text: a wrapper inherits colour from a
+          // child and would be reported twice.
+          const own = Array.from(el.childNodes)
+            .filter((n) => n.nodeType === 3)
+            .map((n) => n.textContent || '')
+            .join('')
+            .trim();
+          if (own.length < 2) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          const st = getComputedStyle(el);
+          if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity) === 0) continue;
+
+          // Walk up for the first opaque background — an element's own background
+          // is usually transparent.
+          let bg = 'rgba(0, 0, 0, 0)';
+          let node = el;
+          while (node) {
+            const nbg = getComputedStyle(node).backgroundColor;
+            if (nbg && nbg !== 'rgba(0, 0, 0, 0)' && nbg !== 'transparent') { bg = nbg; break; }
+            const bgImage = getComputedStyle(node).backgroundImage;
+            if (bgImage && bgImage !== 'none') { bg = 'IMAGE'; break; }
+            node = node.parentElement;
           }
+
+          const key = st.color + '|' + bg + '|' + st.fontSize + '|' + st.fontWeight;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({
+            color: st.color,
+            backgroundColor: bg,
+            fontSizePx: parseFloat(st.fontSize) || 16,
+            fontWeight: parseInt(st.fontWeight, 10) || 400,
+            text: own.slice(0, 40),
+            selector: el.id ? '#' + el.id : el.tagName.toLowerCase(),
+          });
         }
-        return JSON.stringify(problems.slice(0, 5));
+        return JSON.stringify(out);
       })()
     `);
-    const problems = JSON.parse(String((result as { result?: { value?: string } })?.result?.value ?? '[]'));
-    for (const p of problems) {
+    const samples = JSON.parse(
+      String((result as { result?: { value?: string } })?.result?.value ?? '[]')
+    ) as Array<ContrastSample & { text: string; selector: string }>;
+
+    let unassessable = 0;
+    for (const sample of samples) {
+      const verdict = assessContrast(sample);
+      if (!verdict.assessable) { unassessable++; continue; }
+      if (verdict.passes) continue;
       issues.push({
-        ruleId: 'color-contrast-identical',
-        message: `Text "${p.text}" has identical foreground and background color (${p.color}).`,
-        severity: 'critical',
+        ruleId: 'color-contrast',
+        message:
+          `Text "${sample.text}" has a contrast ratio of ${verdict.ratio}:1 against its ` +
+          `background (${sample.color} on ${sample.backgroundColor}); ` +
+          `${verdict.required}:1 is required for ${verdict.isLargeText ? 'large' : 'normal'} text ` +
+          `at ${sample.fontSizePx}px/${sample.fontWeight}.`,
+        severity: verdict.ratio < verdict.required / 2 ? 'critical' : 'serious',
+        selector: sample.selector,
         wcag: '1.4.3 Contrast (Minimum)',
-        suggestion: 'Ensure text color has at least 4.5:1 contrast ratio against background.',
+        suggestion:
+          `Raise the ratio to at least ${verdict.required}:1 — darken the text, lighten the ` +
+          `background, or increase the font size to qualify as large text.`,
       });
+    }
+    if (unassessable > 0) {
+      // Said out loud: a background image has no single colour, and silently
+      // skipping those samples would let the report imply they were checked.
+      log.info(`Contrast: ${unassessable} sample(s) could not be assessed (background image/gradient or transparent colour).`);
     }
   } catch { /* non-fatal */ }
 }
@@ -339,32 +394,97 @@ function buildResult(url: string, title: string, issues: A11yIssue[]): A11yAudit
 /**
  * Format audit result as human-readable markdown.
  */
+
+/**
+ * What this audit does and does not cover.
+ *
+ * WCAG 2.1 AA has 50 success criteria. This checks 7 rules across 4 of them, so a
+ * clean result means "none of these 7 rules fired" — not "the page is accessible".
+ * Stating that is the difference between a useful signal and a false assurance
+ * someone ships on.
+ */
+const AUDIT_SCOPE = [
+  '### Scope of this audit',
+  '',
+  'Checked (7 rules, 4 WCAG 2.1 success criteria):',
+  '',
+  '| Rule | WCAG |',
+  '|---|---|',
+  '| Missing accessible name on a control | 4.1.2 Name, Role, Value |',
+  '| `aria-disabled` on a non-interactive element | 4.1.2 Name, Role, Value |',
+  '| Image without alt text (a11y tree + DOM) | 1.1.1 Non-text Content |',
+  '| Empty heading | 1.3.1 Info and Relationships |',
+  '| Invalid children for an ARIA role | 1.3.1 Info and Relationships |',
+  '| Form input without a label | 1.3.1 Info and Relationships |',
+  '| Text contrast below the required ratio | 1.4.3 Contrast (Minimum) |',
+  '',
+  '**Not checked** — a pass here says nothing about these:',
+  '',
+  '- Keyboard operability and focus order (2.1.1, 2.4.3, 2.4.7)',
+  '- Page title and page language (2.4.2, 3.1.1)',
+  '- Landmarks and bypass blocks (2.4.1)',
+  '- Link purpose from context (2.4.4)',
+  '- Error identification, labels and instructions (3.3.1, 3.3.2)',
+  '- Reflow, zoom and text spacing (1.4.10, 1.4.12)',
+  '- Status messages announced to assistive tech (4.1.3)',
+  '- Heading order, table header association, autocomplete (1.3.1, 1.3.5)',
+  '',
+  'Contrast is sampled (up to 60 distinct colour/size combinations per page) and',
+  'skips text over background images or gradients, which have no single colour.',
+].join('\n');
+
+/** Pipes and newlines would break the table row they sit in. */
+function escapeCell(text: string): string {
+  return (text ?? '').replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+}
+
 export function formatA11yReport(results: A11yAuditResult[]): string {
   const allIssues = results.flatMap((r) => r.issues);
-  if (allIssues.length === 0) return '## Accessibility Audit\n\nNo issues found.';
+  if (allIssues.length === 0) {
+    return [
+      '## Accessibility Audit',
+      '',
+      `No issues found across ${results.length} page(s) — for the rules listed below.`,
+      '',
+      AUDIT_SCOPE,
+    ].join('\n');
+  }
 
+  const count = (sev: string): number => allIssues.filter((i) => i.severity === sev).length;
   const lines = [
-    `## Accessibility Audit`,
+    `# Accessibility Audit`,
     ``,
-    `**Pages audited:** ${results.length}`,
-    `**Total issues:** ${allIssues.length}`,
-    `- Critical: ${allIssues.filter((i) => i.severity === 'critical').length}`,
-    `- Serious: ${allIssues.filter((i) => i.severity === 'serious').length}`,
-    `- Moderate: ${allIssues.filter((i) => i.severity === 'moderate').length}`,
-    `- Minor: ${allIssues.filter((i) => i.severity === 'minor').length}`,
+    `**${allIssues.length} issue(s)** across ${results.length} page(s).`,
+    ``,
+    `| Critical | Serious | Moderate | Minor |`,
+    `|---:|---:|---:|---:|`,
+    `| ${count('critical')} | ${count('serious')} | ${count('moderate')} | ${count('minor')} |`,
     ``,
   ];
 
   for (const result of results) {
     if (result.issues.length === 0) continue;
-    lines.push(`### ${result.title || result.url}`, ``);
-    for (const issue of result.issues) {
-      const sev = issue.severity.toUpperCase();
-      lines.push(`- **[${sev}]** ${issue.message}${issue.selector ? ` (\`${issue.selector}\`)` : ''}`);
-      lines.push(`  - WCAG: ${issue.wcag ?? 'N/A'} | Fix: ${issue.suggestion}`);
+    lines.push(`## ${result.title || result.url}`, ``);
+    // A table so severity, criterion and fix line up down the page instead of
+    // running together in prose — these reports are scanned, not read.
+    lines.push(`| Severity | Issue | Element | WCAG | Fix |`);
+    lines.push(`|---|---|---|---|---|`);
+    const order = { critical: 0, serious: 1, moderate: 2, minor: 3 } as Record<string, number>;
+    const sorted = [...result.issues].sort(
+      (a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9)
+    );
+    for (const issue of sorted) {
+      const sev = issue.severity === 'critical' || issue.severity === 'serious'
+        ? `**${issue.severity.toUpperCase()}**`
+        : issue.severity;
+      const el = issue.selector ? `\`${issue.selector}\`` : '—';
+      lines.push(
+        `| ${sev} | ${escapeCell(issue.message)} | ${el} | ${issue.wcag ?? 'N/A'} | ${escapeCell(issue.suggestion)} |`
+      );
     }
     lines.push(``);
   }
 
+  lines.push('', AUDIT_SCOPE);
   return lines.join('\n');
 }

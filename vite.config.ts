@@ -53,7 +53,6 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./test/setup.ts'],
     include: ['test/unit/**/*.test.ts', 'test/integration/**/*.test.ts', 'test/benchmark/**/*.test.ts'],
-    exclude: ['test/e2e/**'],
     coverage: {
       reporter: ['text', 'lcov'],
       include: ['src/**'],

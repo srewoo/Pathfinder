@@ -134,11 +134,6 @@ export function getNode(graph: InteractionGraph, url: string): PageNode | undefi
   return getIndices(graph).nodeIndex.get(url);
 }
 
-/** Get all edges originating from a URL. */
-export function getEdgesFrom(graph: InteractionGraph, url: string): PageEdge[] {
-  return graph.edges.filter((e) => e.from === url);
-}
-
 export async function saveGraph(graph: InteractionGraph): Promise<void> {
   await graphDB.save(graph);
 }

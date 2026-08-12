@@ -138,6 +138,79 @@ function __describe(el) {
   return tag + id + cls;
 }
 
+/**
+ * True only for an EXPLICIT zero opacity.
+ *
+ * \`Number('')\` is 0, so treating the raw value as a number classified an
+ * unspecified opacity as fully transparent. Browsers always report a number here,
+ * but "not specified" and "zero" are different claims and only one of them means
+ * the element cannot be seen.
+ */
+function __isTransparent(style) {
+  const op = parseFloat(style.opacity);
+  return !isNaN(op) && op === 0;
+}
+
+/**
+ * The element a user would actually click to operate \`el\`.
+ *
+ * Design systems routinely hide the native control and paint their own: the real
+ * <input type="checkbox"> sits at opacity 0 with a styled <span> over it. Such a
+ * control fails BOTH visibility (opacity 0) and the hit test (the span is on
+ * top), so a strictly-correct actionability check refuses to click a checkbox
+ * that every human clicks all day.
+ *
+ * The label is not a workaround for that — it IS the interaction surface. A click
+ * on a label that owns a control is dispatched to the control by the browser, so
+ * clicking it is what a real user does, not a simulation of it.
+ *
+ * Returns null when \`el\` needs no proxy, so ordinary controls keep sampling
+ * themselves and nothing about their behaviour changes.
+ */
+function __proxyTarget(el) {
+  const tag = el.tagName ? el.tagName.toLowerCase() : '';
+  if (tag !== 'input' && tag !== 'select' && tag !== 'textarea') return null;
+
+  const candidates = [];
+  // \`labels\` covers <label for="id"> anywhere in the document.
+  if (el.labels && el.labels.length) {
+    for (const l of el.labels) candidates.push(l);
+  }
+  const wrapping = el.closest ? el.closest('label') : null;
+  if (wrapping && candidates.indexOf(wrapping) === -1) candidates.push(wrapping);
+
+  for (const c of candidates) {
+    const cr = c.getBoundingClientRect();
+    if (cr.width <= 0 || cr.height <= 0) continue;
+    const cs = getComputedStyle(c);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || __isTransparent(cs)) continue;
+    if (cs.pointerEvents === 'none') continue;
+    return c;
+  }
+  return null;
+}
+
+function __hitTest(el, r) {
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const inViewport = cx >= 0 && cy >= 0 && cx <= innerWidth && cy <= innerHeight;
+  if (!inViewport) return { receivesEvents: false, obscuredBy: 'outside viewport' };
+
+  const stack = document.elementsFromPoint(cx, cy) || [];
+  // Walk the stack top-down. Anything above the target that is not an
+  // ancestor and not pointer-events:none is a genuine obscurer.
+  for (const node of stack) {
+    if (node === el || el.contains(node) || node.contains(el)) {
+      return { receivesEvents: true, obscuredBy: undefined };
+    }
+    const ns = getComputedStyle(node);
+    if (ns.pointerEvents === 'none') continue;
+    return { receivesEvents: false, obscuredBy: __describe(node) };
+  }
+  // Nothing at the point at all — treat as obscured rather than clickable.
+  return { receivesEvents: false, obscuredBy: 'nothing hit-testable at click point' };
+}
+
 function __sampleEl(el) {
   if (!el || !el.isConnected) {
     return { attached: false, visible: false, enabled: false, rect: null, receivesEvents: false };
@@ -145,41 +218,41 @@ function __sampleEl(el) {
   const r = el.getBoundingClientRect();
   const style = getComputedStyle(el);
   const visible = r.width > 0 && r.height > 0 &&
-    style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
+    style.display !== 'none' && style.visibility !== 'hidden' && !__isTransparent(style);
+  // Enabled state always comes from the CONTROL, never the proxy: a label is
+  // never disabled, and reading it would report a disabled input as actionable.
   const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
 
-  const cx = r.left + r.width / 2;
-  const cy = r.top + r.height / 2;
+  let hit = visible ? __hitTest(el, r) : { receivesEvents: false, obscuredBy: undefined };
+  let rect = r;
+  let effVisible = visible;
+  let proxiedBy = undefined;
 
-  let receivesEvents = false;
-  let obscuredBy = undefined;
-  const inViewport = cx >= 0 && cy >= 0 && cx <= innerWidth && cy <= innerHeight;
-  if (visible && inViewport) {
-    const stack = document.elementsFromPoint(cx, cy) || [];
-    // Walk the stack top-down. Anything above the target that is not an
-    // ancestor and not pointer-events:none is a genuine obscurer.
-    for (const node of stack) {
-      if (node === el || el.contains(node) || node.contains(el)) { receivesEvents = true; break; }
-      const ns = getComputedStyle(node);
-      if (ns.pointerEvents === 'none') continue;
-      obscuredBy = __describe(node);
-      break;
+  if (!visible || !hit.receivesEvents) {
+    const proxy = __proxyTarget(el);
+    if (proxy) {
+      const pr = proxy.getBoundingClientRect();
+      const ph = __hitTest(proxy, pr);
+      if (ph.receivesEvents) {
+        rect = pr;
+        effVisible = true;
+        hit = ph;
+        proxiedBy = __describe(proxy);
+      }
     }
-    if (!obscuredBy && !receivesEvents && stack.length === 0) {
-      // Nothing at the point at all — treat as obscured rather than clickable.
-      obscuredBy = 'nothing hit-testable at click point';
-    }
-  } else if (visible && !inViewport) {
-    obscuredBy = 'outside viewport';
   }
 
   return {
     attached: true,
-    visible: visible,
+    visible: effVisible,
     enabled: enabled,
-    rect: { x: r.left, y: r.top, width: r.width, height: r.height },
-    receivesEvents: receivesEvents,
-    obscuredBy: obscuredBy,
+    // The proxy's geometry, so the click is DISPATCHED on the label too.
+    // Reporting the label as actionable while clicking the hidden input would
+    // pass the checks and then miss.
+    rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+    receivesEvents: hit.receivesEvents,
+    obscuredBy: hit.obscuredBy,
+    proxiedBy: proxiedBy,
   };
 }
 `;

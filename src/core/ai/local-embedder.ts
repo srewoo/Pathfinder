@@ -147,15 +147,7 @@ export async function embedTextsLocally(
 }
 
 /** Dimension of the local embedding model (all-MiniLM-L6-v2). */
-export const LOCAL_EMBEDDING_DIMENSIONS = 384;
-
 /** Whether local embeddings have been detected as broken in this session. */
 export function isLocalEmbeddingBroken(): boolean {
   return _localEmbeddingsBroken;
-}
-
-/** Release the in-memory pipeline (called on service worker shutdown). */
-export function releaseLocalEmbedder(): void {
-  _pipeline = null;
-  _loading = null;
 }

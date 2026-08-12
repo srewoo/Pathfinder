@@ -71,11 +71,6 @@ export async function injectCookiesViaCdp(
   return result;
 }
 
-/** Clear all cookies in the session — used to guarantee a clean login. */
-export async function clearCookiesViaCdp(tabId: number): Promise<void> {
-  await sendCommand(tabId, 'Network.clearBrowserCookies', {});
-}
-
 /**
  * chrome.cookies and CDP disagree on casing: `no_restriction` vs `None`,
  * `lax`/`strict` vs `Lax`/`Strict`. Mapping this wrong silently drops the

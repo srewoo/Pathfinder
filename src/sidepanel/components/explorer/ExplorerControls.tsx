@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Play, Square, Loader2, Globe, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '../shared/Button';
+import { SegmentedControl } from '../shared/SegmentedControl';
 import { useExplorerStore } from '../../stores/explorer-store';
 import type { ExplorationProgress, ExplorationCoverage } from '../../../storage/schemas';
 
@@ -53,23 +54,18 @@ export function ExplorerControls({ progress, isExploring, reexploringUrl }: Expl
       {!reexploringUrl && (
         <div>
           <label className="block text-2xs font-medium text-text-muted mb-1">Exploration scope</label>
-          <div className="grid grid-cols-3 gap-1 p-0.5 bg-surface-2 border border-border rounded-lg">
-            {SCOPE_OPTIONS.map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                disabled={isExploring}
-                onClick={() => setScope(opt.id)}
-                className={[
-                  'px-1.5 py-1.5 rounded-md text-2xs font-medium transition-colors leading-tight',
-                  scope === opt.id ? 'bg-primary text-white' : 'text-text-muted hover:text-text-secondary',
-                  'disabled:opacity-50',
-                ].join(' ')}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            options={SCOPE_OPTIONS.map((opt) => ({
+              id: opt.id,
+              label: opt.label,
+              title: opt.hint,
+              disabled: isExploring,
+            }))}
+            value={scope}
+            onChange={setScope}
+            stacked={false}
+            label="Exploration scope"
+          />
           <p className="text-2xs text-text-muted mt-1">{SCOPE_OPTIONS.find((o) => o.id === scope)?.hint}</p>
         </div>
       )}
@@ -78,24 +74,18 @@ export function ExplorerControls({ progress, isExploring, reexploringUrl }: Expl
       {!reexploringUrl && depthApplies && (
         <div>
           <label className="block text-2xs font-medium text-text-muted mb-1">Exploration depth</label>
-          <div className="flex items-center gap-2">
-            {[1, 2, 3, 4, 5].map((d) => (
-              <button
-                key={d}
-                onClick={() => store.setDepth(d)}
-                disabled={isExploring}
-                className={[
-                  'w-7 h-7 rounded text-xs font-medium transition-colors border',
-                  store.explorationDepth === d
-                    ? 'bg-primary text-white border-primary'
-                    : 'bg-surface-3 text-text-muted border-border hover:border-border-light',
-                  'disabled:opacity-50',
-                ].join(' ')}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            options={[1, 2, 3, 4, 5].map((d) => ({
+              id: String(d) as '1' | '2' | '3' | '4' | '5',
+              label: String(d),
+              title: `Explore ${d} level(s) deep`,
+              disabled: isExploring,
+            }))}
+            value={String(store.explorationDepth) as '1' | '2' | '3' | '4' | '5'}
+            onChange={(d) => store.setDepth(Number(d))}
+            stacked={false}
+            label="Exploration depth"
+          />
           <p className="text-2xs text-text-muted mt-1">Higher depth discovers more pages but takes longer.</p>
         </div>
       )}
@@ -234,7 +224,7 @@ function CoverageBar({ coverage }: { coverage: ExplorationCoverage }) {
         />
       </div>
       <div className="flex items-center justify-center gap-3 text-2xs text-text-muted">
-        {coverage.pagesFailed > 0 && <span className="text-warning">{coverage.pagesFailed} failed</span>}
+        {coverage.pagesFailed > 0 && <span className="text-warning-text">{coverage.pagesFailed} failed</span>}
         {coverage.untestedPaths > 0 && (
           <span>{coverage.untestedPaths} {coverage.singlePage ? 'links found' : 'untested'}</span>
         )}
@@ -269,22 +259,22 @@ function CoverageSummary({ coverage }: { coverage: ExplorationCoverage }) {
         ) : (
           <span className={coverage.untestedPaths > 0 ? 'text-text-secondary' : ''}>{coverage.untestedPaths} untested path{coverage.untestedPaths === 1 ? '' : 's'}</span>
         )}
-        <span className={coverage.pagesFailed > 0 ? 'text-warning' : ''}>{coverage.pagesFailed} scan failure{coverage.pagesFailed === 1 ? '' : 's'}</span>
+        <span className={coverage.pagesFailed > 0 ? 'text-warning-text' : ''}>{coverage.pagesFailed} scan failure{coverage.pagesFailed === 1 ? '' : 's'}</span>
         <span className={coverage.brokenLinks > 0 ? 'text-danger' : ''}>{coverage.brokenLinks} broken link{coverage.brokenLinks === 1 ? '' : 's'}</span>
       </div>
       {clean && singlePage && coverage.untestedPaths > 0 && (
         <p className="text-2xs text-text-muted">This page was mapped fully. Switch scope to “From here outward” to explore the {coverage.untestedPaths} link{coverage.untestedPaths === 1 ? '' : 's'} it found.</p>
       )}
       {clean && singlePage && coverage.untestedPaths === 0 && (
-        <p className="text-2xs text-success">✓ Clean run — this page was mapped fully.</p>
+        <p className="text-2xs text-success-text">✓ Clean run — this page was mapped fully.</p>
       )}
-      {clean && !singlePage && <p className="text-2xs text-success">✓ Clean run — everything discovered was mapped.</p>}
+      {clean && !singlePage && <p className="text-2xs text-success-text">✓ Clean run — everything discovered was mapped.</p>}
       {coverage.warnings.length > 0 && (
         <div className="border-t border-border pt-1.5">
           <button
             type="button"
             onClick={() => setShowWarnings((v) => !v)}
-            className="flex items-center gap-1 text-2xs font-medium text-warning"
+            className="flex items-center gap-1 text-2xs font-medium text-warning-text"
           >
             {showWarnings ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
             {coverage.warnings.length} warning{coverage.warnings.length === 1 ? '' : 's'}

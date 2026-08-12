@@ -1,5 +1,6 @@
 import type { InteractiveElement, FormField, PageSnapshot, PageAction, DataTable, PageType, FieldError, WizardStep } from '../../storage/schemas';
 import { sendToContentScript } from '../../messaging/messenger';
+import { classifyControl } from './danger-heuristics';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('page-scanner');
@@ -17,14 +18,23 @@ export async function scanPage(tabId: number): Promise<InteractiveElement[]> {
 }
 
 /**
- * Scroll through the page and hover nav items to reveal lazy-loaded content
- * and dropdown menus before scanning elements and links.
+ * Scroll through the page and hover nav items to reveal lazy-loaded content and
+ * dropdown menus.
+ *
+ * Returns the elements seen DURING the sweep. Callers must merge these with their
+ * own `scanPage` result: a virtualized row mounted at scroll step 4 is gone by the
+ * time the sweep ends, so the post-sweep scan cannot see it. Returning an empty
+ * array on failure is safe — the caller still has its own scan.
  */
-export async function revealPageContent(tabId: number): Promise<void> {
+export async function revealPageContent(tabId: number): Promise<InteractiveElement[]> {
   try {
-    await sendToContentScript(tabId, { type: 'REVEAL_PAGE_CONTENT' });
+    const response = await sendToContentScript<{ payload: InteractiveElement[] }>(tabId, {
+      type: 'REVEAL_PAGE_CONTENT',
+    });
+    return response?.payload ?? [];
   } catch {
     // non-fatal — continue even if reveal fails
+    return [];
   }
 }
 
@@ -170,9 +180,6 @@ export async function scanConditionalFields(tabId: number): Promise<Array<{ fiel
 const CLICKABLE_TAGS = new Set(['button', 'a']);
 const CLICKABLE_ROLES = new Set(['button', 'tab', 'menuitem', 'link']);
 const FORM_TAGS = new Set(['input', 'select', 'textarea']);
-const FORM_ROLES = new Set(['combobox', 'listbox']);
-const DANGEROUS_TEXTS = ['delete', 'remove', 'logout', 'sign out', 'cancel subscription'];
-const EXCLUDED_INPUT_TYPES = new Set(['hidden', 'password', 'file']);
 
 export interface ExplorationTargetOptions {
   /**
@@ -185,30 +192,99 @@ export interface ExplorationTargetOptions {
   maxTargets?: number;
 }
 
-export function selectExplorationTargets(
+/**
+ * A focusable custom widget: no semantic role, but a tabindex that makes it
+ * keyboard-reachable — which is how design systems build dropdowns.
+ *
+ * Measured on a live app: 118 dropdowns, and **zero** native `<select>` elements
+ * anywhere in it. Every one is `<div class="oxd-select-text-input" tabindex="0">`.
+ * They were detected and then never clicked, because the click set required a
+ * button/anchor tag or a button-ish role — so no filter and no dropdown in the
+ * entire application could be operated.
+ */
+function isFocusableWidget(el: InteractiveElement): boolean {
+  if (FORM_TAGS.has(el.tag)) return false;
+  if (el.tabIndex === undefined || el.tabIndex < 0) return false;
+  // A role we already handle elsewhere shouldn't be double-counted here.
+  const role = el.role ?? '';
+  if (CLICKABLE_ROLES.has(role)) return false;
+  return role === '' || role === 'combobox' || role === 'listbox';
+}
+
+/**
+ * How many rows to click per page.
+ *
+ * Rows on a list page are homogeneous: every one leads to the same detail
+ * template, so the second and third confirm the pattern and the fiftieth teaches
+ * nothing. A measured page had 50 — clicking them all would spend the entire page
+ * budget navigating back and forth to one template.
+ */
+const MAX_ROW_NAVIGATIONS = 3;
+
+export interface TargetPartition {
+  targets: InteractiveElement[];
+  /**
+   * Withheld because clicking them ends the session. Withheld even under
+   * `includeDangerous` — a logged-out crawler maps the login page while the run
+   * keeps counting pages as explored.
+   */
+  sessionEnding: InteractiveElement[];
+  /** Withheld because they name or depict a destructive action. */
+  destructive: InteractiveElement[];
+  /** Withheld because they are unnamed row controls of unknown effect. */
+  unidentified: InteractiveElement[];
+  /** Dropped by `maxTargets` after prioritisation. */
+  overCap: number;
+  /** Row-navigation targets beyond `MAX_ROW_NAVIGATIONS`. */
+  rowNavigationsSkipped: number;
+}
+
+/**
+ * Choose click targets, and account for everything withheld.
+ *
+ * Returns the withheld sets rather than silently dropping them: a crawler that
+ * skips 50 controls per page and says nothing reports the same coverage as one
+ * that had nothing to skip.
+ */
+export function partitionExplorationTargets(
   elements: InteractiveElement[],
   visited: Set<string>,
   options: ExplorationTargetOptions = {}
-): InteractiveElement[] {
+): TargetPartition {
   const { includeDangerous = false, maxTargets = 100 } = options;
+
   // NOTE: off-viewport-but-rendered elements ARE included — the click action
   // scrolls them into view first. We only require them to be clickable; the
   // ordering below clicks in-viewport elements first, off-viewport if budget
   // remains. This captures below-the-fold buttons and virtualized-list rows.
-  const candidates = elements
-    .filter((el) => {
-      if (visited.has(el.selector)) return false;
-      if (el.disabled) return false;
-      if (FORM_TAGS.has(el.tag)) return false;
-      const isClickable =
-        CLICKABLE_TAGS.has(el.tag) || CLICKABLE_ROLES.has(el.role ?? '');
-      if (!isClickable) return false;
-      if (!includeDangerous) {
-        const text = (el.text ?? '').toLowerCase();
-        if (DANGEROUS_TEXTS.some((d) => new RegExp(`\\b${d}\\b`, 'i').test(text))) return false;
-      }
-      return true;
-    });
+  const clickable = elements.filter((el) => {
+    if (visited.has(el.selector)) return false;
+    if (el.disabled) return false;
+    if (FORM_TAGS.has(el.tag)) return false;
+    return CLICKABLE_TAGS.has(el.tag) || CLICKABLE_ROLES.has(el.role ?? '') || isFocusableWidget(el);
+  });
+
+  const sessionEnding: InteractiveElement[] = [];
+  const destructive: InteractiveElement[] = [];
+  const unidentified: InteractiveElement[] = [];
+  const candidates: InteractiveElement[] = [];
+  let rowNavSeen = 0;
+  let rowNavigationsSkipped = 0;
+  for (const el of clickable) {
+    if (el.rowNavigation) {
+      // Sampled, not exhausted — and the shortfall is counted rather than dropped.
+      rowNavSeen++;
+      if (rowNavSeen > MAX_ROW_NAVIGATIONS) { rowNavigationsSkipped++; continue; }
+    }
+    const verdict = classifyControl(el);
+    // Checked before the includeDangerous escape hatch: opting into destructive
+    // exploration is a decision about data, not about staying signed in.
+    if (verdict.risk === 'session-ending') { sessionEnding.push(el); continue; }
+    if (includeDangerous) { candidates.push(el); continue; }
+    if (verdict.risk === 'destructive') destructive.push(el);
+    else if (verdict.risk === 'unidentified') unidentified.push(el);
+    else candidates.push(el);
+  }
 
   // Prioritise navigation links and buttons with meaningful text over generic elements.
   // This ensures we discover actual page routes before spending time on toolbar buttons.
@@ -218,8 +294,19 @@ export function selectExplorationTargets(
   const actionButtons = candidates.filter((el) =>
     el.tag === 'button' && !navElements.includes(el)
   );
-  const other = candidates.filter((el) =>
-    !navElements.includes(el) && !actionButtons.includes(el)
+  // Dropdowns before generic pseudo-clickables: opening one reveals its options,
+  // which is a larger discovery than most stray divs.
+  const widgets = candidates.filter(
+    (el) => isFocusableWidget(el) && !navElements.includes(el) && !actionButtons.includes(el)
+  );
+  // Row navigations rank with navigation, not with leftovers: on a list page the
+  // record detail behind a row is usually the most valuable thing on the screen,
+  // and it is reachable no other way when the row carries no href.
+  const rowNav = candidates.filter(
+    (el) => el.rowNavigation && !navElements.includes(el) && !actionButtons.includes(el) && !widgets.includes(el)
+  );
+  const other = candidates.filter(
+    (el) => !navElements.includes(el) && !actionButtons.includes(el) && !widgets.includes(el) && !rowNav.includes(el)
   );
 
   // Within the priority order, click in-viewport elements before off-viewport
@@ -227,28 +314,83 @@ export function selectExplorationTargets(
   const viewportFirst = (list: InteractiveElement[]): InteractiveElement[] =>
     [...list.filter((el) => el.visible), ...list.filter((el) => !el.visible)];
 
-  return [
+  const ordered = [
     ...viewportFirst(navElements),
+    ...viewportFirst(rowNav),
     ...viewportFirst(actionButtons),
+    ...viewportFirst(widgets),
     ...viewportFirst(other),
-  ].slice(0, maxTargets);
+  ];
+
+  return {
+    targets: ordered.slice(0, maxTargets),
+    sessionEnding,
+    destructive,
+    unidentified,
+    overCap: Math.max(0, ordered.length - maxTargets),
+    rowNavigationsSkipped,
+  };
 }
 
-export function selectFormTargets(
+export function selectExplorationTargets(
   elements: InteractiveElement[],
-  visited: Set<string>
+  visited: Set<string>,
+  options: ExplorationTargetOptions = {}
 ): InteractiveElement[] {
-  return elements
-    .filter((el) => {
-      if (!el.visible) return false;
-      if (visited.has(el.selector)) return false;
-      if (el.disabled) return false;
-      if (el.tag === 'input' && EXCLUDED_INPUT_TYPES.has(el.type ?? '')) return false;
-      const isFormElement =
-        FORM_TAGS.has(el.tag) ||
-        FORM_ROLES.has(el.role ?? '') ||
-        el.contentEditable === true;
-      return isFormElement;
-    })
-    .slice(0, 100);
+  return partitionExplorationTargets(elements, visited, options).targets;
+}
+
+const TOGGLE_INPUT_TYPES = new Set(['checkbox', 'radio']);
+const TOGGLE_ROLES = new Set(['checkbox', 'radio', 'switch']);
+
+export interface ToggleTargetOptions {
+  /**
+   * Include toggles OUTSIDE a table/grid/list region.
+   *
+   * Off by default, and the reason is a real difference in consequence: a
+   * row-selection checkbox changes client-side selection only, while a settings
+   * toggle usually persists immediately (`PATCH /preferences`). Discovering bulk
+   * actions should not silently rewrite the user's account settings.
+   */
+  includeSettingsToggles?: boolean;
+  /** Maximum toggles to return. Default 5 — enough to reveal a bulk-action bar. */
+  maxTargets?: number;
+}
+
+/**
+ * Selection controls worth toggling to discover what selecting things reveals.
+ *
+ * These are deliberately absent from `selectExplorationTargets`, which filters out
+ * every form tag. That exclusion meant bulk-action flows — select rows, act on the
+ * selection — were invisible to exploration on every list page in the app, even
+ * though the toolbar they reveal is often the most consequential UI there.
+ */
+export function selectToggleTargets(
+  elements: InteractiveElement[],
+  visited: Set<string>,
+  options: ToggleTargetOptions = {}
+): InteractiveElement[] {
+  const { includeSettingsToggles = false, maxTargets = 5 } = options;
+
+  const candidates = elements.filter((el) => {
+    if (visited.has(el.selector)) return false;
+    if (el.disabled) return false;
+    const isToggle =
+      (el.tag === 'input' && TOGGLE_INPUT_TYPES.has(el.type ?? '')) ||
+      TOGGLE_ROLES.has(el.role ?? '');
+    if (!isToggle) return false;
+    if (!includeSettingsToggles && !el.inDataRegion) return false;
+    return true;
+  });
+
+  // Row checkboxes before the header "select all": one row is the cheaper probe
+  // and reveals the same toolbar, and a header toggle on a 4,000-row grid selects
+  // everything — a far riskier state to leave behind if a reset ever fails.
+  const isSelectAll = (el: InteractiveElement): boolean =>
+    /select\s*all|all\s*rows/i.test(`${el.ariaLabel ?? ''} ${el.text ?? ''}`);
+
+  return [
+    ...candidates.filter((el) => !isSelectAll(el)),
+    ...candidates.filter((el) => isSelectAll(el)),
+  ].slice(0, maxTargets);
 }

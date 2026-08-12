@@ -23,7 +23,7 @@ export function KnowledgePanel() {
           <p className="text-2xs text-text-muted mt-0.5">
             Optional — crawl help docs to ground tests.{' '}
             {store.documents.length === 0 && !store.isCrawling && (
-              <button onClick={() => goTo('explore')} className="text-primary-light hover:underline">
+              <button onClick={() => goTo('explore')} className="text-primary-text hover:underline">
                 Skip to Explore →
               </button>
             )}

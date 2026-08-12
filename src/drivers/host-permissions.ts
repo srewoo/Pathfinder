@@ -68,18 +68,6 @@ export async function requestPermissionFor(urls: readonly string[]): Promise<boo
   }
 }
 
-/** Revoke access once a project is deleted — least privilege over time. */
-export async function revokePermissionFor(urls: readonly string[]): Promise<void> {
-  const origins = patternsFor(urls);
-  if (origins.length === 0) return;
-  try {
-    await chrome.permissions.remove({ origins });
-    log.info(`Revoked host permission for: ${origins.join(', ')}`);
-  } catch (err) {
-    log.debug('permissions.remove failed', err);
-  }
-}
-
 export class MissingHostPermissionError extends Error {
   readonly isOperational = true;
   constructor(readonly origins: string[]) {
@@ -89,10 +77,4 @@ export class MissingHostPermissionError extends Error {
     );
     this.name = 'MissingHostPermissionError';
   }
-}
-
-/** Throw unless every URL's origin is already granted. Call before a run. */
-export async function assertPermissionFor(urls: readonly string[]): Promise<void> {
-  if (await hasPermissionFor(urls)) return;
-  throw new MissingHostPermissionError(patternsFor(urls));
 }

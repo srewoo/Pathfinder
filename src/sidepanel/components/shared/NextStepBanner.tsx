@@ -21,7 +21,7 @@ interface NextStepBannerProps {
 export function NextStepBanner({ title, detail, ctaLabel, onContinue, onDismiss }: NextStepBannerProps) {
   return (
     <div className="flex items-center gap-2.5 p-2.5 bg-success/10 border border-success/30 rounded-lg">
-      <CheckCircle2 size={16} className="text-success flex-shrink-0" />
+      <CheckCircle2 size={16} className="text-success-text flex-shrink-0" />
       <div className="flex-1 min-w-0">
         <p className="text-xs font-medium text-text-primary truncate">{title}</p>
         {detail && <p className="text-2xs text-text-muted mt-0.5">{detail}</p>}

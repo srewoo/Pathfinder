@@ -121,10 +121,37 @@ describe('HAR Impact Analysis', () => {
     expect(report.summary.totalEndpoints).toBe(1);
   });
 
-  it('should generate a markdown report', async () => {
+  it('given_no_endpoints_then_the_report_explains_how_to_get_some', async () => {
+    // Was asserting the old heading text. An empty report should say why it is
+    // empty, not just carry a title.
     mockedLoadGraph.mockResolvedValue(undefined);
-    const report = await analyzeHARImpact([]);
-    const markdown = formatHARImpactReport(report);
-    expect(markdown).toContain('API Coverage Report');
+    const markdown = formatHARImpactReport(await analyzeHARImpact([]));
+    expect(markdown).toContain('# API Coverage');
+    expect(markdown).toContain('No API endpoints have been discovered');
+    expect(markdown).toContain('Explore the app first');
+  });
+
+  it('given_endpoints_then_gaps_and_covered_are_rendered_as_tables', async () => {
+    // The panel renders markdown tables now, so the report uses them — and gaps come
+    // first because the untested endpoints are the actionable half.
+    mockedLoadGraph.mockResolvedValue({
+      nodes: [{ url: 'https://app.test/orders', apiEndpoints: [
+        { endpoint: '/api/orders', method: 'GET', status: 200, context: 'page_load' },
+        { endpoint: '/api/refunds', method: 'POST', status: 201, context: 'form_submit' },
+      ] }],
+      edges: [],
+    } as never);
+    const result = {
+      testCaseTitle: 'Orders list loads',
+      harEntries: [
+        { url: 'https://app.test/api/orders', method: 'GET', status: 200, statusText: 'OK', mimeType: 'application/json', duration: 30, bodySize: 10 },
+      ],
+    } as never;
+    const markdown = formatHARImpactReport(await analyzeHARImpact([result]));
+    expect(markdown).toContain('| Method | Endpoint | Discovered on |');
+    expect(markdown).toContain('| Method | Endpoint | Exercised by |');
+    expect(markdown).toContain('Untested endpoints');
+    // The measurement's own limits are stated, so 100% is not read as "verified".
+    expect(markdown).toContain('not "every endpoint was');
   });
 });

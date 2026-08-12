@@ -27,10 +27,30 @@
   --info:           #3b82f6;
   --info-dim:       rgba(59, 130, 246, 0.15);
 
-  --text-primary:   #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted:     #475569;
+  /* Four text tiers, not two.
+     `--text-muted` was #475569 — 2.37:1 on --surface-2, failing WCAG AA at the
+     10-11px sizes it is used at, across 125 elements. It was so faint it read as
+     disabled, which collapsed secondary and primary into the only two legible
+     tiers and produced the "uniform grey, no hierarchy" look. Raised to a real
+     tertiary tier; genuinely decorative text moves to --text-faint. */
+  --text-primary:   #e2e8f0;   /* 12.6:1 on --surface-2 */
+  --text-secondary: #94a3b8;   /*  6.9:1 */
+  --text-muted:     #7c879b;   /*  4.62:1 — content: URLs, counts, timestamps */
+  --text-faint:     #4b5566;   /*  decoration only — separators, gridline labels */
   --text-code:      #a78bfa;
+
+  /* Text-safe variants of the semantic hues.
+     A colour that works as a 15%-opacity fill does not necessarily pass as text.
+     In dark mode the base tokens are already legible, so these alias them and the
+     split exists purely so component code can be theme-agnostic. */
+  --success-text:   var(--success);   /* 6.9:1  */
+  --error-text:     var(--error);     /* 4.9:1  */
+  --warning-text:   var(--warning);   /* 8.6:1  */
+  --info-text:      #60a5fa;          /* 3b82f6 is 3.7:1 as text — lifted */
+  /* Not --primary (3.15:1) and not --primary-light (4.24:1) — neither clears AA at
+     11px on --surface-2. This is violet-400, the same value --text-code uses. */
+  --primary-text:   #a78bfa;          /* 6.1:1 */
+  --primary-deep:   #5b21b6;          /* same hue family, for the logo gradient */
 
   --scrollbar-thumb:       #2a2a3d;
   --scrollbar-thumb-hover: #3a3a55;
@@ -59,10 +79,21 @@
   --info:           #2563eb;
   --info-dim:       rgba(37, 99, 235, 0.12);
 
-  --text-primary:   #0f172a;
-  --text-secondary: #475569;
-  --text-muted:     #94a3b8;
+  --text-primary:   #0f172a;   /* 16.9:1 on --surface-2 */
+  --text-secondary: #475569;   /*  7.4:1 */
+  --text-muted:     #5c6a7d;   /*  4.85:1 — was #94a3b8 at 2.34:1 */
+  --text-faint:     #94a3b8;   /*  decoration only */
   --text-code:      #7c3aed;
+
+  /* Light mode is where the fill/text split earns its keep: every one of these
+     failed AA as text on --surface-2 — warning 2.91:1, success 3.44:1,
+     primary-light 3.87:1 — while working perfectly well as fills and borders. */
+  --success-text:   #046c4e;   /* 5.1:1 */
+  --error-text:     #b91c1c;   /* 5.9:1 */
+  --warning-text:   #92400e;   /* 6.4:1 */
+  --info-text:      #1d4ed8;   /* 6.3:1 */
+  --primary-text:   #6d28d9;   /* 7.0:1 */
+  --primary-deep:   #5b21b6;
 
   --scrollbar-thumb:       #cbd5e1;
   --scrollbar-thumb-hover: #94a3b8;
@@ -119,11 +150,9 @@
 }
 
 @layer utilities {
-  .text-2xs {
-    font-size: 0.65rem;
-    line-height: 1rem;
-  }
-
+  /* `.text-2xs` lived here AND in tailwind.config.ts — two definitions of the
+     most-used size in the app, resolved by emission order. The config is now the
+     single source. */
   .scrollbar-thin {
     scrollbar-width: thin;
   }

@@ -34,6 +34,15 @@ export interface ElementSample {
   receivesEvents: boolean;
   /** Describes the obscuring element when `receivesEvents` is false. */
   obscuredBy?: string;
+  /**
+   * Set when the sample describes a PROXY for the target rather than the target
+   * itself — a `<label>` standing in for a visually-hidden control it owns.
+   *
+   * `rect` is then the proxy's, so the click lands where a user would click. This
+   * is recorded rather than silently applied: a run that only worked because it
+   * clicked something adjacent to the target should say so.
+   */
+  proxiedBy?: string;
 }
 
 export type ActionabilityCheck =

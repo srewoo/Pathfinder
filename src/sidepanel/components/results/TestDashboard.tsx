@@ -45,7 +45,7 @@ export function TestDashboard() {
         <StatCard
           label="Avg Pass Rate"
           value={`${trends.overall.avgPassRate}%`}
-          color={trends.overall.avgPassRate >= 80 ? 'text-success' : trends.overall.avgPassRate >= 50 ? 'text-warning' : 'text-error'}
+          color={trends.overall.avgPassRate >= 80 ? 'text-success-text' : trends.overall.avgPassRate >= 50 ? 'text-warning-text' : 'text-error-text'}
         />
         <StatCard
           label="Avg Duration"
@@ -74,7 +74,7 @@ export function TestDashboard() {
       {trends.flakyTests.length > 0 && (
         <div className="bg-surface-2 border border-border rounded-lg p-3">
           <div className="flex items-center gap-1.5 mb-2">
-            <AlertTriangle size={11} className="text-warning" />
+            <AlertTriangle size={11} className="text-warning-text" />
             <span className="text-xs font-medium text-text-primary">
               Flaky Tests ({trends.flakyTests.length})
             </span>
@@ -84,10 +84,10 @@ export function TestDashboard() {
               <div key={t.testCaseId} className="flex items-center justify-between text-2xs">
                 <span className="text-text-secondary truncate flex-1 mr-2">{t.title}</span>
                 <span className="flex items-center gap-1 text-text-muted whitespace-nowrap">
-                  <span className="text-success">{t.passCount}P</span>
+                  <span className="text-success-text">{t.passCount}P</span>
                   <span>/</span>
-                  <span className="text-error">{t.failCount}F</span>
-                  <span className="text-warning ml-1">({Math.round(t.flakyScore * 100)}%)</span>
+                  <span className="text-error-text">{t.failCount}F</span>
+                  <span className="text-warning-text ml-1">({Math.round(t.flakyScore * 100)}%)</span>
                 </span>
               </div>
             ))}
@@ -108,8 +108,8 @@ export function TestDashboard() {
                 <span className="text-text-secondary truncate flex-1 mr-2">{t.title}</span>
                 <span className="flex items-center gap-1 text-text-muted whitespace-nowrap">
                   {formatDuration(t.avgDuration)}
-                  {t.trend === 'improving' && <TrendingDown size={10} className="text-success" />}
-                  {t.trend === 'degrading' && <TrendingUp size={10} className="text-error" />}
+                  {t.trend === 'improving' && <TrendingDown size={10} className="text-success-text" />}
+                  {t.trend === 'degrading' && <TrendingUp size={10} className="text-error-text" />}
                   {t.trend === 'stable' && <Minus size={10} className="text-text-muted" />}
                 </span>
               </div>
@@ -121,7 +121,7 @@ export function TestDashboard() {
       {/* Most Failed Test */}
       {trends.overall.mostFailedTest && (
         <div className="bg-error-dim border border-error/20 rounded-lg p-3">
-          <div className="text-2xs text-error font-medium mb-0.5">Most Failed Test</div>
+          <div className="text-2xs text-error-text font-medium mb-0.5">Most Failed Test</div>
           <div className="text-xs text-text-primary">{trends.overall.mostFailedTest.title}</div>
           <div className="text-2xs text-text-muted">{trends.overall.mostFailedTest.failCount} failures</div>
         </div>

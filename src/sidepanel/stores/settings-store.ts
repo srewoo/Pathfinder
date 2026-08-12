@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Settings, AIProvider, Theme, ExecutionPreset, PlanningMode, TestPersonalityId } from '../../storage/schemas';
 import { executionPresetStorage, settingsStorage } from '../../storage/chrome-storage';
+import { clearRetainedBodies } from '../../storage/response-body-store';
 import { getDefaultModel, getDefaultEmbeddingModel } from '../../core/ai/ai-client';
 import { generateId } from '../../utils/hash';
 
@@ -18,6 +19,8 @@ interface SettingsState extends Settings {
   setUseLocalEmbeddings: (value: boolean) => Promise<void>;
   setTestConcurrency: (concurrency: number) => Promise<void>;
   setDescribeImages: (value: boolean) => Promise<void>;
+  /** Debug: retain redacted response bodies for 24h (ADR 001 phase 4). */
+  setRetainResponseBodies: (value: boolean) => Promise<void>;
   setAgentMode: (value: boolean) => Promise<void>;
   setPlanningMode: (mode: PlanningMode) => Promise<void>;
   saveExecutionPreset: (preset: {
@@ -51,6 +54,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   useLocalEmbeddings: false,
   testConcurrency: 1,
   describeImages: false,
+  // Off by default: retention stores payloads, and that must be a decision.
+  retainResponseBodies: false,
   agentMode: true,
   planningMode: 'auto' as PlanningMode,
   testPersonality: 'balanced' as TestPersonalityId,
@@ -116,6 +121,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setDescribeImages: async (describeImages) => {
     set({ describeImages });
     await get().save();
+  },
+
+  setRetainResponseBodies: async (retainResponseBodies) => {
+    set({ retainResponseBodies });
+    await get().save();
+    // Switching it OFF drops what was already stored. Leaving payloads behind after
+    // the user withdrew consent would be the wrong default by a wide margin.
+    if (!retainResponseBodies) await clearRetainedBodies();
   },
 
   setAgentMode: async (agentMode) => {
@@ -187,6 +200,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       setUseLocalEmbeddings: _sl,
       setTestConcurrency: _tc,
       setDescribeImages: _di,
+      setRetainResponseBodies: _rrb,
       setAgentMode: _am,
       setPlanningMode: _pm,
       setWebhook: _sw,

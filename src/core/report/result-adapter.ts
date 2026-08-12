@@ -64,15 +64,41 @@ function toExportStep(s: StepResult): ExportStep {
   };
 }
 
+/**
+ * Verdict, accounting for oracle findings.
+ *
+ * A high-severity finding downgrades a PASS to NEEDS_REVIEW. "No assertion failed"
+ * is a weaker claim than "nothing went wrong": a test whose banner assertion passed
+ * while nothing was persisted should not report a clean pass. It is not marked FAIL
+ * — the test did what it was told — but it must not read as green either.
+ */
+export function verdictWithOracles(result: TestResult): TestVerdict {
+  const base = verdictOf(result);
+  if (base === 'FAIL') return 'FAIL';
+  const serious = (result.oracleFindings ?? []).filter((f) => f.severity === 'high');
+  return serious.length > 0 ? 'NEEDS_REVIEW' : base;
+}
+
 export function toExportResult(result: TestResult): ExportTestResult {
+  const findings = result.oracleFindings ?? [];
   return {
     id: result.testCaseId,
     name: result.testCaseTitle,
-    verdict: verdictOf(result),
+    verdict: verdictWithOracles(result),
     durationMs: result.duration ?? 0,
     startedAt: result.startedAt,
     steps: (result.steps ?? []).map(toExportStep),
-    errorMessage: result.errorMessage,
+    // Folded into the message so a finding cannot be lost just because the
+    // reader only looks at the failure text.
+    errorMessage:
+      findings.length > 0
+        ? [
+            result.errorMessage,
+            ...findings.map((f) => `[${f.kind}] ${f.message} — ${f.evidence}`),
+          ]
+            .filter(Boolean)
+            .join('\n')
+        : result.errorMessage,
     healedLocatorCount: healedLocatorCount(result.steps ?? [], result.healingAttempts ?? []),
   };
 }

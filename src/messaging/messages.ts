@@ -40,7 +40,9 @@ export type ContentScriptResponse =
   | { type: 'ELEMENTS'; payload: InteractiveElement[] }
   | { type: 'FORM_FIELDS'; payload: FormField[] }
   | { type: 'LINKS'; payload: Array<{ url: string; text: string }> }
-  | { type: 'REVEAL_DONE' }
+  // Carries the union of elements seen across the reveal sweep — virtualized
+  // rows that were mounted mid-scroll and unmounted again by the end of it.
+  | { type: 'REVEAL_DONE'; payload: InteractiveElement[] }
   | { type: 'IDLE_READY' }
   | { type: 'FORM_MESSAGES'; payload: { hasError: boolean; hasSuccess: boolean; message?: string; selectors?: string[] } }
   | { type: 'PAGE_METADATA'; payload: { breadcrumb?: string; headings: string[] } }
@@ -58,7 +60,20 @@ export type ContentScriptResponse =
 // ─── Sidebar / Popup → Background messages ──────────────────────────────────
 
 export type BackgroundMessage =
-  | { type: 'START_CRAWL'; payload: { url: string } }
+  | {
+      type: 'START_CRAWL';
+      payload: {
+        url: string;
+        /**
+         * Render pages in a real tab before extracting.
+         *
+         * Required for SPA documentation sites, which return an empty shell to a
+         * plain fetch. Also the supported route for credential-gated docs: the tab
+         * carries the user's own session, so no cookie-jar write is needed.
+         */
+        renderJavaScript?: boolean;
+      };
+    }
   | { type: 'STOP_CRAWL' }
   | { type: 'START_EXPLORATION'; payload: { depth: number; singlePageOnly?: boolean; singlePageStrict?: boolean; includeDangerous?: boolean; submitForms?: boolean; freshRescan?: boolean } }
   | { type: 'STOP_EXPLORATION' }
@@ -102,7 +117,13 @@ export type BackgroundMessage =
   // Analysis features
   | { type: 'GET_HAR_IMPACT'; payload?: { runId?: string } }
   | { type: 'RUN_A11Y_AUDIT' }
-  | { type: 'VALIDATE_API_CONTRACTS'; payload?: { runId?: string } };
+  | { type: 'VALIDATE_API_CONTRACTS'; payload?: { runId?: string } }
+  /** What this session spent on AI calls, as an estimate from published prices. */
+  | { type: 'GET_COST_REPORT' }
+  | { type: 'RESET_COST_COUNTERS' }
+  /** Record the API shapes seen in the last run as the baseline to compare against. */
+  | { type: 'CAPTURE_API_BASELINE' }
+  | { type: 'CLEAR_API_BASELINE' };
 
 // ─── Background → Sidebar messages (progress updates) ───────────────────────
 
@@ -147,6 +168,7 @@ export type SidebarMessage =
   // Analysis results
   | { type: 'HAR_IMPACT_COMPLETE'; payload: { coveragePercent: number; totalEndpoints: number; gaps: number; report: string } }
   | { type: 'A11Y_AUDIT_COMPLETE'; payload: { totalIssues: number; critical: number; serious: number; report: string } }
-  | { type: 'CONTRACT_VALIDATION_COMPLETE'; payload: { violations: number; errors: number; warnings: number; report: string } };
+  | { type: 'CONTRACT_VALIDATION_COMPLETE'; payload: { violations: number; errors: number; warnings: number; report: string } }
+  | { type: 'COST_REPORT_COMPLETE'; payload: { report: string } };
 
 export type AnyMessage = BackgroundMessage | ContentScriptMessage | SidebarMessage;

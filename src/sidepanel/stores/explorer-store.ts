@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { InteractionGraph, ExplorationProgress, ExplorationCoverage, Flow } from '../../storage/schemas';
-import { loadGraph } from '../../core/explorer/interaction-graph';
+import { getGraphSnapshots, loadGraph, restoreGraphSnapshot } from '../../core/explorer/interaction-graph';
+import type { GraphSnapshot } from '../../storage/schemas';
 import { getAllFlows } from '../../core/flow/flow-store';
 import { hasPermissionFor, requestPermissionFor } from '../../drivers/host-permissions';
 import { sendToBackground } from '../../messaging/messenger';
@@ -44,6 +45,9 @@ interface ExplorerState {
    * after completion so the summary stays visible. Null until the first run.
    */
   coverage: ExplorationCoverage | null;
+  /** Graph snapshots taken before destructive operations (re-explore, pruning). */
+  snapshots: GraphSnapshot[];
+  isRestoring: boolean;
   error: string | null;
   exportImportError: string | null;
   /** Set when an exploration just finished — drives the "Continue → Flows" hand-off banner. */
@@ -62,6 +66,8 @@ interface ExplorerState {
   importExplorationData: (file: File) => Promise<void>;
   clearExplorationData: () => Promise<void>;
   loadData: () => Promise<void>;
+  /** Restore a snapshot taken before a destructive operation. */
+  restoreSnapshot: (snapshotId: string) => Promise<void>;
   setProgress: (progress: ExplorationProgress) => void;
   setExplorationComplete: (coverage?: ExplorationCoverage) => void;
   dismissExplorationCompletion: () => void;
@@ -104,6 +110,8 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
   isExporting: false,
   isImporting: false,
   isDeleting: false,
+  snapshots: [],
+  isRestoring: false,
   progress: null,
   coverage: null,
   error: null,
@@ -231,8 +239,32 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
   },
 
   loadData: async () => {
-    const [graph, flows] = await Promise.all([loadGraph(), getAllFlows()]);
-    set({ graph: graph ?? null, flows });
+    // Snapshots load with the graph: they were being WRITTEN before every
+    // re-explore and every stale-page prune, and nothing could list or restore
+    // them. A backup nobody can read is not a safety net.
+    const [graph, flows, snapshots] = await Promise.all([
+      loadGraph(),
+      getAllFlows(),
+      getGraphSnapshots().catch(() => [] as GraphSnapshot[]),
+    ]);
+    set({ graph: graph ?? null, flows, snapshots });
+  },
+
+  restoreSnapshot: async (snapshotId: string) => {
+    set({ isRestoring: true, error: null });
+    try {
+      const graph = await restoreGraphSnapshot(snapshotId);
+      if (!graph) {
+        set({ error: 'That snapshot could no longer be found.' });
+        return;
+      }
+      const snapshots = await getGraphSnapshots().catch(() => get().snapshots);
+      set({ graph, snapshots });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      set({ isRestoring: false });
+    }
   },
 
   setProgress: (progress) => set({ progress, coverage: progress.coverage ?? get().coverage }),
