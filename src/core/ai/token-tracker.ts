@@ -1,4 +1,5 @@
 import { createLogger } from '../../utils/logger';
+import { resolveModelPrice } from './model-pricing';
 
 const log = createLogger('token-tracker');
 
@@ -8,35 +9,6 @@ export interface TokenUsage {
   embeddingTokens: number;
   requests: number;
 }
-
-// Per-model cost per 1M tokens (USD). Update as pricing changes.
-const MODEL_COSTS: Record<string, { input: number; output: number }> = {
-  // OpenAI — GPT-5 series (reasoning / thinking models)
-  'gpt-5': { input: 1.25, output: 10 },
-  'gpt-5-mini': { input: 0.25, output: 2 },
-  'gpt-5-nano': { input: 0.05, output: 0.4 },
-  // OpenAI — legacy
-  'gpt-4o': { input: 2.5, output: 10 },
-  'gpt-4o-mini': { input: 0.15, output: 0.6 },
-  'gpt-4-turbo': { input: 10, output: 30 },
-  'o1': { input: 15, output: 60 },
-  'o3-mini': { input: 1.1, output: 4.4 },
-  // Anthropic — Claude 4.x
-  'claude-opus-4-7': { input: 15, output: 75 },
-  'claude-sonnet-4-6': { input: 3, output: 15 },
-  'claude-haiku-4-5-20251001': { input: 0.8, output: 4 },
-  // Anthropic — legacy IDs (kept for back-compat with existing settings)
-  'claude-sonnet-4-20250514': { input: 3, output: 15 },
-  'claude-opus-4-20250514': { input: 15, output: 75 },
-  // Google
-  'gemini-3-pro': { input: 2, output: 10 },
-  'gemini-3-flash': { input: 0.15, output: 0.6 },
-  'gemini-1.5-pro': { input: 1.25, output: 5 },
-  'gemini-1.5-flash': { input: 0.075, output: 0.3 },
-  // Embedding
-  'text-embedding-3-small': { input: 0.02, output: 0 },
-  'text-embedding-004': { input: 0.006, output: 0 },
-};
 
 let currentUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, embeddingTokens: 0, requests: 0 };
 let currentModel = '';
@@ -112,6 +84,14 @@ export interface CostBreakdown {
   embeddingModel: string;
   /** True when we have no published price for the model in use. */
   pricingUnknown: boolean;
+  /**
+   * The published price entry the chat figures were computed from, when it is
+   * not the model id itself — a dated snapshot or a variant priced off its
+   * family. Undefined when the id was priced exactly.
+   */
+  pricedAs?: string;
+  /** A caveat on the published rate (promotional period, context tier). */
+  priceNote?: string;
   usage: TokenUsage;
 }
 
@@ -127,14 +107,14 @@ export interface CostBreakdown {
  */
 export function costBreakdown(model?: string): CostBreakdown {
   const m = model ?? currentModel;
-  const chat = MODEL_COSTS[m];
-  const embed = MODEL_COSTS[currentEmbeddingModel];
+  const chat = resolveModelPrice(m);
+  const embed = resolveModelPrice(currentEmbeddingModel);
 
   const chatUsd = chat
-    ? (currentUsage.inputTokens / 1_000_000) * chat.input +
-      (currentUsage.outputTokens / 1_000_000) * chat.output
+    ? (currentUsage.inputTokens / 1_000_000) * chat.price.input +
+      (currentUsage.outputTokens / 1_000_000) * chat.price.output
     : 0;
-  const embeddingUsd = embed ? (currentUsage.embeddingTokens / 1_000_000) * embed.input : 0;
+  const embeddingUsd = embed ? (currentUsage.embeddingTokens / 1_000_000) * embed.price.input : 0;
   const round = (n: number): number => Math.round(n * 10000) / 10000;
 
   return {
@@ -144,6 +124,8 @@ export function costBreakdown(model?: string): CostBreakdown {
     model: m,
     embeddingModel: currentEmbeddingModel,
     pricingUnknown: (currentUsage.inputTokens > 0 || currentUsage.outputTokens > 0) && !chat,
+    pricedAs: chat && !chat.exact ? chat.pricedAs : undefined,
+    priceNote: chat?.price.note,
     usage: { ...currentUsage },
   };
 }

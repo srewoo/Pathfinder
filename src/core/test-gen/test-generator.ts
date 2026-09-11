@@ -160,6 +160,9 @@ export async function generateTestsForFlow(
       description: t.description,
       type: t.type,
       sourceFlowId: flow.flowId,
+      // Pinned so a passing run stops counting as validation once the flow is
+      // re-learnt into a different shape.
+      flowSignature: flow.signature,
       source: 'generated',
       steps: t.steps,
       stepConfidence: t.steps?.map((s) => confidenceFromText(s, hasKnowledge)),
@@ -180,7 +183,8 @@ export async function generateTestsForFlow(
     const constraintTests = await saveConstraintTests(
       constraintSpecs.slice(0, CONSTRAINT_CAP),
       flow.flowId,
-      flow.startUrl
+      flow.startUrl,
+      flow.signature
     );
     saved.push(...constraintTests);
     log.info(

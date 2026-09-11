@@ -30,6 +30,10 @@ export interface ExportTestResult {
   steps: ExportStep[];
   errorMessage?: string;
   healedLocatorCount: number;
+  /** Why this verdict — carried so every format can state it. */
+  verdictReason?: string;
+  /** Present only when the test needed more than one attempt. */
+  retry?: { attempts: number; passedOnAttempt?: number; retriedToPass: boolean; label: string };
   tags?: string[];
 }
 
@@ -93,14 +97,25 @@ export function toJUnitXml(run: ExportRun): string {
         )}</failure>`
       );
     } else if (result.verdict === 'NEEDS_REVIEW') {
-      lines.push(
-        `      <system-out>${cdata(
-          `NEEDS_REVIEW: passed, but ${result.healedLocatorCount} locator(s) were healed. ` +
-            `This test may no longer exercise what it was written for.\n\n${stepTrace(result)}`
-        )}</system-out>`
-      );
+      // JUnit has no review state, so this is the conservative mapping: <skipped>
+      // is the one standard element that is neither a pass nor a build failure.
+      // It was <system-out>, which every CI dashboard counts as a clean pass —
+      // the exact outcome a review verdict exists to prevent. <skipped> shows up
+      // as "not counted" instead, and leaves the build green.
+      const reason =
+        result.verdictReason ??
+        `Passed, but ${result.healedLocatorCount} locator(s) were healed. ` +
+          `This test may no longer exercise what it was written for.`;
+      lines.push(`      <skipped message="${attr(`NEEDS_REVIEW: ${reason}`)}"/>`);
+      lines.push(`      <system-out>${cdata(`NEEDS_REVIEW: ${reason}\n\n${stepTrace(result)}`)}</system-out>`);
     }
 
+    // Stated in system-out rather than as a status: needing a retry is a
+    // diagnostic, and turning it into a failure or a skip would reclassify a
+    // large share of existing passes without a policy for doing so.
+    if (result.retry) {
+      lines.push(`      <system-out>${cdata(`RETRY: ${result.retry.label}`)}</system-out>`);
+    }
     lines.push('    </testcase>');
   }
 

@@ -1,4 +1,5 @@
 import type { InferredSchema } from '../core/analysis/schema-infer';
+import type { DataSet } from '../core/test-gen/dataset';
 
 export type AIProvider = 'openai' | 'anthropic' | 'google';
 export type Theme = 'dark' | 'light';
@@ -58,6 +59,19 @@ export interface Settings {
    * in an export.
    */
   retainResponseBodies?: boolean;
+  /**
+   * TestRail credentials.
+   *
+   * Stored in chrome.storage.local like the AI key, and used only against the
+   * user's own TestRail host — ADR-002 holds, nothing is proxied.
+   */
+  testrail?: {
+    host: string;
+    email: string;
+    apiKey: string;
+    /** Remembered so pushing results does not re-ask for the run. */
+    lastRunId?: number;
+  };
 }
 
 export interface VectorRecord {
@@ -265,6 +279,29 @@ export type PageType =
   | 'empty'      // blank or "no data" state
   | 'other';     // doesn't fit any specific category
 
+/**
+ * A frame on a page whose contents the scan could not reach.
+ *
+ * Same-origin frames are walked as part of the page, so they never appear here.
+ * A cross-origin frame cannot be — the browser refuses `contentDocument`, and
+ * reaching in would need per-frame injection and frame-aware routing through
+ * the whole messaging layer, which still would not cover a third-party widget
+ * the extension has no host permission for.
+ *
+ * Recording the gap is the point: coverage that silently omits a payment or
+ * sign-in iframe is a wrong number, and one that names it is a caveat.
+ */
+export interface UnscannedFrame {
+  /** Origin taken from the embedder's own `src` attribute, when it has one. */
+  origin?: string;
+  /** Whatever the embedder labelled it — title, aria-label, name or id. */
+  label?: string;
+  /** Rendered size, so a report can say how much of the page this is. */
+  width: number;
+  height: number;
+  reason: 'cross-origin';
+}
+
 export interface PageNode {
   id: string;
   url: string;
@@ -289,6 +326,42 @@ export interface PageNode {
   headings?: string[];
   /** Modals/dialogs discovered by clicking buttons on this page */
   modals?: ModalDiscovery[];
+  /**
+   * Forms revealed in place by a click — no dialog, no navigation.
+   *
+   * The pattern this exists for, measured on a live login page: "Sign in with
+   * your username" swaps the username/password fields into the page. The URL
+   * does not change and no dialog opens, so neither the modal nor the
+   * navigation branch sees it, and the one-shot form scan runs before any click
+   * — so the fields were invisible to test generation, which then invented a
+   * "username input field" it had never observed.
+   *
+   * Shares `ModalDiscovery` because the useful content is identical: the
+   * trigger, and the fields it brings into existence. A test has to click the
+   * trigger before it can type anything.
+   */
+  revealedForms?: ModalDiscovery[];
+  /**
+   * True once the click/interaction pass ran this page to completion.
+   *
+   * The structure fingerprint is computed from the pre-click scan, so it is
+   * identical whether or not the page's modals and revealed forms were ever
+   * captured. Without this flag, a page whose interaction pass was cut short —
+   * by the page budget, an abort, or an error — stored a fingerprint anyway and
+   * was then treated as "unchanged" on every later run, keeping the shortfall
+   * permanently. A fingerprint only licenses a skip when there was nothing left
+   * to do behind it.
+   */
+  interactionComplete?: boolean;
+  /**
+   * Frames on this page that the scan could not see into.
+   *
+   * Present so coverage is not overstated: everything else on a `PageNode`
+   * describes what *was* found, and without this a page whose entire checkout
+   * lives in a third-party iframe looks as thoroughly mapped as one with
+   * nothing hidden at all.
+   */
+  unscannedFrames?: UnscannedFrame[];
   /** Form fields discovered on this page during exploration */
   formFields?: FormField[];
   /** Outcomes observed when forms on this page were submitted during exploration */
@@ -323,7 +396,24 @@ export interface PageNode {
    * new page. These represent feature tabs/panels and are surfaced to flow
    * learning so it can generate a flow per feature.
    */
-  tabs?: Array<{ label: string; url: string }>;
+  tabs?: Array<{
+    label: string;
+    url: string;
+    /**
+     * Form fields inside the view, captured while the tab was open.
+     *
+     * The tab used to be catalogued as a label and a URL and nothing else — the
+     * explorer opened it, recorded that it existed, and navigated straight back
+     * out. A settings page with six tabs therefore yielded six labels and none
+     * of their forms, and generation could only ever produce "open the tab and
+     * verify it loads".
+     */
+    formFields?: FormField[];
+    /** Interactive elements counted inside the view. */
+    elementCount?: number;
+    /** Headings inside the view — what the tab is actually for. */
+    headings?: string[];
+  }>;
 }
 
 export interface PageEdge {
@@ -480,6 +570,16 @@ export interface TestCase {
   description: string;
   type: 'positive' | 'negative' | 'edge';
   sourceFlowId?: string;
+  /**
+   * The source flow's `signature` at the moment this test was generated.
+   *
+   * Lets a passing run be checked against the flow as it stands now: if the
+   * flow has since been re-learnt into a different shape, the run exercised
+   * something else and its result must stop counting as validation of this
+   * flow. Without it, the most reassuring label in the product is the one most
+   * likely to be out of date. Absent on user-authored and legacy tests.
+   */
+  flowSignature?: string;
   source: 'generated' | 'user';
   steps?: string[];
   /** Provenance per step, aligned by index with `steps`. Optional — absent for legacy/user tests. */
@@ -502,6 +602,22 @@ export interface TestCase {
   createdAt: string;
   /** URL the test should start from — captured during planning for isolation */
   startUrl?: string;
+  /**
+   * Data-driven input. When present the test runs once per row, with
+   * `{{column}}` in step values resolved from that row.
+   *
+   * The AI cost of planning is paid once; every additional row is free.
+   */
+  dataSet?: DataSet;
+  /**
+   * Excluded from suite runs because the stability gate saw this test produce
+   * different outcomes across identical back-to-back runs.
+   *
+   * Quarantine, not deletion: an unstable test still carries information, and
+   * the user decides whether to fix or drop it. Set by the gate, cleared by the
+   * user.
+   */
+  quarantined?: boolean;
 }
 
 export type ActionType =
@@ -585,7 +701,12 @@ export interface ExecutionPlan {
 export interface HealingAttempt {
   stepOrder: number;
   originalSelector: string;
-  method: 'alternative' | 'similarity' | 'ai';
+  /**
+   * `visual` is the vision-model tier: it reads the screenshot captured at the
+   * moment of failure rather than the DOM, which is the only way to resolve an
+   * icon-only control or a canvas-rendered widget.
+   */
+  method: 'alternative' | 'similarity' | 'ai' | 'visual';
   healedSelector?: string;
   success: boolean;
   error?: string;
@@ -599,6 +720,14 @@ export interface StepResult {
   healingAttempt?: HealingAttempt;
   /** Base64 PNG screenshot captured at the moment of step failure. */
   screenshot?: string;
+  /**
+   * Whether this step's target was backed by capture when the test was authored.
+   *
+   * `false` means exploration never recorded the element, so a failure here is
+   * more likely a generation gap than a product defect. Absent on records
+   * written before grounding was tracked — unknown, deliberately not assumed.
+   */
+  groundedAtAuthoring?: boolean;
 }
 
 /** Network request captured during test execution via CDP */
@@ -627,6 +756,39 @@ export interface CapturedNetworkEntry {
    * run through ids and timestamps.
    */
   responseSchema?: InferredSchema;
+}
+
+
+/**
+ * One attempt at running a test.
+ *
+ * The retry ladder makes up to three attempts and returned only the last one,
+ * so a test that failed twice and passed on the third was indistinguishable
+ * from one that passed first time — the single most useful signal about a
+ * flaky test was computed and then thrown away.
+ *
+ * Deliberately carries no screenshot or DOM snapshot. Those are large, and
+ * three copies of near-identical evidence per test is how a result store
+ * becomes unusable; the final result keeps the one that matters, and the
+ * failure text plus the failing step order is what makes an earlier attempt
+ * interpretable.
+ */
+export interface AttemptRecord {
+  /** 0-based, matching the retry ladder. */
+  attempt: number;
+  status: 'passed' | 'failed' | 'error';
+  durationMs: number;
+  /** Why it failed, already redacted by the same path as the final result. */
+  errorMessage?: string;
+  /** Order of the first step that failed, for jumping straight to it. */
+  failedStepOrder?: number;
+  failedStepError?: string;
+  /** Distinct locators healed during this attempt. */
+  healedLocators: number;
+  /** Whether this attempt replanned from scratch (the selector fix). */
+  freshPlan: boolean;
+  /** Step-timeout multiplier used (the timing fix). */
+  timeoutMultiplier: number;
 }
 
 export interface TestResult {
@@ -670,6 +832,14 @@ export interface TestResult {
   harEntries?: CapturedNetworkEntry[];
   /** Visual diff result when comparing against a baseline screenshot */
   visualDiff?: { diffPercent: number; matches: boolean; diffImage?: string };
+  /**
+   * Every attempt, in order, when the test needed more than one.
+   *
+   * Absent for a first-attempt pass and on records written before this was
+   * tracked — which is why `retriedToPass` treats absence as "not retried"
+   * rather than unknown.
+   */
+  attempts?: AttemptRecord[];
 }
 
 export interface TestRun {
@@ -864,6 +1034,31 @@ export interface ExplorationCoverage {
    * limit or stopped. A truncated run's coverage is a floor, not the total.
    */
   complete: boolean;
+  /**
+   * What this run structurally could not cover, as opposed to what it ran out
+   * of budget for.
+   *
+   * `untestedPaths` and `coverageRatio` describe work that was skipped and
+   * could be resumed. This describes work that no resume will reach, so the two
+   * must not be added together or a limitation reads as a backlog. Absent when
+   * the run hit no such limit.
+   */
+  unsupported?: {
+    /**
+     * Cross-origin frames — third-party sign-in, payment and consent widgets.
+     *
+     * Same-origin frames are NOT counted: those are walked as part of the page.
+     * Reaching into a cross-origin one would need per-frame injection, frame-
+     * aware routing, and a host permission the extension does not have in the
+     * general case — so this is reported, not queued.
+     */
+    crossOriginFrames?: {
+      /** Frames found across the run. */
+      frames: number;
+      /** Pages carrying at least one. The denominator that makes it readable. */
+      pages: number;
+    };
+  };
   /**
    * Human-readable warnings surfaced during the run (scan failures, form
    * exploration errors, auth issues). Empty when the run was clean.

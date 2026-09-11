@@ -40,21 +40,67 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
-function transaction<T>(
+/**
+ * Run one transaction and settle only when it has finished.
+ *
+ * Two corrections live here, and both were silent.
+ *
+ * `openDB()` is awaited OUTSIDE the promise executor. It used to be awaited
+ * inside `new Promise(async …)`, where a rejected open settled the executor's
+ * own discarded promise and never the outer one — so a failed open hung every
+ * caller forever instead of surfacing an error.
+ *
+ * Resolution waits for `tx.oncomplete`, not `request.onsuccess`. A request can
+ * succeed and the transaction still abort — quota exhausted, a sibling request
+ * failing, an explicit abort — and the old code told the caller its write had
+ * landed before the commit that would have made that true. Reads settle the
+ * same way: `oncomplete` follows a successful read immediately, so one rule
+ * costs nothing and leaves no second path to get wrong.
+ */
+async function transaction<T>(
   storeName: string,
   mode: IDBTransactionMode,
   fn: (store: IDBObjectStore) => IDBRequest<T>
 ): Promise<T> {
-  return new Promise(async (resolve, reject) => {
-    const db = await openDB();
-    const tx = db.transaction(storeName, mode);
-    const store = tx.objectStore(storeName);
-    const request = fn(store);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(new Error(`DB operation failed: ${request.error?.message}`));
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => reject(new Error(`Transaction failed: ${tx.error?.message}`));
-  });
+  const db = await openDB();
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      let tx: IDBTransaction;
+      let request: IDBRequest<T>;
+      try {
+        // Both of these throw synchronously — an unknown store name, a closed
+        // connection, a bad index. Inside an async executor that became an
+        // unhandled rejection and another indefinite hang.
+        tx = db.transaction(storeName, mode);
+        request = fn(tx.objectStore(storeName));
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+
+      // The request's own error is the useful one; the transaction-level error
+      // that follows is a consequence of it. Keeping the first means the caller
+      // is told what actually failed.
+      let failure: Error | undefined;
+      request.onerror = () => {
+        failure ??= new Error(`DB operation failed: ${request.error?.message}`);
+      };
+      tx.onerror = () => {
+        failure ??= new Error(`Transaction failed: ${tx.error?.message}`);
+      };
+      tx.onabort = () => {
+        reject(failure ?? new Error(`Transaction aborted: ${tx.error?.message ?? 'unknown reason'}`));
+      };
+      tx.oncomplete = () => {
+        if (failure) reject(failure);
+        else resolve(request.result);
+      };
+    });
+  } finally {
+    // Safe in every path: the promise above settles only once the transaction
+    // has completed or aborted, so this can never cut a commit short.
+    db.close();
+  }
 }
 
 function getAllFromStore<T>(storeName: string): Promise<T[]> {
@@ -82,61 +128,102 @@ async function clearStore(storeName: string): Promise<undefined> {
  * from the index instead of loading all records and filtering in JS.
  */
 function queryByIndex<T>(storeName: string, indexName: string, key: IDBValidKey): Promise<T[]> {
-  return new Promise(async (resolve, reject) => {
-    const db = await openDB();
-    const tx = db.transaction(storeName, 'readonly');
-    const store = tx.objectStore(storeName);
-    const req = store.index(indexName).getAll(key);
-    req.onsuccess = () => { db.close(); resolve(req.result as T[]); };
-    req.onerror = () => reject(new Error(`queryByIndex failed: ${req.error?.message}`));
-  });
+  // Routed through `transaction` rather than opening its own connection: it had
+  // the same async-executor hang, and it closed the database only on the success
+  // path, leaking a connection on every failed query.
+  return transaction<T[]>(storeName, 'readonly', (store) => store.index(indexName).getAll(key));
 }
 
 /**
  * Get a single record by index (returns first match).
  */
 function getByIndex<T>(storeName: string, indexName: string, key: IDBValidKey): Promise<T | undefined> {
-  return new Promise(async (resolve, reject) => {
-    const db = await openDB();
-    const tx = db.transaction(storeName, 'readonly');
-    const store = tx.objectStore(storeName);
-    const req = store.index(indexName).get(key);
-    req.onsuccess = () => { db.close(); resolve(req.result as T | undefined); };
-    req.onerror = () => reject(new Error(`getByIndex failed: ${req.error?.message}`));
-  });
+  return transaction<T | undefined>(storeName, 'readonly', (store) =>
+    store.index(indexName).get(key)
+  );
 }
 
 /**
  * Paginated retrieval from a store using a cursor.
  * Returns `limit` records starting from `offset`.
  */
-function getPage<T>(storeName: string, offset: number, limit: number): Promise<T[]> {
-  return new Promise(async (resolve, reject) => {
-    const db = await openDB();
-    const tx = db.transaction(storeName, 'readonly');
-    const store = tx.objectStore(storeName);
-    const results: T[] = [];
-    let skipped = 0;
+async function getPage<T>(storeName: string, offset: number, limit: number): Promise<T[]> {
+  const db = await openDB();
+  try {
+    return await new Promise<T[]>((resolve, reject) => {
+      let tx: IDBTransaction;
+      let req: IDBRequest<IDBCursorWithValue | null>;
+      try {
+        tx = db.transaction(storeName, 'readonly');
+        req = tx.objectStore(storeName).openCursor();
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
 
-    const req = store.openCursor();
-    req.onsuccess = () => {
-      const cursor = req.result;
-      if (!cursor || results.length >= limit) {
-        db.close();
-        resolve(results);
-        return;
-      }
-      if (skipped < offset) {
-        skipped++;
+      const results: T[] = [];
+      let skipped = 0;
+      let failure: Error | undefined;
+
+      req.onsuccess = () => {
+        const cursor = req.result;
+        // Stopping the walk does not resolve — `oncomplete` does, once the
+        // transaction it belongs to has actually finished.
+        if (!cursor || results.length >= limit) return;
+        if (skipped < offset) {
+          skipped++;
+          cursor.continue();
+          return;
+        }
+        results.push(cursor.value as T);
         cursor.continue();
-        return;
-      }
-      results.push(cursor.value as T);
-      cursor.continue();
-    };
-    req.onerror = () => reject(new Error(`getPage failed: ${req.error?.message}`));
-  });
+      };
+      req.onerror = () => {
+        failure ??= new Error(`getPage failed: ${req.error?.message}`);
+      };
+      tx.onabort = () => {
+        reject(failure ?? new Error(`getPage transaction aborted: ${tx.error?.message ?? 'unknown reason'}`));
+      };
+      tx.oncomplete = () => {
+        if (failure) reject(failure);
+        else resolve(results);
+      };
+    });
+  } finally {
+    db.close();
+  }
 }
+
+/**
+ * Wire a batch transaction's terminal handlers.
+ *
+ * Every batch site already resolved on `oncomplete`, which is right, but closed
+ * the connection only there — leaking one on every failure — and none handled
+ * `onabort`, so a quota abort left the caller waiting forever on a promise that
+ * would never settle.
+ */
+function settleBatch<T>(
+  db: IDBDatabase,
+  tx: IDBTransaction,
+  label: string,
+  onComplete: () => T,
+  resolve: (value: T) => void,
+  reject: (error: Error) => void
+): void {
+  let settled = false;
+  const finish = (fn: () => void) => {
+    if (settled) return;
+    settled = true;
+    db.close();
+    fn();
+  };
+  tx.oncomplete = () => finish(() => resolve(onComplete()));
+  tx.onerror = () =>
+    finish(() => reject(new Error(`${label} failed: ${tx.error?.message ?? 'transaction error'}`)));
+  tx.onabort = () =>
+    finish(() => reject(new Error(`${label} aborted: ${tx.error?.message ?? 'unknown reason'}`)));
+}
+
 
 // ── Vectors ─────────────────────────────────────────────────────────────────
 export const vectorDB = {
@@ -150,8 +237,7 @@ export const vectorDB = {
       const tx = db.transaction(STORES.vectors, 'readwrite');
       const store = tx.objectStore(STORES.vectors);
       records.forEach((r) => store.put(r));
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => reject(new Error(`Batch put failed: ${tx.error?.message}`));
+      settleBatch(db, tx, 'vectorDB.putBatch', () => undefined, resolve, reject);
     });
   },
 
@@ -182,8 +268,7 @@ export const vectorDB = {
       req.onsuccess = () => {
         (req.result as VectorRecord[]).forEach((r) => store.delete(r.id));
       };
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => reject(new Error(`vectorDB.deleteByUrl failed: ${tx.error?.message}`));
+      settleBatch(db, tx, 'vectorDB.deleteByUrl', () => undefined, resolve, reject);
     });
   },
 
@@ -218,8 +303,7 @@ export const documentDB = {
       const tx = db.transaction(STORES.documents, 'readwrite');
       const store = tx.objectStore(STORES.documents);
       docs.forEach((d) => store.put(d));
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => reject(new Error(`documentDB.putBatch failed: ${tx.error?.message}`));
+      settleBatch(db, tx, 'documentDB.putBatch', () => undefined, resolve, reject);
     });
   },
 
@@ -288,14 +372,19 @@ export const flowDB = {
         testStore.delete(tc.id);
       }
 
-      tx.oncomplete = () => {
-        db.close();
-        if (relatedTests.length > 0) {
-          log.info(`Cascade-deleted ${relatedTests.length} test cases for flow ${flowId}`);
-        }
-        resolve({ deletedTestCases: relatedTests.length });
-      };
-      tx.onerror = () => reject(new Error(`flowDB.deleteWithCascade failed: ${tx.error?.message}`));
+      settleBatch(
+        db,
+        tx,
+        'flowDB.deleteWithCascade',
+        () => {
+          if (relatedTests.length > 0) {
+            log.info(`Cascade-deleted ${relatedTests.length} test cases for flow ${flowId}`);
+          }
+          return { deletedTestCases: relatedTests.length };
+        },
+        resolve,
+        reject
+      );
     });
   },
 
@@ -398,8 +487,7 @@ export const graphDB = {
       const store = tx.objectStore(STORES.interactionGraph);
       store.clear();
       store.put({ ...graph, id: 1 });
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => reject(new Error('Graph save failed'));
+      settleBatch(db, tx, 'graphDB.save', () => undefined, resolve, reject);
     });
   },
 
@@ -499,6 +587,24 @@ export const graphDB = {
   async getSnapshots(): Promise<GraphSnapshot[]> {
     const all = await getAllFromStore<GraphSnapshot>(STORES.graphSnapshots);
     return all.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+  },
+
+  /**
+   * Delete one snapshot.
+   *
+   * Snapshots are capped at 10 and pruned oldest-first, so a run of automatic
+   * ones can push a deliberately-kept snapshot out. Deleting the noise by hand
+   * is what keeps the one that matters reachable.
+   */
+  async deleteSnapshot(snapshotId: string): Promise<void> {
+    await deleteFromStore(STORES.graphSnapshots, snapshotId);
+    log.info(`Graph snapshot deleted: ${snapshotId}`);
+  },
+
+  /** Delete every snapshot. Does not touch the active graph. */
+  async clearSnapshots(): Promise<void> {
+    await clearStore(STORES.graphSnapshots);
+    log.info('All graph snapshots cleared');
   },
 
   /** Restore a specific graph snapshot as the active graph. */

@@ -5,11 +5,16 @@ import { useSettingsStore } from '../../stores/settings-store';
 import { SegmentedControl } from '../shared/SegmentedControl';
 import { ProviderSelect } from './ProviderSelect';
 import { ApiKeyConfig } from './ApiKeyConfig';
+import { ModelSelect, TestKeyButton } from './ModelSelect';
+import { TestPersonalitySelect } from './TestPersonalitySelect';
+import { chatModels, embeddingModels } from '../../../core/ai/model-catalog';
 import { ExecutionPresetManager } from './ExecutionPresetManager';
 import { Button } from '../shared/Button';
 import { Badge } from '../shared/Badge';
 import { sendToBackground } from '../../../messaging/messenger';
 import type { AIProvider, WebhookConfig } from '../../../storage/schemas';
+import { hasPermissionFor, requestPermissionFor } from '../../../drivers/host-permissions';
+import { createTestRailClient } from '../../../core/integrations/testrail-client';
 
 export function SettingsPanel() {
   const store = useSettingsStore();
@@ -38,16 +43,20 @@ export function SettingsPanel() {
         provider={store.provider}
       />
 
-      <div className="space-y-2">
-        <label className="block text-xs font-medium text-text-secondary">Model</label>
-        <input
-          type="text"
-          value={store.model}
-          onChange={(e) => store.setModel(e.target.value)}
-          className="w-full h-8 bg-surface-3 border border-border rounded-lg px-3 text-xs text-text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors font-mono"
-          placeholder="e.g. gpt-4o"
-        />
-      </div>
+      <TestKeyButton
+        status={store.keyTest}
+        onTest={() => void store.testApiKey()}
+        disabled={!store.apiKey.trim()}
+      />
+
+      <ModelSelect
+        label="Model"
+        value={store.model}
+        onChange={(model) => void store.setModel(model)}
+        options={chatModels(store.modelCatalog)}
+        placeholder="e.g. gpt-4o"
+        hint="Test the key to list the models it can actually call."
+      />
 
       {/* ── Embedding mode toggle ── */}
       <div className="rounded-lg border border-border overflow-hidden">
@@ -104,12 +113,11 @@ export function SettingsPanel() {
       {/* API embedding model input — hidden when using local embeddings */}
       {!store.useLocalEmbeddings && (
         <div className="space-y-2">
-          <label className="block text-xs font-medium text-text-secondary">Embedding Model</label>
-          <input
-            type="text"
+          <ModelSelect
+            label="Embedding Model"
             value={store.embeddingModel}
-            onChange={(e) => store.setEmbeddingModel(e.target.value)}
-            className="w-full h-8 bg-surface-3 border border-border rounded-lg px-3 text-xs text-text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors font-mono"
+            onChange={(model) => void store.setEmbeddingModel(model)}
+            options={embeddingModels(store.modelCatalog)}
             placeholder="e.g. text-embedding-3-small"
           />
           {store.provider === 'anthropic' && (
@@ -236,6 +244,13 @@ export function SettingsPanel() {
         </p>
       </div>
 
+      <TestPersonalitySelect
+        value={store.testPersonality ?? 'balanced'}
+        customPrompt={store.customPersonalityPrompt ?? ''}
+        onChange={(id) => void store.setTestPersonality(id)}
+        onCustomPromptChange={(prompt) => void store.setCustomPersonalityPrompt(prompt)}
+      />
+
       <div className="grid grid-cols-2 gap-2">
         <div className="space-y-1.5">
           <label className="block text-xs font-medium text-text-secondary">Max Crawl Pages</label>
@@ -287,6 +302,7 @@ export function SettingsPanel() {
       <ExecutionPresetManager />
 
       <WebhookSettings />
+      <TestRailSettings />
 
       <div className="border-t border-border pt-3">
         <Button
@@ -301,6 +317,152 @@ export function SettingsPanel() {
           Removes crawled knowledge, flows, and test results
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * TestRail credentials.
+ *
+ * ADR-002 holds: these go only to the user's own TestRail host, over a host
+ * permission they grant themselves. Nothing is proxied.
+ */
+function TestRailSettings() {
+  const store = useSettingsStore();
+  const [host, setHost] = useState(store.testrail?.host ?? '');
+  const [email, setEmail] = useState(store.testrail?.email ?? '');
+  const [apiKey, setApiKey] = useState(store.testrail?.apiKey ?? '');
+  const [runId, setRunId] = useState(String(store.testrail?.lastRunId ?? ''));
+  const [status, setStatus] = useState<{ kind: 'idle' | 'ok' | 'error'; message?: string }>({
+    kind: 'idle',
+  });
+
+  const configured = Boolean(store.testrail?.host && store.testrail.email && store.testrail.apiKey);
+
+  const handleSave = async () => {
+    if (!host.trim() || !email.trim() || !apiKey.trim()) {
+      await store.setTestRail(undefined);
+      setStatus({ kind: 'idle' });
+      return;
+    }
+    await store.setTestRail({
+      host: host.trim().replace(/\/+$/, ''),
+      email: email.trim(),
+      apiKey: apiKey.trim(),
+      lastRunId: Number(runId) || undefined,
+    });
+    setStatus({ kind: 'ok', message: 'Saved.' });
+  };
+
+  /**
+   * Verify the credentials against a real run.
+   *
+   * The error text is surfaced verbatim — TestRail distinguishes a bad key from
+   * a run the account cannot see, and paraphrasing that loses the distinction
+   * the user needs.
+   */
+  const handleTest = async () => {
+    setStatus({ kind: 'idle' });
+    const config = { host: host.trim(), email: email.trim(), apiKey: apiKey.trim() };
+    if (!config.host || !config.email || !config.apiKey) {
+      setStatus({ kind: 'error', message: 'Fill in host, email and API key first.' });
+      return;
+    }
+    try {
+      if (!(await hasPermissionFor([config.host]))) {
+        const granted = await requestPermissionFor([config.host]);
+        if (!granted) {
+          setStatus({ kind: 'error', message: `Permission to reach ${config.host} was declined.` });
+          return;
+        }
+      }
+      const tests = await createTestRailClient(config).getTests(Number(runId) || 1);
+      setStatus({ kind: 'ok', message: `Connected — run has ${tests.length} test(s).` });
+    } catch (err) {
+      setStatus({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-surface-2 p-3">
+      <div>
+        <div className="flex items-center gap-2">
+          <Badge variant="primary" dot>
+            TestRail
+          </Badge>
+          {configured && <Badge variant="success">Configured</Badge>}
+        </div>
+        <p className="mt-2 text-2xs text-text-muted">
+          Import a run&apos;s cases and push results back with failure screenshots. Credentials are
+          stored locally and sent only to your own TestRail host.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="block text-xs font-medium text-text-secondary">Host</label>
+        <input
+          type="url"
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          placeholder="https://acme.testrail.io"
+          className="w-full h-8 bg-surface-3 border border-border rounded-lg px-3 text-xs text-text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors font-mono"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="block text-xs font-medium text-text-secondary">Email</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="qa@acme.com"
+          className="w-full h-8 bg-surface-3 border border-border rounded-lg px-3 text-xs text-text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors font-mono"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="block text-xs font-medium text-text-secondary">API key</label>
+        <input
+          type="password"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder="••••••••"
+          className="w-full h-8 bg-surface-3 border border-border rounded-lg px-3 text-xs text-text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary/30 transition-colors font-mono"
+        />
+      </div>
+
+      <div className="space-y-1.5">
+        <label className="block text-2xs text-text-muted">Default run id</label>
+        <input
+          type="number"
+          value={runId}
+          onChange={(e) => setRunId(e.target.value)}
+          placeholder="42"
+          className="w-full h-8 bg-surface-3 border border-border rounded-lg px-3 text-xs text-text-primary outline-none focus:border-primary transition-colors font-mono"
+        />
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button variant="secondary" size="xs" onClick={handleSave}>
+          Save
+        </Button>
+        <Button variant="ghost" size="xs" onClick={handleTest}>
+          Test connection
+        </Button>
+        {status.kind === 'ok' && (
+          <span className="flex items-center gap-1 text-2xs text-success-text">
+            <CheckCircle size={11} /> {status.message}
+          </span>
+        )}
+        {status.kind === 'error' && (
+          <span className="flex items-center gap-1 text-2xs text-error-text">
+            <XCircle size={11} />
+          </span>
+        )}
+      </div>
+      {status.kind === 'error' && (
+        <p className="text-2xs text-error-text break-words">{status.message}</p>
+      )}
     </div>
   );
 }

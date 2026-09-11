@@ -16,6 +16,7 @@ import type { MutationLedger } from '../core/safety/mutation-ledger';
 import { entryFor } from '../core/safety/mutation-ledger';
 import { registerSafetyInstaller } from '../core/safety/safety-port';
 import { createLogger } from '../utils/logger';
+import { redactUrlForLog } from '../utils/url-redact';
 
 const log = createLogger('cdp-safety');
 
@@ -138,18 +139,19 @@ export async function installSafety(
       if (firstTime) loggedBlocks.add(key);
       repeatedBlocks.set(key, (repeatedBlocks.get(key) ?? 0) + 1);
 
+      const safeUrl = redactUrlForLog(url);
       if (firstTime && isPageCritical(ev.resourceType)) {
         // Loud, not debug: this is the difference between "we declined a tracker"
         // and "the app never loaded and everything after this is noise".
         log.error(
-          `BLOCKED ${ev.resourceType} ${method} ${url} — ${decision.reason}. ` +
+          `BLOCKED ${ev.resourceType} ${method} ${safeUrl} — ${decision.reason}. ` +
             `The page may not function; results from this run are suspect.`
         );
         if (critical.length < CRITICAL_BLOCK_CAP) {
-          critical.push(`${ev.resourceType} ${method} ${url} (${decision.reason})`);
+          critical.push(`${ev.resourceType} ${method} ${safeUrl} (${decision.reason})`);
         }
       } else if (firstTime) {
-        log.warn(`BLOCKED ${method} ${url} — ${decision.reason}`);
+        log.warn(`BLOCKED ${method} ${safeUrl} — ${decision.reason}`);
       }
       await failRequest(tabId, requestId);
       return;

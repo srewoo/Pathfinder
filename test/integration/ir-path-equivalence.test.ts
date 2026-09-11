@@ -245,3 +245,58 @@ describe('negative tests convert correctly', () => {
     expect(result.status).toBe('passed');
   });
 });
+
+describe('heal evidence survives storage so the verdict survives with it', () => {
+  // This was `healingAttempts: []`. An IR-path NEEDS_REVIEW stored as `passed`
+  // with no evidence, so the verdict recomputed to a clean PASS — the review
+  // vanished between execution and every surface that reads the result.
+  it('given_healed_locators_then_the_stored_result_carries_them', async () => {
+    const { healingAttemptsFrom } = await import('../../src/core/executor/ir-execution-path');
+    const attempts = healingAttemptsFrom({
+      testId: 't', name: 'n', verdict: 'NEEDS_REVIEW', durationMs: 1,
+      steps: [
+        { order: 1, description: 'a', status: 'passed', durationMs: 1, healed: { from: '#a', to: '#a2' } },
+        { order: 2, description: 'b', status: 'passed', durationMs: 1 },
+      ],
+      assertions: [
+        { order: 3, description: 'c', status: 'passed', durationMs: 1, healed: { from: '#b', to: '#b2' } },
+      ],
+      healedLocatorCount: 2, locatorUsages: [], captured: {},
+    } as never);
+
+    expect(attempts).toHaveLength(2);
+    expect(attempts.map((a) => a.originalSelector)).toEqual(['#a', '#b']);
+    expect(attempts.every((a) => a.success)).toBe(true);
+  });
+
+  it('given_two_healed_locators_then_the_recomputed_verdict_is_NEEDS_REVIEW', async () => {
+    const { healingAttemptsFrom } = await import('../../src/core/executor/ir-execution-path');
+    const { verdictWithReason } = await import('../../src/core/report/result-adapter');
+
+    const healingAttempts = healingAttemptsFrom({
+      testId: 't', name: 'n', verdict: 'NEEDS_REVIEW', durationMs: 1,
+      steps: [
+        { order: 1, description: 'a', status: 'passed', durationMs: 1, healed: { from: '#a', to: '#a2' } },
+        { order: 2, description: 'b', status: 'passed', durationMs: 1, healed: { from: '#b', to: '#b2' } },
+      ],
+      assertions: [], healedLocatorCount: 2, locatorUsages: [], captured: {},
+    } as never);
+
+    const stored = {
+      id: 'r', testCaseId: 'tc', testCaseTitle: 'n', status: 'passed' as const,
+      startedAt: '2026-09-11T00:00:00.000Z', duration: 1, steps: [], healingAttempts, runId: 'run',
+    };
+    expect(verdictWithReason(stored).verdict).toBe('NEEDS_REVIEW');
+  });
+
+  it('given_no_heals_then_no_attempts_are_invented', async () => {
+    const { healingAttemptsFrom } = await import('../../src/core/executor/ir-execution-path');
+    expect(
+      healingAttemptsFrom({
+        testId: 't', name: 'n', verdict: 'PASS', durationMs: 1,
+        steps: [{ order: 1, description: 'a', status: 'passed', durationMs: 1 }],
+        assertions: [], healedLocatorCount: 0, locatorUsages: [], captured: {},
+      } as never)
+    ).toEqual([]);
+  });
+});

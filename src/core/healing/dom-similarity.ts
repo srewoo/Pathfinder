@@ -55,7 +55,7 @@ export async function findSimilarElements(
 
 function inferTagFromSelector(selector: string): string | null {
   // Try: tag at start (e.g. "button.class"), tag alone, or tag after "]" (e.g. "[data-testid]button")
-  const match = selector.match(/^([a-z]+)[\[#.:]/i)
+  const match = selector.match(/^([a-z]+)[[#.:]/i)
     ?? selector.match(/^([a-z]+)$/i)
     ?? selector.match(/\]([a-z]+)/i);
   return match ? match[1].toLowerCase() : null;

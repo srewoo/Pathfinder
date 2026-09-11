@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film, Shield, ArrowRight, Accessibility, PlayCircle } from 'lucide-react';
+import { Download, Trash2, BarChart2, FileText, Terminal, Activity, Film, Shield, ArrowRight, Accessibility, PlayCircle, Code2, Upload } from 'lucide-react';
 import { TestReport } from './TestReport';
 import { TestDashboard } from './TestDashboard';
 import { ExecutionTimeline } from './ExecutionTimeline';
@@ -8,6 +8,7 @@ import { useTestStore } from '../../stores/test-store';
 import { useNavigationStore } from '../../stores/navigation-store';
 import { generateHtmlReport } from '../../../utils/html-reporter';
 import { toJUnitXml } from '../../../core/report/junit-export';
+import { summarizeVerdicts } from '../../../core/report/result-adapter';
 import {
   approximateTestability,
   toExportRun,
@@ -16,21 +17,38 @@ import { formatTestabilityReport } from '../../../core/report/heal-ledger';
 import { generateJsonReport } from '../../../utils/report-exporter';
 import { SegmentedControl } from '../shared/SegmentedControl';
 import { generateScreencastPlayer } from '../../../core/cdp/screencast';
+import {
+  buildPlaywrightExport,
+  exportInputsFromResults,
+} from '../../../core/export/playwright-export';
+import { caseIdFromTestCaseId } from '../../../core/integrations/testrail-sync';
+import { useSettingsStore } from '../../stores/settings-store';
 
 type ViewMode = 'results' | 'timeline' | 'dashboard';
 
 export function ResultsPanel() {
   const store = useTestStore();
   const goTo = useNavigationStore((s) => s.setActiveTab);
+  const settings = useSettingsStore();
   const [viewMode, setViewMode] = React.useState<ViewMode>('results');
+  /**
+   * Steps and assertions the Playwright exporter could not represent.
+   *
+   * Rendered rather than logged: an export that quietly drops an assertion
+   * hands the user a spec file that passes for the wrong reason.
+   */
+  const [exportNotice, setExportNotice] = React.useState<string[]>([]);
 
   React.useEffect(() => {
     store.loadAll();
   }, []);
 
   const { results } = store;
-  const passed = results.filter((r) => r.status === 'passed').length;
-  const failed = results.filter((r) => r.status === 'failed' || r.status === 'error').length;
+  // One computation, shared with the exports. Counting `result.status` here is
+  // what let the dashboard and this run's own JUnit export disagree, and let a
+  // review-required result sit in the number a user reads as "these are fine".
+  const counts = summarizeVerdicts(results);
+  const { pass: passed, needsReview, fail: failed } = counts;
 
   const downloadBlob = (content: string, filename: string, mimeType: string) => {
     const blob = new Blob([content], { type: mimeType });
@@ -68,6 +86,10 @@ export function ResultsPanel() {
    * Not embedded in the HTML report either: frames are base64 PNGs, and inlining
    * them would add megabytes to every export whether or not anyone watches.
    */
+  /** Results that came from a TestRail import, and so can be pushed back. */
+  const hasTestRailCases = results.some((r) => caseIdFromTestCaseId(r.testCaseId) !== undefined);
+  const lastRunId = settings.testrail?.lastRunId;
+
   const recorded = results.filter((r) => (r.screencastFrames?.length ?? 0) > 0);
   const handleWatchRecording = () => {
     const latest = recorded[0];
@@ -95,6 +117,28 @@ export function ResultsPanel() {
       `pathfinder-junit-${Date.now()}.xml`,
       'application/xml'
     );
+  };
+
+  const handleExportPlaywright = () => {
+    const { source, dropped } = buildPlaywrightExport(
+      exportInputsFromResults(results, store.testCases)
+    );
+    downloadBlob(source, `pathfinder-tests-${Date.now()}.spec.ts`, 'text/plain');
+    setExportNotice(dropped);
+  };
+
+  /**
+   * Push these results back to a TestRail run.
+   *
+   * Only offered when at least one result maps to a TestRail case — a button
+   * that can only report "nothing was mapped" is noise.
+   */
+  const handlePushToTestRail = async () => {
+    const runId = Number(
+      window.prompt('TestRail run id to push these results to:', String(lastRunId ?? '')) ?? ''
+    );
+    if (!Number.isFinite(runId) || runId <= 0) return;
+    await store.pushResultsToTestRail(runId);
   };
 
   const handleExportTestability = () => {
@@ -125,7 +169,8 @@ export function ResultsPanel() {
         <div>
           <h2 className="text-xs font-semibold text-text-primary">Test Results</h2>
           <p className="text-2xs text-text-muted mt-0.5">
-            {passed} passed · {failed} failed · {results.length} total
+            {passed} passed{needsReview > 0 ? ` · ${needsReview} need review` : ''} · {failed} failed ·{' '}
+            {results.length} total
           </p>
         </div>
         <div className="flex items-center gap-1">
@@ -159,6 +204,22 @@ export function ResultsPanel() {
             onClick={handleExportJson}
             title="Export JSON report"
           />
+          {hasTestRailCases && (
+            <Button
+              variant="ghost"
+              size="xs"
+              icon={<Upload size={11} />}
+              onClick={handlePushToTestRail}
+              title="Push these results to TestRail (status, timing and failure screenshots)"
+            />
+          )}
+          <Button
+            variant="ghost"
+            size="xs"
+            icon={<Code2 size={11} />}
+            onClick={handleExportPlaywright}
+            title="Export as a Playwright spec file (runnable in CI)"
+          />
           <Button
             variant="ghost"
             size="xs"
@@ -176,11 +237,84 @@ export function ResultsPanel() {
         </div>
       </div>
 
+      {/* What the Playwright export could not represent. Shown, never logged:
+          a spec file missing an assertion still passes, so a silent drop is the
+          one failure mode this export must not have. */}
+      {exportNotice.length > 0 && (
+        <div className="p-2.5 bg-warning/10 border border-warning/30 rounded-lg">
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-2xs font-medium text-warning-text">
+              {exportNotice.length} item(s) could not be exported to Playwright — verify these in
+              Pathfinder:
+            </p>
+            <button
+              type="button"
+              onClick={() => setExportNotice([])}
+              className="text-2xs text-text-muted hover:text-text-primary flex-shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+          <ul className="mt-1.5 space-y-0.5">
+            {exportNotice.slice(0, 8).map((reason, i) => (
+              <li key={i} className="text-2xs text-text-secondary">
+                • {reason}
+              </li>
+            ))}
+            {exportNotice.length > 8 && (
+              <li className="text-2xs text-text-muted">
+                … and {exportNotice.length - 8} more
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+
+      {/* Outcome of the last TestRail import or push. Partial pushes list every
+          case that did not land — a silent partial sync is the worst outcome. */}
+      {store.testRailStatus && (
+        <div className="p-2.5 bg-surface-2 border border-border rounded-lg">
+          <div className="flex items-start justify-between gap-2">
+            <p className="text-2xs text-text-primary">{store.testRailStatus.message}</p>
+            <button
+              type="button"
+              onClick={() => useTestStore.setState({ testRailStatus: null })}
+              className="text-2xs text-text-muted hover:text-text-primary flex-shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+          {store.testRailStatus.failures.length > 0 && (
+            <ul className="mt-1.5 space-y-0.5">
+              {store.testRailStatus.failures.slice(0, 8).map((f, i) => (
+                <li key={i} className="text-2xs text-error-text">
+                  • {f}
+                </li>
+              ))}
+              {store.testRailStatus.failures.length > 8 && (
+                <li className="text-2xs text-text-muted">
+                  … and {store.testRailStatus.failures.length - 8} more
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
+      )}
+
       {/* Summary stats */}
-      <div className="grid grid-cols-3 gap-2 p-3 bg-surface-2 border border-border rounded-lg">
+      <div className="grid grid-cols-4 gap-2 p-3 bg-surface-2 border border-border rounded-lg">
         <div className="text-center">
           <div className="text-lg font-bold text-success-text">{passed}</div>
           <div className="text-2xs text-text-muted">Passed</div>
+        </div>
+        <div
+          className="text-center border-l border-border"
+          title="Passed, but something needs a human look — healed locators, or an oracle finding the test did not check for."
+        >
+          <div className={`text-lg font-bold ${needsReview > 0 ? 'text-warning-text' : 'text-text-muted'}`}>
+            {needsReview}
+          </div>
+          <div className="text-2xs text-text-muted">Review</div>
         </div>
         <div className="text-center border-x border-border">
           <div className="text-lg font-bold text-error-text">{failed}</div>

@@ -1,4 +1,4 @@
-import type { InteractiveElement, FormField, PageSnapshot, PageAction, DataTable, PageType, FieldError, WizardStep } from '../../storage/schemas';
+import type { InteractiveElement, FormField, PageSnapshot, PageAction, DataTable, PageType, FieldError, WizardStep, UnscannedFrame } from '../../storage/schemas';
 import { sendToContentScript } from '../../messaging/messenger';
 import { classifyControl } from './danger-heuristics';
 import { createLogger } from '../../utils/logger';
@@ -80,6 +80,24 @@ export async function getPageSnapshot(tabId: number): Promise<PageSnapshot | nul
   } catch (err) {
     log.warn('getPageSnapshot failed', { tabId, err: err instanceof Error ? err.message : String(err) });
     return null;
+  }
+}
+
+/**
+ * Frames on the page the scan could not see into.
+ *
+ * Failure is reported as "none found", not as an error: a page whose content
+ * script never answered has bigger problems than its frame inventory, and the
+ * explorer should not abort a page over it.
+ */
+export async function scanUnscannedFrames(tabId: number): Promise<UnscannedFrame[]> {
+  try {
+    const response = await sendToContentScript<{
+      payload: { frames: UnscannedFrame[]; omitted: number };
+    }>(tabId, { type: 'GET_FRAME_COVERAGE' });
+    return response?.payload?.frames ?? [];
+  } catch {
+    return [];
   }
 }
 
@@ -329,6 +347,72 @@ export function partitionExplorationTargets(
     unidentified,
     overCap: Math.max(0, ordered.length - maxTargets),
     rowNavigationsSkipped,
+  };
+}
+
+/**
+ * Most stay-on-page controls added back to an AI-ranked target list.
+ *
+ * Agent mode exists to keep the per-page cost down, so the union has to be
+ * bounded or it defeats the point. Ten covers the button clusters seen in
+ * practice; the shortfall is reported rather than silently dropped.
+ */
+export const MAX_REVEAL_CANDIDATES_ADDED = 10;
+
+/**
+ * Does clicking this stay on the page, and could it therefore reveal something?
+ *
+ * Links, tabs and menu items navigate or switch view, and the explorer already
+ * handles those through its own paths. A `<button>` is the control that swaps
+ * fields into the page in place — which is the case the reveal capture exists
+ * for, and the one that is invisible until it is clicked.
+ */
+function isRevealCandidate(el: InteractiveElement): boolean {
+  if (el.tag === 'a') return false;
+  const role = el.role ?? '';
+  if (role === 'link' || role === 'tab' || role === 'menuitem') return false;
+  return el.tag === 'button' || role === 'button';
+}
+
+export interface RevealUnion<T> {
+  targets: T[];
+  /** How many stay-on-page controls were added back to the AI's list. */
+  added: number;
+  /** Candidates left out because the cap was reached. */
+  omitted: number;
+}
+
+/**
+ * Union an AI-ranked target list with the stay-on-page controls it left out.
+ *
+ * Agent mode replaced the deterministic target list with the model's picks
+ * outright, so a `<button>` the model did not happen to rank was never clicked
+ * — and a form that only exists after that click was therefore never captured.
+ * A ranking model deciding which elements are *interesting* is a reasonable
+ * cost control; it is not a reasonable way to decide which elements *exist*.
+ *
+ * `ranked` comes first so the model's ordering is preserved and its picks are
+ * tried while the page budget is still healthy.
+ */
+export function unionWithRevealCandidates<T>(
+  ranked: readonly T[],
+  gatedCandidates: readonly InteractiveElement[],
+  selectorOf: (item: T) => string,
+  toTarget: (el: InteractiveElement) => T,
+  maxAdded = MAX_REVEAL_CANDIDATES_ADDED
+): RevealUnion<T> {
+  const alreadyRanked = new Set(ranked.map(selectorOf));
+  // Drawn from the ALREADY-GATED list, so the safety classifier's refusals are
+  // inherited rather than re-litigated here.
+  const missing = gatedCandidates.filter(
+    (el) => isRevealCandidate(el) && !alreadyRanked.has(el.selector)
+  );
+
+  const added = missing.slice(0, maxAdded);
+  return {
+    targets: [...ranked, ...added.map(toTarget)],
+    added: added.length,
+    omitted: missing.length - added.length,
   };
 }
 

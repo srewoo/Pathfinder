@@ -160,6 +160,16 @@ export async function getGraphSnapshots() {
   return graphDB.getSnapshots();
 }
 
+/** Delete a single graph snapshot. The active graph is untouched. */
+export async function deleteGraphSnapshot(snapshotId: string): Promise<void> {
+  await graphDB.deleteSnapshot(snapshotId);
+}
+
+/** Delete every graph snapshot. The active graph is untouched. */
+export async function clearGraphSnapshots(): Promise<void> {
+  await graphDB.clearSnapshots();
+}
+
 /** Restore a previous graph snapshot. Rebuilds indices. */
 export async function restoreGraphSnapshot(snapshotId: string): Promise<InteractionGraph | undefined> {
   const graph = await graphDB.restoreSnapshot(snapshotId);
@@ -224,6 +234,20 @@ export function serializeGraphForAI(graph: InteractionGraph): string {
         lines.push(`  API endpoints (${node.apiEndpoints.length}):`);
         node.apiEndpoints.forEach((api) => {
           lines.push(`    · ${api.method} ${api.endpoint} → ${api.status} [${api.context}]`);
+        });
+      }
+
+      if (node.revealedForms && node.revealedForms.length > 0) {
+        // Stated as a prerequisite, not a list of fields: a plan that types
+        // into these without clicking the trigger first fails on a field that
+        // is not in the DOM yet.
+        lines.push(`  Forms revealed by a click (${node.revealedForms.length}) — the trigger MUST be clicked first:`);
+        node.revealedForms.forEach((reveal) => {
+          lines.push(`    · Click "${reveal.triggerLabel}" (${reveal.triggerSelector}) to reveal:`);
+          (reveal.formFields ?? []).forEach((f) => {
+            const label = f.label || f.name || f.type;
+            lines.push(`        · ${label} [${f.type}]${f.required ? ' REQUIRED' : ''} selector="${f.selector}"`);
+          });
         });
       }
 
@@ -318,6 +342,9 @@ export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
   const isActionable = (n: PageNode) =>
     (n.formFields && n.formFields.length > 0) ||
     (n.modals && n.modals.length > 0) ||
+    // A login page whose only form is behind a button is the most testable page
+    // in the app; without this it was filed under "navigation only".
+    (n.revealedForms && n.revealedForms.length > 0) ||
     (n.formOutcomes && n.formOutcomes.length > 0) ||
     (n.dataTables && n.dataTables.length > 0) ||
     (n.tabs && n.tabs.length > 0);
@@ -334,7 +361,19 @@ export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
       if (node.headings && node.headings.length > 0) lines.push(`  Headings: ${node.headings.join(' | ')}`);
       if (node.tabs && node.tabs.length > 0) {
         lines.push(`  In-page feature tabs/views (${node.tabs.length} — generate a flow that opens and verifies each):`);
-        for (const t of node.tabs) lines.push(`    · "${t.label}" → ${t.url}`);
+        for (const t of node.tabs) {
+          lines.push(`    · "${t.label}" → ${t.url}`);
+          if (t.headings && t.headings.length > 0) lines.push(`      Headings: ${t.headings.join(' | ')}`);
+          // Fields inside a tab only exist once that tab is open, so the view
+          // has to be opened before anything is typed into them.
+          if (t.formFields && t.formFields.length > 0) {
+            lines.push(`      Form fields inside this view (open the view first):`);
+            for (const f of t.formFields) {
+              const label = f.label || f.name || f.type;
+              lines.push(`        · ${label} [${f.type}]${f.required ? ' REQUIRED' : ''} selector="${f.selector}"`);
+            }
+          }
+        }
       }
 
       if (node.dataTables && node.dataTables.length > 0) {
@@ -384,6 +423,17 @@ export function serializeGraphForFlowLearning(graph: InteractionGraph): string {
           if (f.pattern) parts.push(`pattern="${f.pattern}"`);
           if (f.options && f.options.length > 0) parts.push(`options=[${f.options.join(', ')}]`);
           lines.push(`    · ${parts.join(', ')}, selector="${f.selector}"`);
+        }
+      }
+
+      if (node.revealedForms && node.revealedForms.length > 0) {
+        lines.push(`  Forms revealed by a click (${node.revealedForms.length}) — the trigger MUST be clicked first:`);
+        for (const reveal of node.revealedForms) {
+          lines.push(`    · Click "${reveal.triggerLabel}" (${reveal.triggerSelector}) to reveal:`);
+          for (const f of reveal.formFields ?? []) {
+            const label = f.label || f.name || f.type;
+            lines.push(`        · ${label} [${f.type}]${f.required ? ' REQUIRED' : ''} selector="${f.selector}"`);
+          }
         }
       }
 
@@ -574,6 +624,12 @@ export function extractFormFieldsStructured(graph: InteractionGraph): string {
       title?: string;
       fields: FieldSchema[];
     }>;
+    /** Fields that only exist after their trigger is clicked. */
+    revealedForms?: Array<{
+      trigger: string;
+      triggerSelector: string;
+      fields: FieldSchema[];
+    }>;
   }
 
   function buildFieldSchema(f: FormField): FieldSchema {
@@ -604,7 +660,8 @@ export function extractFormFieldsStructured(graph: InteractionGraph): string {
     const hasFields = node.formFields && node.formFields.length > 0;
     const hasOutcomes = node.formOutcomes && node.formOutcomes.length > 0;
     const hasModals = node.modals?.some((m) => m.formFields && m.formFields.length > 0);
-    if (!hasFields && !hasOutcomes && !hasModals) continue;
+    const hasRevealed = node.revealedForms?.some((r) => r.formFields && r.formFields.length > 0);
+    if (!hasFields && !hasOutcomes && !hasModals && !hasRevealed) continue;
 
     const page: PageFormSchema = {
       page: node.title || node.url,
@@ -636,6 +693,17 @@ export function extractFormFieldsStructured(graph: InteractionGraph): string {
           fields: (m.formFields ?? []).map(buildFieldSchema),
         }));
       if (modalSchemas.length > 0) page.modals = modalSchemas;
+    }
+
+    if (node.revealedForms) {
+      const revealedSchemas = node.revealedForms
+        .filter((r) => r.formFields && r.formFields.length > 0)
+        .map((r) => ({
+          trigger: r.triggerLabel,
+          triggerSelector: r.triggerSelector,
+          fields: (r.formFields ?? []).map(buildFieldSchema),
+        }));
+      if (revealedSchemas.length > 0) page.revealedForms = revealedSchemas;
     }
 
     pages.push(page);

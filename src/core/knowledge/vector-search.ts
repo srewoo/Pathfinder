@@ -304,6 +304,56 @@ async function getIndex(): Promise<IVFIndex> {
   return vectorIndex;
 }
 
+/**
+ * What the index currently holds, for callers that must explain themselves.
+ *
+ * Retrieval returns an empty list for several genuinely different reasons —
+ * nothing indexed, nothing above threshold, or a query embedded at a dimension
+ * the index cannot be compared against — and the caller cannot tell them apart
+ * from the results alone. A user shown "no results" for the third reason will
+ * go on rewording their query forever.
+ *
+ * Cheap: reads the already-built index plus one pass over the records.
+ */
+export async function describeIndex(): Promise<{
+  vectors: number;
+  dimensions: number;
+  /** Distinct embedding models across the corpus. More than one means a mixed index. */
+  embeddingModels: string[];
+  /** ISO timestamps bounding the corpus, for staleness. Absent when empty. */
+  oldestCrawledAt?: string;
+  newestCrawledAt?: string;
+  documents: number;
+}> {
+  const index = await getIndex();
+  const records = await vectorDB.getAll();
+
+  const models = new Set<string>();
+  const urls = new Set<string>();
+  let oldest: string | undefined;
+  let newest: string | undefined;
+
+  for (const r of records) {
+    const model = r.metadata?.embeddingModel;
+    if (model) models.add(model);
+    if (r.url) urls.add(r.url);
+    const at = r.metadata?.crawledAt;
+    if (at) {
+      if (!oldest || at < oldest) oldest = at;
+      if (!newest || at > newest) newest = at;
+    }
+  }
+
+  return {
+    vectors: index.size,
+    dimensions: indexDimensions,
+    embeddingModels: [...models].sort(),
+    oldestCrawledAt: oldest,
+    newestCrawledAt: newest,
+    documents: urls.size,
+  };
+}
+
 // ── Cosine similarity ────────────────────────────────────────────────────────
 function cosineSimilarity(a: number[] | Float32Array, b: number[] | Float32Array): number {
   // Cosine similarity is only defined for equal-dimension vectors. Comparing

@@ -65,15 +65,16 @@ const chromeMock = {
   },
 };
 
-// @ts-ignore
-globalThis.chrome = chromeMock;
+// The mock covers only the surface the tests exercise, so it is deliberately
+// not a full `typeof chrome`. Cast rather than suppress: a suppression hides
+// any OTHER error on the line too, and this one only needs the shape widened.
+globalThis.chrome = chromeMock as unknown as typeof chrome;
 
 // Mock IndexedDB
 const idbMock = {
   open: vi.fn(),
 };
-// @ts-ignore
-globalThis.indexedDB = idbMock;
+globalThis.indexedDB = idbMock as unknown as IDBFactory;
 
 // Mock crypto.subtle.digest if needed
 const originalCrypto = globalThis.crypto;

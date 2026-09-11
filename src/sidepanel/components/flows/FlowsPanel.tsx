@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { GitBranch, ChevronDown, ChevronRight, Wand2, Trash2, Loader2, CheckSquare, Square } from 'lucide-react';
 import { getAllFlows, deleteFlow } from '../../../core/flow/flow-store';
+import { loadGraph } from '../../../core/explorer/interaction-graph';
+import { testCaseDB, testResultDB } from '../../../storage/indexed-db';
+import { flowProvenance, type FlowProvenance } from '../../../core/flow/flow-provenance';
+import { FlowProvenancePanel } from './FlowProvenance';
 import type { Flow } from '../../../storage/schemas';
 import { Button } from '../shared/Button';
 import { Badge } from '../shared/Badge';
@@ -10,6 +14,12 @@ import { useNavigationStore } from '../../stores/navigation-store';
 
 export function FlowsPanel() {
   const [flows, setFlows] = useState<Flow[]>([]);
+  /**
+   * Provenance per flow, computed once per load rather than per card: it needs
+   * the graph, every test case and every result, and reading those inside the
+   * list would do it once per flow.
+   */
+  const [provenance, setProvenance] = useState<Map<string, FlowProvenance>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [generating, setGenerating] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ mode: 'all' | 'selected'; done: number; total: number } | null>(null);
@@ -36,6 +46,16 @@ export function FlowsPanel() {
   const loadFlows = async () => {
     const all = await getAllFlows();
     setFlows(all);
+
+    const [graph, tests, results] = await Promise.all([
+      loadGraph().catch(() => undefined),
+      testCaseDB.getAll().catch(() => []),
+      testResultDB.getAll().catch(() => []),
+    ]);
+    const edges = graph?.edges ?? [];
+    setProvenance(
+      new Map(all.map((f) => [f.flowId, flowProvenance(f, { edges, tests, results })]))
+    );
   };
 
   const handleDelete = async (flowId: string) => {
@@ -283,6 +303,15 @@ export function FlowsPanel() {
                   <div className="flex-1 min-w-0">
                     <span className="text-xs font-medium text-text-primary">{flow.name}</span>
                     <Badge variant="neutral" className="ml-2">{flow.source}</Badge>
+                    {/* Set by the reconciler when a re-learn no longer produces
+                        this flow's signature — the feature it covered looks
+                        gone. It was recorded and never shown, so a flow that
+                        had silently stopped matching the app read as current. */}
+                    {flow.stale && (
+                      <Badge variant="warning" className="ml-1">
+                        not seen since {flow.staleSince ? new Date(flow.staleSince).toLocaleDateString() : 're-learn'}
+                      </Badge>
+                    )}
                   </div>
                   <span className="text-2xs text-text-muted flex-shrink-0">
                     {flow.steps.length} steps
@@ -328,6 +357,11 @@ export function FlowsPanel() {
                       {flow.startUrlInference && (
                         <p className="text-2xs text-text-muted">{flow.startUrlInference.reason}</p>
                       )}
+                    </div>
+                  )}
+                  {provenance.get(flow.flowId) && (
+                    <div className="mb-2">
+                      <FlowProvenancePanel flow={flow} provenance={provenance.get(flow.flowId)!} />
                     </div>
                   )}
                   <div className="space-y-1">

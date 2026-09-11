@@ -31,11 +31,15 @@ describe('HAR Impact Analysis', () => {
     mockedLoadGraph.mockReset();
   });
 
-  it('should return 100% coverage when no endpoints are discovered', async () => {
+  // This asserted `coveragePercent === 100` for an empty inventory, which was the
+  // defect: an app nobody had explored reported as fully covered. A share of
+  // nothing is unknown, so the percentage is now absent.
+  it('given_no_endpoints_then_coverage_is_unknown_rather_than_100_percent', async () => {
     mockedLoadGraph.mockResolvedValue(undefined);
     const report = await analyzeHARImpact([]);
     expect(report.summary.totalEndpoints).toBe(0);
-    expect(report.summary.coveragePercent).toBe(100);
+    expect(report.summary.exercisedPercent).toBeUndefined();
+    expect(report.summary.coveragePercent).toBeUndefined();
     expect(report.gaps).toHaveLength(0);
   });
 
@@ -127,8 +131,10 @@ describe('HAR Impact Analysis', () => {
     mockedLoadGraph.mockResolvedValue(undefined);
     const markdown = formatHARImpactReport(await analyzeHARImpact([]));
     expect(markdown).toContain('# API Coverage');
-    expect(markdown).toContain('No API endpoints have been discovered');
-    expect(markdown).toContain('Explore the app first');
+    // Wording changed with the empty state: it now leads with "No data" so the
+    // absence of a number is the first thing read.
+    expect(markdown).toMatch(/no data/i);
+    expect(markdown).toMatch(/Explore the app/i);
   });
 
   it('given_endpoints_then_gaps_and_covered_are_rendered_as_tables', async () => {
@@ -148,10 +154,15 @@ describe('HAR Impact Analysis', () => {
       ],
     } as never;
     const markdown = formatHARImpactReport(await analyzeHARImpact([result]));
-    expect(markdown).toContain('| Method | Endpoint | Discovered on |');
+    // Headings changed with the three-state model: "Untested" became "Never
+    // driven by a test", and a second, larger gap is now reported separately —
+    // endpoints a test called that nothing asserted against.
+    expect(markdown).toContain('| Method | Endpoint | Known from |');
     expect(markdown).toContain('| Method | Endpoint | Exercised by |');
-    expect(markdown).toContain('Untested endpoints');
-    // The measurement's own limits are stated, so 100% is not read as "verified".
-    expect(markdown).toContain('not "every endpoint was');
+    expect(markdown).toContain('Never driven by a test');
+    expect(markdown).toContain('Called but never checked');
+    // The measurement's own limits are still stated, so traffic is not read as
+    // verification.
+    expect(markdown).toMatch(/successful HTTP response is not verification/i);
   });
 });

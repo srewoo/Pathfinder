@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>Checkout</title>
+<h1>Checkout</h1>
+<button id="submit-order" data-testid="submit-order">Place order</button>
+<p id="order-placed" hidden>Order placed</p>
+<script>
+  document.getElementById('submit-order').addEventListener('click', function () {
+    document.getElementById('order-placed').hidden = false;
+  });
+</script>

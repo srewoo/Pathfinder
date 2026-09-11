@@ -1,9 +1,9 @@
-import { scanPage, scanFormFields, scanPageLinks, scanPageMetadata, revealPageContent, getPageSnapshot, partitionExplorationTargets, type TargetPartition, detectModal, scanPageActions, scanDataTables, scanPageType, scanFieldErrors, scanWizardSteps, scanConditionalFields } from './page-scanner';
+import { scanPage, scanFormFields, scanPageLinks, scanPageMetadata, scanUnscannedFrames, revealPageContent, getPageSnapshot, partitionExplorationTargets,
+  unionWithRevealCandidates, type TargetPartition, detectModal, scanPageActions, scanDataTables, scanPageType, scanWizardSteps, scanConditionalFields } from './page-scanner';
 import {
   createGraph,
   addNode,
   addEdge,
-  addFormOutcome,
   saveGraph,
   saveGraphIncremental,
   saveGraphSnapshot,
@@ -11,26 +11,43 @@ import {
   removeNode,
   pruneStaleNodes,
 } from './interaction-graph';
-import type { InteractionGraph, InteractiveElement, FormField, FormSubmissionOutcome, ModalDiscovery, ExplorationProgress, ExplorationCoverage, ObservedAPI } from '../../storage/schemas';
+import type { InteractionGraph, InteractiveElement, FormField, ModalDiscovery, ExplorationProgress, ExplorationCoverage } from '../../storage/schemas';
 import type { AIClientInterface } from '../ai/ai-client';
 import { getAgentActions } from './action-ranker';
 import { probeSelectionActions } from './selection-explorer';
 import { classifyControl, isSafeToClick, isSessionEndingUrl } from './danger-heuristics';
 import { detectSPARoutes } from './spa-detector';
-import { sendToContentScript, getActiveTabId } from '../../messaging/messenger';
+import { getActiveTabId } from '../../messaging/messenger';
 import { executeStep as executeStepViaPort, evaluateInTab } from '../step-executor';
 import { createMutationLedger } from '../safety/mutation-ledger';
 import { describePolicy, isPolicyEmpty, resolvePolicy } from '../safety/policy-resolver';
 import { installRunSafety, type SafetyHandle } from '../safety/safety-port';
-import { attach, detach, isAttached, startHARCapture, getHAREntries, captureFullPageScreenshot, waitForNetworkIdle, waitForDomSettle } from '../cdp/cdp-client';
-import type { HAREntry } from '../cdp/cdp-client';
+import { attach, detach, isAttached, startHARCapture, getHAREntries, captureFullPageScreenshot } from '../cdp/cdp-client';
 import { ensureAuthenticated } from '../executor/auth-manager';
 import { runAccessibilityAudit } from '../analysis/accessibility-audit';
 import type { A11yAuditResult } from '../analysis/accessibility-audit';
 import { computeRiskCoverage, formatRiskCoverage } from './risk-coverage';
 import { createCheckpoint, describeResume, evaluateCheckpoint, hashOptions, type ExplorationCheckpoint } from './exploration-checkpoint';
 import { clearCheckpoint, loadCheckpoint, persistCheckpoint } from '../../storage/checkpoint-storage';
+import {
+  EXHAUSTIVE_TARGET_CAP,
+  adaptBudget,
+  budgetForPage,
+  delay,
+  settle,
+  withTimeout,
+} from './exploration-primitives';
+import { captureFormOutcome, exploreFormSubmission, findSubmitButton } from './form-explorer';
+import { extractAPIEndpoints } from './observed-apis';
 import { createLogger } from '../../utils/logger';
+
+// Re-exported so existing importers and tests keep working unchanged: the file
+// boundary moved, the public surface did not.
+export { findSubmitButton, generateTestValue } from './form-explorer';
+
+// Re-exported so existing importers and tests keep working unchanged: the file
+// boundary moved, the public surface did not.
+export { adaptBudget, budgetCeiling, budgetForPage } from './exploration-primitives';
 
 const log = createLogger('explorer');
 
@@ -100,6 +117,78 @@ function resolveElementLabel(target: { text?: string; ariaLabel?: string; descri
  * the expensive click/modal/form interaction for pages that haven't changed.
  * Uses a cheap synchronous djb2 hash over a canonical signature string.
  */
+/**
+ * Whether a page can skip its interaction pass because nothing about it changed.
+ *
+ * This applies to FRESH runs only, and that is not a mistake: an incremental run
+ * pre-seeds `visitedUrls` with every known URL, so a previously-mapped page is
+ * never re-scanned there and has no fingerprint to compare. Fresh is the only
+ * mode that revisits a known page, so it is the only mode where the saving
+ * exists.
+ *
+ * The start page is always exempt. It is the page the user explicitly aimed the
+ * run at, and a screen whose structure never varies between runs — a login
+ * form, most obviously — otherwise matched its stored fingerprint on every run
+ * and was skipped without a single click, which reads as "explore does nothing".
+ * A skipped interior page costs coverage; a skipped start page costs the whole
+ * run.
+ */
+/**
+ * What survived a navigation away from the page and back.
+ *
+ * The link-derived in-page views are opened by navigating: away to the view's
+ * URL, then back to the page. Everything after that point in the pass — the
+ * click targets, the form interaction, the modal probes — was selected from a
+ * scan taken BEFORE that excursion, and an SPA that remounts its tree on return
+ * can invalidate those selectors wholesale. The mocked tests cannot see this:
+ * their fake page returns the same markup no matter what navigations happen.
+ *
+ * So rather than assume the return is lossless, the page is re-scanned and the
+ * two scans compared. `lost` is what the pass would have gone on clicking at
+ * selectors that no longer resolve.
+ *
+ * Pure and exported so the comparison is tested directly, independent of any
+ * page model that would beg the question.
+ */
+export function reconcileAfterExcursion(args: {
+  before: InteractiveElement[];
+  after: InteractiveElement[];
+}): { elements: InteractiveElement[]; lost: string[]; changed: boolean } {
+  const afterSelectors = new Set(args.after.map((e) => e.selector));
+  const lost = args.before.map((e) => e.selector).filter((sel) => !afterSelectors.has(sel));
+
+  // An empty re-scan means the scan failed or the page had not finished
+  // remounting — not that the page is genuinely empty. Keeping the pre-excursion
+  // view is the better of two imperfect options: it may be stale, whereas
+  // nothing is certainly useless.
+  if (args.after.length === 0) {
+    return { elements: args.before, lost: [], changed: false };
+  }
+
+  return { elements: args.after, lost, changed: lost.length > 0 || args.after.length !== args.before.length };
+}
+
+export function shouldSkipUnchanged(args: {
+  fresh: boolean;
+  reexplorePage: boolean;
+  isStartPage: boolean;
+  priorStructureHash: string | undefined;
+  structureHash: string;
+  /** Whether the stored node's interaction pass actually finished. */
+  priorInteractionComplete: boolean | undefined;
+}): boolean {
+  if (!args.fresh) return false;
+  // Re-explore wipes the node first, so there is normally no prior hash to
+  // match; refusing explicitly keeps that from depending on deletion order.
+  if (args.reexplorePage || args.isStartPage) return false;
+  // The fingerprint comes from the pre-click scan, so it cannot tell a page
+  // whose buttons were all explored from one whose interaction pass never ran.
+  // Requiring a completed pass is what stops an unfinished page from looking
+  // settled forever.
+  if (!args.priorInteractionComplete) return false;
+  return !!args.priorStructureHash && args.priorStructureHash === args.structureHash;
+}
+
 export function computeStructureFingerprint(elements: InteractiveElement[], formFields: FormField[]): string {
   const elemSig = elements
     .map((e) => `${e.tag}|${e.role ?? ''}|${e.selector}`)
@@ -124,6 +213,46 @@ export function computeStructureFingerprint(elements: InteractiveElement[], form
  *                   tab/panel of the SAME page, e.g. `?aiFeatureTab=overview`)
  *  - 'navigation' — moved to a different page
  */
+/**
+ * Most link-derived in-page views visited per page.
+ *
+ * Each one costs a navigation, a settle, a scan, and a re-scan of the page on
+ * return, so this is a real budget item rather than a formality. Five covers the
+ * tab strips seen in practice without letting a page of anchor links consume the
+ * whole page budget.
+ *
+ * This is the DEFAULT, overridable per run via `maxLinkTabsPerPage`. It stays at
+ * five because the per-visit cost has not been measured against a real tabbed
+ * application — raising it on a guess would swap a shortfall that is reported
+ * for a budget overrun that is not.
+ */
+export const MAX_LINK_TABS_SCANNED = 5;
+
+/**
+ * What is inside an in-page view, read while it is open.
+ *
+ * Best-effort by design: a tab that fails to scan should still be recorded as
+ * existing, because a label and a URL is strictly better than nothing.
+ */
+async function captureTabContents(
+  tabId: number
+): Promise<{ formFields?: FormField[]; elementCount?: number; headings?: string[] }> {
+  try {
+    const [fields, els, meta] = await Promise.all([
+      scanFormFields(tabId).catch(() => [] as FormField[]),
+      scanPage(tabId).catch(() => [] as InteractiveElement[]),
+      scanPageMetadata(tabId).catch(() => ({ headings: [] as string[] })),
+    ]);
+    return {
+      formFields: fields.length > 0 ? fields : undefined,
+      elementCount: els.length > 0 ? els.length : undefined,
+      headings: meta.headings.length > 0 ? meta.headings.slice(0, 6) : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function classifyUrlChange(beforeUrl: string, afterUrl: string): 'none' | 'in-page' | 'navigation' {
   if (afterUrl === beforeUrl) return 'none';
   try {
@@ -139,90 +268,14 @@ export function classifyUrlChange(beforeUrl: string, afterUrl: string): 'none' |
 /** Destructive labels to avoid clicking unless includeDangerous is set. */
 
 
-/**
- * Pause after an exploration action.
- *
- * Was 1000ms. `settle()` already waits for network idle plus DOM quiet, so the
- * flat second was belt-and-braces on top of a real signal — and it was the single
- * largest cost per click. At ~90 interactive elements on a typical app page it
- * alone consumed a minute and a half of the page budget.
- */
-const ACTION_DELAY_MS = 250;
+
 /** Default number of pages explored in parallel (bounded tab-worker pool). */
 const DEFAULT_EXPLORE_CONCURRENCY = 3;
 /** Hard cap on parallel exploration tabs — mirrors the executor's 1-4 range. */
 const MAX_EXPLORE_CONCURRENCY = 4;
-/**
- * Per-page budgets, and how they relate to the target caps.
- *
- * These were flat numbers that silently contradicted the caps. 90s of budget at
- * roughly 2.5s per click bought ~35 clicks against a cap of 100, and exhaustive
- * mode's 300s bought ~120 against a cap of 300 — so on any real app the budget
- * ended exploration long before the cap did, and the cap was decoration. Measured
- * on a live app: 90 interactive elements on an ordinary list page, 205 on a longer
- * one.
- *
- * Now the budget is DERIVED from the work in front of it, so the two cannot
- * disagree: allow `PER_TARGET_BUDGET_MS` per queued target, with a floor so small
- * pages are never rushed and a ceiling so one pathological page cannot own the run.
- *
- * A budget is a CEILING, not a duration — a page with 12 targets finishes in
- * seconds regardless. Raising it costs nothing except on pages that genuinely have
- * hundreds of controls, which are exactly the pages worth the time.
- */
-const PER_TARGET_BUDGET_MS = 2_000;
-/** Floor for an ordinary page. */
-const DEFAULT_PAGE_EXPLORATION_BUDGET_MS = 240_000; // 4 min
-/** Ceiling for an ordinary page. */
-const MAX_PAGE_EXPLORATION_BUDGET_MS = 480_000; // 8 min
-/** Floor for the anchored page when exhaustively covering every element. */
-const EXHAUSTIVE_PAGE_BUDGET_MS = 480_000; // 8 min
-/** Ceiling for exhaustive mode — 300 targets × 2s, with headroom. */
-const MAX_EXHAUSTIVE_PAGE_BUDGET_MS = 900_000; // 15 min
-/** Max click targets when exhaustively covering a page. */
-const EXHAUSTIVE_TARGET_CAP = 300;
 
-/**
- * Budget for a page, sized to its actual target count.
- *
- * `targetCount` includes only what is queued up front; clicks that reveal more
- * targets (dropdown items, expanded panels) push against the ceiling, which is
- * why the ceiling is well above floor + caps.
- */
-export function budgetForPage(targetCount: number, exhaustive: boolean): number {
-  const floor = exhaustive ? EXHAUSTIVE_PAGE_BUDGET_MS : DEFAULT_PAGE_EXPLORATION_BUDGET_MS;
-  return Math.min(budgetCeiling(exhaustive), Math.max(floor, targetCount * PER_TARGET_BUDGET_MS));
-}
 
-/** Hard upper bound for one page, whatever the measured cost turns out to be. */
-export function budgetCeiling(exhaustive: boolean): number {
-  return exhaustive ? MAX_EXHAUSTIVE_PAGE_BUDGET_MS : MAX_PAGE_EXPLORATION_BUDGET_MS;
-}
 
-/**
- * Re-estimate the budget from what clicks on THIS page actually cost.
- *
- * `PER_TARGET_BUDGET_MS` is a starting guess, and on a heavy SPA it was wrong by
- * almost 6× — a measured run averaged 11.7s per target and ran out with 13 of 54
- * targets untried, while the ceiling still had headroom to spare. Extending the
- * deadline from the observed rate uses that headroom instead of stopping early on
- * the strength of a constant.
- *
- * Only ever extends, never shrinks: a page that started slowly should not have its
- * budget cut when a few fast clicks pull the average down.
- */
-export function adaptBudget(
-  current: number,
-  elapsedMs: number,
-  clicksDone: number,
-  targetCount: number,
-  exhaustive: boolean
-): number {
-  if (clicksDone < 3) return current; // too few samples to mean anything
-  const perTarget = elapsedMs / clicksDone;
-  const projected = Math.ceil(perTarget * targetCount * 1.15); // 15% headroom
-  return Math.min(budgetCeiling(exhaustive), Math.max(current, projected));
-}
 /** Max elements newly revealed by clicks (dropdowns/menus) to follow per page. */
 const MAX_REVEALED_PER_PAGE = 150;
 /** Timeout for a single exploration click + modal detect cycle (ms). */
@@ -234,37 +287,7 @@ const SINGLE_CLICK_TIMEOUT_MS = 20_000;
  */
 const AUTH_WALL_RX = /\/(login|signin|sign-in|auth|sso|oauth|session)(?:[/?#]|$)/i;
 
-/**
- * Compute an adaptive delay based on the page's observed load time.
- * Returns a delay between `baseMs` and 3000ms, scaled by the page load time.
- * Falls back to `baseMs` when no load time is available.
- */
-function getAdaptiveDelay(baseMs: number, pageLoadTimeMs?: number): number {
-  if (!pageLoadTimeMs || pageLoadTimeMs <= 0) return baseMs;
-  return Math.min(Math.max(baseMs, Math.round(pageLoadTimeMs * 0.3)), 3000);
-}
 
-/**
- * Wait for a tab to become stable after a navigation or interaction.
- *
- * Prefers event-driven signals over a fixed sleep: when CDP is attached (the
- * normal case during exploration) it waits for the network to go quiet and the
- * DOM to settle, so fast pages proceed in a few hundred ms and slow SPAs get up
- * to the ceiling. Falls back to an adaptive fixed delay only when CDP is
- * unavailable for the tab.
- */
-async function settle(
-  tabId: number,
-  opts: { idleMs?: number; timeoutMs?: number; fallbackMs?: number; pageLoadTimeMs?: number } = {},
-): Promise<void> {
-  const { idleMs = 400, timeoutMs = 8_000, fallbackMs = ACTION_DELAY_MS, pageLoadTimeMs } = opts;
-  if (isAttached(tabId)) {
-    await waitForNetworkIdle(tabId, { idleMs, timeoutMs });
-    await waitForDomSettle(tabId, 2_000);
-  } else {
-    await delay(getAdaptiveDelay(fallbackMs, pageLoadTimeMs));
-  }
-}
 /** Maximum number of representative pages to explore per URL pattern. */
 const MAX_INSTANCES_PER_PATTERN = 2;
 
@@ -426,6 +449,17 @@ export interface ExploreOptions {
    * "start from this page" runs where full coverage matters more than speed.
    */
   exhaustiveStartPage?: boolean;
+  /**
+   * How many link-derived in-page views to open per page.
+   *
+   * Defaults to `MAX_LINK_TABS_SCANNED`. Configurable rather than raised: each
+   * view costs a navigation, a settle, a scan and — since the excursion can
+   * remount an SPA — a re-scan of the page on return, and nobody has yet
+   * measured that cost against a real tabbed application. Raising the default
+   * on an unmeasured guess would trade a stated shortfall for an unstated
+   * budget overrun. Anything past the cap is still recorded and warned about.
+   */
+  maxLinkTabsPerPage?: number;
   onProgress?: (progress: ExplorationProgress) => void;
   signal?: AbortSignal;
 }
@@ -456,6 +490,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     runBudgetMs,
     captureScreenshots = false,
     exhaustiveStartPage = false,
+    maxLinkTabsPerPage = MAX_LINK_TABS_SCANNED,
     concurrency,
     onProgress,
     signal,
@@ -467,7 +502,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
   // items so the tab doesn't navigate away ("no link following").
   const noNavigate = maxDepth === 0;
 
-  let graph = (await loadGraph()) ?? createGraph();
+  const graph = (await loadGraph()) ?? createGraph();
   const a11yResults: A11yAuditResult[] = [];
 
   // ── Coverage / health accumulator ──────────────────────────────────────────
@@ -818,7 +853,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
 
     // ── 3. Scan elements + forms + links + metadata + detectors in parallel ──
     const harBefore = cdpAvailable ? getHAREntries(tabId).length : 0;
-    const [scannedElements, formFields, hrefLinks, pageMetadata, pageActions, dataTables, pageTypeInfo, wizardSteps, conditionalFields] = await Promise.all([
+    const [scannedElements, formFields, hrefLinks, pageMetadata, pageActions, dataTables, pageTypeInfo, wizardSteps, conditionalFields, unscannedFrames] = await Promise.all([
       scanPage(tabId),
       scanFormFields(tabId),
       startOrigin ? scanPageLinks(tabId, startOrigin) : Promise.resolve([] as Array<{ url: string; text: string }>),
@@ -828,12 +863,15 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
       scanPageType(tabId),
       scanWizardSteps(tabId),
       scanConditionalFields(tabId),
+      scanUnscannedFrames(tabId),
     ]);
 
     // Union of the settled scan and the sweep. Deduped by selector, with the
     // settled sighting winning: its geometry describes the page as a user finds
     // it, while a mid-scroll sighting describes a transient position.
-    const elements = mergeElements(scannedElements, revealedElements);
+    // Reassigned after the in-page-view excursion below, which navigates away
+    // from this page and back.
+    let elements = mergeElements(scannedElements, revealedElements);
     if (elements.length > scannedElements.length) {
       log.info(
         `Reveal sweep contributed ${elements.length - scannedElements.length} element(s) ` +
@@ -850,16 +888,28 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
 
     coverage.pagesScanned++;
 
-    const priorStructureHash = graph.nodes.find((n) => n.url === currentUrl)?.structureHash;
+    const priorNode = graph.nodes.find((n) => n.url === currentUrl);
+    const priorStructureHash = priorNode?.structureHash;
+    const priorInteractionComplete = priorNode?.interactionComplete;
     // Fingerprint from the SETTLED scan, not the union. Which virtualized rows
     // happen to mount during a sweep varies run to run, so hashing the union
     // would make the fingerprint differ every time and permanently disable the
     // skip-unchanged fast path.
     const structureHash = computeStructureFingerprint(scannedElements, formFields);
-    const structureUnchanged = fresh && !!priorStructureHash && priorStructureHash === structureHash;
+    const structureUnchanged = shouldSkipUnchanged({
+      fresh,
+      reexplorePage,
+      isStartPage: depth === 0,
+      priorStructureHash,
+      structureHash,
+      priorInteractionComplete,
+    });
 
     const node = addNode(graph, currentUrl, currentTitle, elements.length, formFields);
     node.structureHash = structureHash;
+    // Cleared for this run and set again only if the pass below finishes, so an
+    // interrupted run cannot leave a stale "complete" behind.
+    node.interactionComplete = undefined;
     seenThisRun.add(currentUrl);
 
     if (pageMetadata.breadcrumb) node.breadcrumb = pageMetadata.breadcrumb;
@@ -868,6 +918,18 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     node.isErrorPage = pageTypeInfo.isErrorPage || undefined;
     node.httpStatus = pageTypeInfo.httpStatus;
     if (pageActions.length > 0) node.actions = pageActions;
+    // Recorded even though nothing can be done about it: a page whose sign-in
+    // or payment step lives in a third-party iframe must not be reported as
+    // fully mapped. Same-origin frames never appear here — those are walked as
+    // part of the page.
+    if (unscannedFrames.length > 0) {
+      node.unscannedFrames = unscannedFrames;
+      addWarning(
+        `${unscannedFrames.length} cross-origin frame(s) on ${currentUrl} could not be scanned` +
+          ` (${unscannedFrames.map((f) => f.label ?? f.origin ?? 'unlabelled').join(', ')})` +
+          ` — their contents are not covered.`
+      );
+    }
     if (dataTables.length > 0) node.dataTables = dataTables;
     if (urlPattern !== currentUrl) node.urlPattern = urlPattern;
     node.loadTimeMs = pageLoadTimeMs;
@@ -949,6 +1011,9 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     emitProgress(currentTitle || currentUrl, 'running');
 
     // ── 4. Enqueue discovered href links (depth-independent) ─────────────
+    // In-page links are collected first and visited after the loop: opening one
+    // mid-loop would navigate the tab out from under the remaining links.
+    const linkTabs: Array<{ label: string; url: string }> = [];
     for (const link of hrefLinks) {
       // Never walk into a logout URL. Links are enqueued without being clicked, so
       // the click-set classifier never sees them — this is the only place a
@@ -959,13 +1024,62 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
       }
       const change = classifyUrlChange(currentUrl, link.url);
       if (change === 'in-page') {
-        if (!node.tabs) node.tabs = [];
-        if (!node.tabs.some((t) => t.url === link.url)) node.tabs.push({ label: link.text || link.url, url: link.url });
+        if (!linkTabs.some((t) => t.url === link.url)) {
+          linkTabs.push({ label: link.text || link.url, url: link.url });
+        }
         continue;
       }
       if (change === 'navigation' && !visitedUrls.has(link.url)) {
         addEdge(graph, currentUrl, link.url, 'link', 'a[href]', link.text);
         if (depth < maxDepth) tryEnqueue(link.url, depth + 1);
+      }
+    }
+
+    // ── 4b. Open each in-page view and read what is inside it ────────────────
+    // These are never enqueued as pages — same path, so the BFS treats them as
+    // already visited. Opening them here is the only way their forms are ever
+    // seen; without it a tabbed page yields labels and nothing else.
+    if (linkTabs.length > 0) {
+      if (!node.tabs) node.tabs = [];
+      const unscanned = linkTabs.filter((t) => !node.tabs!.some((existing) => existing.url === t.url));
+      for (const tab of unscanned.slice(0, maxLinkTabsPerPage)) {
+        try {
+          await navigateToUrl(tabId, tab.url);
+          await settle(tabId);
+          const contents = await captureTabContents(tabId);
+          node.tabs.push({ ...tab, ...contents });
+        } catch (err) {
+          // Record it anyway: a label and a URL beats losing the view entirely.
+          node.tabs.push(tab);
+          log.debug(`Could not open in-page view ${tab.url}`, err);
+        }
+      }
+      // Anything past the cap is still recorded, just not opened — stating the
+      // shortfall rather than silently capping (§13).
+      const skipped = unscanned.slice(maxLinkTabsPerPage);
+      for (const tab of skipped) node.tabs.push(tab);
+      if (skipped.length > 0) {
+        addWarning(
+          `${skipped.length} in-page view(s) on ${currentUrl} were recorded but not opened ` +
+            `(cap ${maxLinkTabsPerPage} per page) — their contents are unknown.`
+        );
+      }
+      // Back to the page the rest of this pass assumes we are on — and then
+      // re-scan it, because "back" is not automatically "as it was". Everything
+      // below picks targets from `elements`, and an SPA that remounts on return
+      // leaves those selectors pointing at nodes that no longer exist.
+      if (unscanned.length > 0) {
+        await navigateToUrl(tabId, currentUrl);
+        await settle(tabId);
+        const rescanned = await scanPage(tabId).catch(() => [] as InteractiveElement[]);
+        const reconciled = reconcileAfterExcursion({ before: elements, after: rescanned });
+        if (reconciled.changed) {
+          log.info(
+            `Re-scan after opening ${unscanned.length} in-page view(s) on ${currentUrl}: ` +
+              `${reconciled.lost.length} element(s) no longer resolve; using the fresh scan.`
+          );
+        }
+        elements = reconciled.elements;
       }
     }
 
@@ -1015,11 +1129,47 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
               `${currentUrl} that the safety classifier withheld.`
           );
         }
-        log.info(`Agent mode: clicking ${allowed.length} AI-ranked elements on "${currentTitle || currentUrl}"`);
-        targets = allowed.map((a) => {
+        const ranked = allowed.map((a) => {
           const matchedEl = elements.find((el) => el.selector === a.selector);
           return { selector: a.selector, text: matchedEl?.text || undefined, ariaLabel: matchedEl?.ariaLabel || undefined, description: a.description };
         });
+
+        // The model's picks REPLACED the deterministic list, so a `<button>` it
+        // did not happen to rank was never clicked — and a form that exists
+        // only after that click was therefore never captured. Deciding which
+        // elements are interesting is a fair cost control; deciding which
+        // elements exist is not. The union is bounded so agent mode keeps its
+        // cost advantage, and drawn from the already-gated partition so the
+        // safety classifier's refusals are inherited rather than re-litigated.
+        const union = unionWithRevealCandidates(
+          ranked,
+          partition.targets,
+          (t) => t.selector,
+          (el) => ({
+            selector: el.selector,
+            text: el.text || undefined,
+            ariaLabel: el.ariaLabel || undefined,
+            description: `Reveal candidate: ${resolveElementLabel(el)}`,
+          })
+        );
+        targets = union.targets;
+
+        log.info(
+          `Agent mode: clicking ${ranked.length} AI-ranked element(s) on ` +
+            `"${currentTitle || currentUrl}"` +
+            (union.added > 0
+              ? `, plus ${union.added} stay-on-page control(s) the ranker omitted`
+              : '')
+        );
+        if (union.omitted > 0) {
+          // §13: a cap that drops candidates says so. Without this, a page with
+          // many buttons looks fully explored when it was not.
+          addWarning(
+            `${union.omitted} stay-on-page control(s) on ${currentUrl} were neither ` +
+              `AI-ranked nor within the reveal-candidate cap — a form behind one of ` +
+              `them would not be captured.`
+          );
+        }
       }
     } else {
       targets = partition.targets;
@@ -1039,11 +1189,20 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     // Selectors known before each click — used to detect elements REVEALED by a
     // click (dropdown menus, expanded panels) so we can click those too.
     const knownSelectors = new Set(elements.map((e) => e.selector));
+    // Form fields are scanned once, before any click. Anything appearing after
+    // a click is new by definition, and used to be discarded.
+    const knownFieldSelectors = new Set(formFields.map((f) => f.selector));
     let revealedCount = 0;
 
+    // A pass that ends early must not be recorded as complete, or the page is
+    // skipped on every later run with its remaining targets never tried.
+    let interactionTruncated = false;
     for (let ti = 0; ti < targets.length; ti++) {
       const target = targets[ti];
-      if (signal?.aborted) break;
+      if (signal?.aborted) {
+        interactionTruncated = true;
+        break;
+      }
       const elapsedOnPage = Date.now() - pageExplorationStart;
       if (elapsedOnPage > effectivePageBudget) {
         // A warning, not an info line: truncated exploration reads as full
@@ -1056,6 +1215,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
             `exhausted on ${currentUrl} — explored ${ti} of ${targets.length} target(s) at ` +
             `~${perTarget}s each; ${targets.length - ti} not tried.`
         );
+        interactionTruncated = true;
         break;
       }
       if (pageBudgetMs === undefined) {
@@ -1099,8 +1259,17 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
             const label = resolveElementLabel(target);
             if (!node.tabs) node.tabs = [];
             if (!node.tabs.some((t) => t.url === afterUrl)) {
-              node.tabs.push({ label, url: afterUrl });
-              log.info(`In-page view discovered via "${label}" on ${currentUrl}`);
+              // Scan BEFORE navigating back. The view is already open, so this
+              // costs nothing extra — and it is the only moment its contents
+              // are reachable.
+              const contents = await captureTabContents(tabId);
+              node.tabs.push({ label, url: afterUrl, ...contents });
+              log.info(
+                `In-page view discovered via "${label}" on ${currentUrl}` +
+                  (contents.formFields?.length
+                    ? ` — ${contents.formFields.length} form field(s) captured inside it`
+                    : '')
+              );
             }
             await navigateToUrl(tabId, beforeUrl);
             await settle(tabId);
@@ -1182,8 +1351,36 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
             revealedCount++;
             added++;
           }
+          // ── Revealed form fields ──────────────────────────────────────
+          // A click that swaps a form into the page fires none of the branches
+          // above: the URL is unchanged and no dialog opens. Without this the
+          // fields are never recorded, and generation invents them.
+          const afterFields = await scanFormFields(tabId).catch(() => [] as FormField[]);
+          const newFields = afterFields.filter((f) => !knownFieldSelectors.has(f.selector));
+          if (newFields.length > 0) {
+            for (const f of newFields) knownFieldSelectors.add(f.selector);
+            const triggerLabel = resolveElementLabel(target);
+            if (!node.revealedForms) node.revealedForms = [];
+            if (!node.revealedForms.some((r) => r.triggerSelector === target.selector)) {
+              node.revealedForms.push({
+                triggerSelector: target.selector,
+                triggerLabel,
+                formFields: newFields,
+              });
+              log.info(
+                `Revealed ${newFields.length} form field(s) via "${triggerLabel}" on ${currentUrl} — ` +
+                  `recorded with its trigger`
+              );
+            }
+          }
+
           if (added > 0) {
             log.info(`Revealed ${added} new element(s) via "${resolveElementLabel(target)}" — queued for exploration`);
+          }
+          // Only dismiss when nothing was revealed in place: pressing Escape
+          // after a form appears can collapse the very thing just captured, and
+          // the revealed controls still need to be clickable on the next pass.
+          if (added > 0 && newFields.length === 0) {
             await dismissModalSafe(tabId); // close the menu so the next click starts clean
           }
         }
@@ -1197,6 +1394,10 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
         }
       }
     }
+
+    // Every target was tried, so the fingerprint stored above now genuinely
+    // describes a finished page and a later run may trust it.
+    if (!interactionTruncated) node.interactionComplete = true;
 
     // ── 5b. Selection discovery: what does checking a row reveal? ─────────────
     // Row checkboxes are safe by default (client-side selection only). Settings
@@ -1237,7 +1438,7 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     // ── 6. Form interaction discovery (mutates app — gated behind submitForms) ──
     if (submitForms && formFields.length > 0 && depth <= maxDepth) {
       try {
-        await exploreFormSubmission(tabId, currentUrl, formFields, elements, graph);
+        await exploreFormSubmission(tabId, currentUrl, formFields, elements, graph, navigateToUrl);
         await navigateToUrl(tabId, currentUrl);
         await settle(tabId);
       } catch (err) {
@@ -1417,6 +1618,21 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
     // Coverage reporting must never fail a completed exploration.
     log.warn('Risk coverage computation failed', err);
   }
+  // Structural limits, tallied from the graph rather than counted during the
+  // run: a page re-scanned on a resume would otherwise be counted twice.
+  const framePages = graph.nodes.filter((n) => (n.unscannedFrames?.length ?? 0) > 0);
+  if (framePages.length > 0) {
+    const frames = framePages.reduce((sum, n) => sum + (n.unscannedFrames?.length ?? 0), 0);
+    coverage.unsupported = {
+      ...coverage.unsupported,
+      crossOriginFrames: { frames, pages: framePages.length },
+    };
+    log.info(
+      `Not covered: ${frames} cross-origin frame(s) across ${framePages.length} page(s). ` +
+        `Their contents are unreachable — resuming the run will not reach them.`
+    );
+  }
+
   coverage.complete = runCompleted;
   if (resumedFrom) {
     // `pagesScanned` counts THIS segment. Reporting it alone after a resume reads
@@ -1439,260 +1655,42 @@ export async function exploreApp(options: ExploreOptions = {}): Promise<ExploreR
   return { graph, a11yResults, coverage };
 }
 
-/**
- * Try submitting a form with empty fields first (to discover validation errors),
- * then with placeholder/test data (to discover success states).
- */
-async function exploreFormSubmission(
-  tabId: number,
-  pageUrl: string,
-  formFields: FormField[],
-  elements: InteractiveElement[],
-  graph: InteractionGraph
-): Promise<void> {
-  const submitButton = findSubmitButton(elements);
-  if (!submitButton) return;
-  const cdpOn = isAttached(tabId);
-
-  // ── Attempt 1: Empty submission — discover required field validation ──
-  try {
-    const harBefore = cdpOn ? getHAREntries(tabId).length : 0;
-    await executeStepViaPort({ order: 0, action: 'click', selector: submitButton.selector, description: 'Explore: empty form submit' }, tabId);
-    await settle(tabId);
-
-    const outcome = await captureFormOutcome(tabId, pageUrl, [], submitButton.selector);
-    addFormOutcome(graph, pageUrl, outcome);
-
-    // Capture API endpoints triggered by the form submission
-    if (cdpOn) {
-      const formApis = extractAPIEndpoints(getHAREntries(tabId).slice(harBefore), 'form_submit');
-      const node = graph.nodes.find((n) => n.url === pageUrl);
-      if (node && formApis.length > 0) {
-        node.apiEndpoints = [...(node.apiEndpoints ?? []), ...formApis];
-      }
-    }
-
-    // Navigate back if submission caused navigation
-    const afterSnap = await getPageSnapshot(tabId);
-    if (afterSnap && afterSnap.url !== pageUrl) {
-      await navigateToUrl(tabId, pageUrl);
-      await settle(tabId);
-    }
-  } catch (err) {
-    log.debug('Empty form submission exploration failed', err);
-  }
-
-  // ── Attempt 2: Fill all fields (required first, then optional) with test data, then submit ──
-  // Filling all fields captures the full form submission experience — including
-  // conditional fields that appear only after other fields are filled.
-  const fieldsToFill = [
-    ...formFields.filter((f) => f.required),
-    ...formFields.filter((f) => !f.required),
-  ];
-  if (fieldsToFill.length === 0) return;
-
-  try {
-    const filledSelectors: string[] = [];
-    for (const field of fieldsToFill) {
-      const testValue = generateTestValue(field);
-      if (!testValue) continue;
-
-      // Use appropriate action based on field type
-      const action = (field.type === 'select') ? 'select'
-        : (field.type === 'checkbox' || field.type === 'radio') ? 'check'
-        : 'type';
-
-      await executeStepViaPort({
-          order: 0,
-          action,
-          selector: field.selector,
-          value: action === 'check' ? undefined : testValue,
-          description: `Explore: fill ${field.label || field.name || field.type}`,
-        }, tabId);
-      filledSelectors.push(field.selector);
-      await delay(300);
-    }
-
-    if (filledSelectors.length > 0) {
-      const harBeforeFilled = cdpOn ? getHAREntries(tabId).length : 0;
-      await executeStepViaPort({ order: 0, action: 'click', selector: submitButton.selector, description: 'Explore: filled form submit' }, tabId);
-      await settle(tabId);
-
-      const outcome = await captureFormOutcome(tabId, pageUrl, filledSelectors, submitButton.selector);
-      addFormOutcome(graph, pageUrl, outcome);
-
-      // Capture API endpoints triggered by filled form submission
-      if (cdpOn) {
-        const formApis = extractAPIEndpoints(getHAREntries(tabId).slice(harBeforeFilled), 'form_submit');
-        const node = graph.nodes.find((n) => n.url === pageUrl);
-        if (node && formApis.length > 0) {
-          node.apiEndpoints = [...(node.apiEndpoints ?? []), ...formApis];
-        }
-      }
-    }
-  } catch (err) {
-    log.debug('Filled form submission exploration failed', err);
-  }
-}
-
-export function findSubmitButton(elements: InteractiveElement[]): InteractiveElement | undefined {
-  // Priority: submit buttons → buttons with submit-like text
-  const submitInput = elements.find(
-    (el) => (el.tag === 'button' || el.tag === 'input') && el.type === 'submit' && el.visible
-  );
-  if (submitInput) return submitInput;
-
-  const submitText = ['submit', 'save', 'create', 'add', 'send', 'register', 'sign up', 'log in', 'login', 'continue', 'next', 'confirm'];
-  return elements.find((el) => {
-    if (el.tag !== 'button' || !el.visible) return false;
-    const text = (el.text ?? '').toLowerCase();
-    return submitText.some((st) => text.includes(st));
-  });
-}
-
-async function captureFormOutcome(
-  tabId: number,
-  originalUrl: string,
-  filledFields: string[],
-  submitSelector: string
-): Promise<FormSubmissionOutcome> {
-  const snapshot = await getPageSnapshot(tabId);
-  const currentUrl = snapshot?.url ?? originalUrl;
-
-  // Check for navigation
-  if (currentUrl !== originalUrl) {
-    return {
-      filledFields,
-      submitSelector,
-      result: 'navigation',
-      resultUrl: currentUrl,
-    };
-  }
-
-  // Look for error/success messages in the DOM — check immediately and again
-  // after a short delay to catch toast/snackbar animations that appear async.
-  let messageInfo = await detectFormMessages(tabId);
-
-  if (!messageInfo.hasError && !messageInfo.hasSuccess) {
-    // Many UI frameworks show toasts/snackbars after a short async delay. Let
-    // the network/DOM settle (bounded) before re-checking rather than a flat
-    // sleep, then re-detect.
-    await settle(tabId, { idleMs: 300, timeoutMs: 3_000, fallbackMs: 800 });
-    messageInfo = await detectFormMessages(tabId);
-  }
-
-  if (messageInfo.hasError) {
-    // Capture per-field error mapping for downstream test assertions
-    const fieldErrors = await scanFieldErrors(tabId);
-    return {
-      filledFields,
-      submitSelector,
-      result: 'validation_error',
-      resultMessage: messageInfo.message,
-      errorSelectors: messageInfo.selectors,
-      fieldErrors: fieldErrors.length > 0 ? fieldErrors : undefined,
-    };
-  }
-
-  if (messageInfo.hasSuccess) {
-    return {
-      filledFields,
-      submitSelector,
-      result: 'success',
-      resultMessage: messageInfo.message,
-    };
-  }
-
-  // Last resort: check if the form fields were cleared after submission
-  // (a common pattern — the form resets on success without showing a message)
-  if (filledFields.length > 0) {
-    try {
-      const currentFormFields = await scanFormFields(tabId);
-      const wasCleared = filledFields.every((filledSelector) => {
-        const field = currentFormFields.find((f) => f.selector === filledSelector);
-        // If the field no longer exists or has no name, it was likely removed (success)
-        return !field;
-      });
-      if (wasCleared) {
-        return {
-          filledFields,
-          submitSelector,
-          result: 'success',
-          resultMessage: 'Form fields cleared after submission',
-        };
-      }
-    } catch { /* non-fatal */ }
-  }
-
-  return {
-    filledFields,
-    submitSelector,
-    result: 'unknown',
-  };
-}
-
-async function detectFormMessages(
-  tabId: number
-): Promise<{ hasError: boolean; hasSuccess: boolean; message?: string; selectors?: string[] }> {
-  try {
-    const response = await sendToContentScript<{
-      payload: { hasError: boolean; hasSuccess: boolean; message?: string; selectors?: string[] };
-    }>(tabId, { type: 'DETECT_FORM_MESSAGES' });
-    return response?.payload ?? { hasError: false, hasSuccess: false };
-  } catch {
-    return { hasError: false, hasSuccess: false };
-  }
-}
-
-export function generateTestValue(field: FormField): string | undefined {
-  switch (field.type) {
-    case 'email':
-      return 'test@example.com';
-    case 'tel':
-      return '+1234567890';
-    case 'url':
-      return 'https://example.com';
-    case 'number':
-      return field.min ?? '1';
-    case 'date':
-      return '2025-01-15';
-    case 'datetime-local':
-      return '2025-01-15T10:30';
-    case 'time':
-      return '10:30';
-    case 'color':
-      return '#ff0000';
-    case 'range':
-      return field.min ?? '50';
-    case 'text':
-    case 'search':
-      // Use field context to generate more realistic values
-      if (field.name?.toLowerCase().includes('name') || field.label?.toLowerCase().includes('name')) return 'Test User';
-      if (field.name?.toLowerCase().includes('title') || field.label?.toLowerCase().includes('title')) return 'Test Title';
-      if (field.name?.toLowerCase().includes('company') || field.label?.toLowerCase().includes('company')) return 'Test Corp';
-      if (field.name?.toLowerCase().includes('address') || field.label?.toLowerCase().includes('address')) return '123 Test Street';
-      if (field.name?.toLowerCase().includes('city') || field.label?.toLowerCase().includes('city')) return 'Test City';
-      if (field.name?.toLowerCase().includes('zip') || field.label?.toLowerCase().includes('zip')) return '12345';
-      return 'Test input';
-    case 'password':
-      return 'TestPassword123!';
-    case 'textarea':
-      return 'Test description text for automated exploration.';
-    case 'select':
-      // Pick the first non-empty option
-      return field.options?.[0];
-    case 'checkbox':
-    case 'radio':
-      return 'true'; // signal to check/select
-    default:
-      return 'test';
-  }
-}
 
 /**
  * Dismiss a modal using multiple strategies (Escape key, then backdrop click).
  * Non-fatal — silently catches errors.
  */
+/**
+ * Navigate a tab and resolve when it reports complete.
+ *
+ * Stays in this file rather than moving out with the other primitives: it is
+ * the one helper that touches `chrome.*`, and `src/core/**` is barred from
+ * doing so except for the files already on the burn-down list in
+ * `.eslintrc.cjs` — which says, in as many words, never to add to it. Passing
+ * it into `form-explorer` keeps the new module clean instead.
+ *
+ * Resolves rather than rejects on failure, and resolves anyway after ten
+ * seconds: exploration must keep moving past a page that never finishes
+ * loading, and a rejection here would abort the whole page rather than skip it.
+ */
+async function navigateToUrl(tabId: number, url: string): Promise<void> {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') done();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.update(tabId, { url }).catch(() => done());
+    setTimeout(done, 10_000);
+  });
+}
+
 async function dismissModalSafe(tabId: number): Promise<void> {
   // Strategy 1: Press Escape
   try {
@@ -1727,85 +1725,10 @@ async function dismissModalSafe(tabId: number): Promise<void> {
   } catch { /* non-fatal */ }
 }
 
-/**
- * Run an async function with a timeout. Rejects if the function doesn't
- * complete within the specified time.
- */
-function withTimeout<T>(ms: number, fn: () => Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Exploration click timeout after ${ms}ms`)), ms);
-    fn().then(
-      (result) => { clearTimeout(timer); resolve(result); },
-      (err) => { clearTimeout(timer); reject(err); }
-    );
-  });
-}
 
-async function navigateToUrl(tabId: number, url: string): Promise<void> {
-  return new Promise((resolve) => {
-    let resolved = false;
-    const done = () => {
-      if (resolved) return;
-      resolved = true;
-      chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
-    };
-    const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') done();
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.update(tabId, { url }).catch(() => done());
-    setTimeout(done, 10_000);
-  });
-}
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
-/**
- * Extract API endpoint summaries from HAR entries, filtering out static assets,
- * browser-internal requests, and deduplicating by method+path.
- */
-function extractAPIEndpoints(
-  entries: HAREntry[],
-  context: ObservedAPI['context']
-): ObservedAPI[] {
-  const seen = new Set<string>();
-  const apis: ObservedAPI[] = [];
 
-  // Static asset extensions and patterns to skip
-  const SKIP_PATTERNS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|webp|avif)(\?|$)/i;
-  const SKIP_PREFIXES = ['chrome-extension://', 'data:', 'blob:'];
 
-  for (const entry of entries) {
-    if (SKIP_PATTERNS.test(entry.url)) continue;
-    if (SKIP_PREFIXES.some((p) => entry.url.startsWith(p))) continue;
-    // Skip HTML document loads — we want API calls only
-    if (entry.mimeType?.includes('text/html') && entry.method === 'GET') continue;
 
-    // Normalize: remove query params for deduplication
-    let endpoint: string;
-    try {
-      const parsed = new URL(entry.url);
-      endpoint = parsed.origin + parsed.pathname;
-    } catch {
-      endpoint = entry.url;
-    }
 
-    const dedup = `${entry.method}:${endpoint}`;
-    if (seen.has(dedup)) continue;
-    seen.add(dedup);
-
-    apis.push({
-      endpoint,
-      method: entry.method,
-      status: entry.status,
-      requestContentType: entry.requestHeaders?.['content-type'] ?? entry.requestHeaders?.['Content-Type'],
-      responseContentType: entry.mimeType || undefined,
-      context,
-    });
-  }
-
-  return apis.slice(0, 30); // Cap per page to prevent bloat
-}

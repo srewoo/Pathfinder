@@ -24,6 +24,15 @@ export interface SegmentOption<T extends string> {
   /** Tooltip; falls back to the label. */
   title?: string;
   disabled?: boolean;
+  /**
+   * A count shown beside the label.
+   *
+   * `undefined` means "not counted", which is not the same as zero and renders
+   * as nothing rather than as a `0` badge. `emphasis` marks a count that needs
+   * attention — rendered with a shape and a tooltip as well as a colour, so it
+   * is not readable by colour alone.
+   */
+  badge?: { count: number; emphasis?: boolean; title?: string };
 }
 
 interface SegmentedControlProps<T extends string> {
@@ -117,7 +126,26 @@ export function SegmentedControl<T extends string>({
             ].join(' ')}
           >
             {Icon && <Icon size={iconSize[size]} />}
-            <span>{option.label}</span>
+            <span className="flex items-center gap-1">
+              {option.label}
+              {option.badge !== undefined && option.badge.count > 0 && (
+                <span
+                  title={option.badge.title}
+                  className={[
+                    'inline-flex items-center justify-center rounded-full px-1 min-w-[14px] text-[9px] font-semibold tabular-nums',
+                    option.badge.emphasis
+                      ? 'bg-warning-bg text-warning-text border border-warning-border'
+                      : 'bg-surface-3 text-text-muted',
+                  ].join(' ')}
+                >
+                  {/* The glyph, not just the colour, marks the count that needs
+                      attention — the distinction has to survive a greyscale
+                      screenshot and a red-green colour deficiency alike. */}
+                  {option.badge.emphasis ? '!' : ''}
+                  {option.badge.count > 99 ? '99+' : option.badge.count}
+                </span>
+              )}
+            </span>
           </button>
         );
       })}

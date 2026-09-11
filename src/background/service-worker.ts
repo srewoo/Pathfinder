@@ -4,6 +4,8 @@ import { learnFlows } from '../core/flow/flow-learner';
 import { generateTestsForFlow } from '../core/test-gen/test-generator';
 import { expandAndSaveTestCase, expandImportedTests, importAndExpandTests, validateImportFile, regenerateTestCaseSteps } from '../core/test-gen/test-importer';
 import { executeTest, executeAllTests } from '../core/executor/test-executor';
+import { runStabilityGate } from '../core/executor/stability-gate';
+import type { ExecutionServices } from '../core/executor/execution-ports';
 import { describeDropped, testCaseToIR } from '../core/ir/ir-bridge';
 import { serializeIR } from '../core/ir/test-ir';
 import { createAiExecutionServices } from '../core/planner/ai-execution-services';
@@ -12,10 +14,13 @@ import { getAllFlows } from '../core/flow/flow-store';
 import { testCaseDB, planDB, clearAllData } from '../storage/indexed-db';
 import { settingsStorage, executionPresetStorage } from '../storage/chrome-storage';
 import { createAIClient } from '../core/ai/ai-client';
+import { queryKnowledge } from '../core/knowledge/knowledge-query';
+import { listModels } from '../core/ai/model-catalog';
 import { broadcastToSidebar, sendToContentScript } from '../messaging/messenger';
 import type { BackgroundMessage } from '../messaging/messages';
 import type { TestCase } from '../storage/schemas';
 import { captureActiveTab } from '../utils/screenshot';
+import { installPanelLifecycle, trackPanelTab } from './sw-panel-lifecycle';
 import { createLogger } from '../utils/logger';
 import { recordedActionsToSteps, inferTestTitle } from '../core/recorder/recorder';
 import type { RecordedAction } from '../core/recorder/recorder';
@@ -114,75 +119,11 @@ export let apiValidationRules: string | undefined;
 /** Full parsed spec object for contract validation. */
 let parsedApiSpec: ParsedAPISpec | undefined;
 
-// ── Per-tab panel tracking ────────────────────────────────────────────────────
-// Maps windowId → tabId for every tab that has the side panel enabled.
-// This lets us disable the panel for the exact tab when the user closes it.
-const panelTabByWindow = new Map<number, number>();
 
-chrome.runtime.onInstalled.addListener(() => {
-  log.info('pathfinder installed');
-  // Disable the panel globally by default — it will only be enabled for the
-  // specific tab the user clicks the extension icon on.
-  // This prevents the panel from appearing on every tab in the same window.
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
-  chrome.sidePanel.setOptions({ enabled: false }).catch(() => {});
-});
 
-// Open / re-open the panel for the tab the user clicked the extension icon on.
-// IMPORTANT: sidePanel.open() must be called synchronously within the user-gesture
-// handler — any `await` before it breaks the gesture chain and Chrome rejects the call.
-// We fire both setOptions and open without awaiting; the browser IPC queue ensures
-// setOptions is applied before open is processed.
-chrome.action.onClicked.addListener((tab) => {
-  if (!tab.id || !tab.windowId) return;
-  const { id: tabId, windowId } = tab;
-
-  chrome.sidePanel
-    .setOptions({ tabId, enabled: true, path: 'src/sidepanel/index.html' })
-    .catch((err) => log.warn('setOptions failed', err));
-
-  chrome.sidePanel
-    .open({ tabId })
-    .then(() => {
-      panelTabByWindow.set(windowId, tabId);
-      log.info(`Opened panel for tab ${tabId} (window ${windowId})`);
-    })
-    .catch((err) => log.warn('Failed to open side panel', err));
-});
-
-// When the side panel loads it connects with name "sidepanel" and reports its
-// windowId. We use the disconnect event to detect when the user closes the panel,
-// then disable it for that tab so it doesn't reappear on the next tab switch.
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'sidepanel') return;
-
-  let assignedTabId: number | undefined;
-
-  port.onMessage.addListener((msg: unknown) => {
-    if (typeof msg === 'object' && msg !== null && 'windowId' in msg) {
-      const windowId = (msg as { windowId: number }).windowId;
-      assignedTabId = panelTabByWindow.get(windowId);
-    }
-  });
-
-  port.onDisconnect.addListener(() => {
-    if (assignedTabId !== undefined) {
-      chrome.sidePanel.setOptions({ tabId: assignedTabId, enabled: false }).catch(() => {});
-      // Clean up the map entry
-      for (const [wid, tid] of panelTabByWindow.entries()) {
-        if (tid === assignedTabId) { panelTabByWindow.delete(wid); break; }
-      }
-      log.info(`Panel closed — disabled for tab ${assignedTabId}`);
-    }
-  });
-});
-
-// Remove tab from tracking when the tab itself is closed.
-chrome.tabs.onRemoved.addListener((tabId) => {
-  for (const [windowId, tid] of panelTabByWindow.entries()) {
-    if (tid === tabId) { panelTabByWindow.delete(windowId); break; }
-  }
-});
+// Panel placement and teardown. Registered here, at module scope, because MV3
+// listener registrations do not survive worker eviction.
+installPanelLifecycle();
 
 chrome.runtime.onMessage.addListener(
   (message: BackgroundMessage, sender, sendResponse) => {
@@ -197,6 +138,33 @@ chrome.runtime.onMessage.addListener(
   }
 );
 
+
+/**
+ * Scope for an analysis report — what it describes, and which request asked.
+ *
+ * Derived in the background rather than trusted from the panel: the origin the
+ * analysis actually ran against is known here, and a panel that has since
+ * switched apps would supply the wrong one.
+ */
+async function analysisScope(
+  requestId: string | undefined,
+  runId?: string
+): Promise<import('../messaging/messages').AnalysisScope> {
+  let origin: string | undefined;
+  let pageUrl: string | undefined;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.url) {
+      pageUrl = tab.url;
+      origin = new URL(tab.url).origin;
+    }
+  } catch {
+    // A missing tab is not a reason to withhold the report; the scope is then
+    // simply less specific, which the panel states rather than hides.
+  }
+  return { origin, pageUrl, runId, requestId };
+}
+
 async function handleMessage(
   message: BackgroundMessage,
   _sender: chrome.runtime.MessageSender
@@ -209,7 +177,7 @@ async function handleMessage(
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab?.id && tab.windowId) {
         await chrome.sidePanel.setOptions({ tabId: tab.id, enabled: true, path: 'src/sidepanel/index.html' });
-        panelTabByWindow.set(tab.windowId, tab.id);
+        trackPanelTab(tab.windowId, tab.id);
       }
       return { success: true };
     }
@@ -304,6 +272,31 @@ async function handleMessage(
       crawlController = null;
       broadcastToSidebar({ type: 'CRAWL_STOPPED' });
       return { success: true };
+    }
+
+    case 'QUERY_KNOWLEDGE': {
+      const settings = await settingsStorage.get();
+      // Local embeddings need no key; API embeddings do. Saying which is the
+      // difference between an actionable message and a dead panel.
+      if (!settings.apiKey && !settings.useLocalEmbeddings) {
+        return {
+          success: false,
+          error:
+            'Add an API key in Settings, or enable Local Embeddings, to query the knowledge base.',
+        };
+      }
+      const queryClient = createAIClient({
+        provider: settings.provider,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        embeddingModel: settings.embeddingModel,
+        useLocalEmbeddings: settings.useLocalEmbeddings,
+      });
+      const result = await queryKnowledge(message.payload.query, queryClient, {
+        topK: message.payload.topK,
+        filterUrl: message.payload.filterUrl,
+      });
+      return { success: true, result };
     }
 
     case 'START_EXPLORATION': {
@@ -583,6 +576,104 @@ async function handleMessage(
       return { success: true, warnings: summarizePreflightIssues(preflight.warnings) };
     }
 
+    /**
+     * Run one test several times back to back and report whether it agrees
+     * with itself.
+     *
+     * Awaited rather than fire-and-forget, unlike RUN_TEST: the caller needs
+     * the verdict to decide whether to quarantine, and a gate is bounded by
+     * construction (a few runs) so there is nothing to stream.
+     */
+    case 'LIST_MODELS': {
+      // Runs here rather than in the side panel so the provider call goes out
+      // from the same context (and under the same host grant) as every other
+      // AI request. The key is used for this one request and not retained.
+      const catalog = await listModels(message.payload.provider, message.payload.apiKey);
+      if (!catalog.ok) return { success: false, error: catalog.error };
+      return { success: true, models: catalog.models };
+    }
+
+    case 'CHECK_STABILITY': {
+      if (testController) return { success: false, error: 'Tests already running' };
+
+      const prepared = await prepareSingleTestRun(message.payload.testCaseId);
+      if ('error' in prepared) return prepared;
+      const { testCase, tabId, services, warnings } = prepared;
+
+      testController = new AbortController();
+      const gateSignal = testController.signal;
+
+      try {
+        const report = await runStabilityGate({
+          testCase,
+          attempts: message.payload.attempts,
+          signal: gateSignal,
+          run: async () =>
+            executeTest(testCase, services, tabId, {
+              signal: gateSignal,
+              targetOrigin: message.payload.targetOrigin,
+            }),
+        });
+
+        log.info(`Stability gate for "${testCase.title}": ${report.summary}`);
+        return {
+          success: true,
+          verdict: report.verdict,
+          summary: report.summary,
+          quarantine: report.quarantine,
+          warnings,
+        };
+      } finally {
+        testController = null;
+      }
+    }
+
+    /**
+     * Re-run a test from a given step, for debugging a long scenario without
+     * replaying its whole prefix.
+     */
+    case 'RESUME_TEST': {
+      if (testController) return { success: false, error: 'Tests already running' };
+
+      const prepared = await prepareSingleTestRun(message.payload.testCaseId);
+      if ('error' in prepared) return prepared;
+      const { testCase, tabId, services, warnings } = prepared;
+
+      testController = new AbortController();
+      const resumeSignal = testController.signal;
+
+      broadcastToSidebar({ type: 'TEST_STARTED', payload: { testCaseId: testCase.id } });
+
+      executeTest(testCase, services, tabId, {
+        startFromStep: message.payload.startFromStep,
+        signal: resumeSignal,
+        targetOrigin: message.payload.targetOrigin,
+        onStepResult: (testCaseId, stepOrder, result) => {
+          broadcastToSidebar({
+            type: 'TEST_STEP_RESULT',
+            payload: {
+              testCaseId,
+              stepOrder,
+              status: result.status,
+              action: result.step.action,
+              description: result.step.description,
+              error: result.error,
+            },
+          });
+        },
+        onTestComplete: (result) => {
+          broadcastToSidebar({
+            type: 'TEST_COMPLETE',
+            payload: { testCaseId: testCase.id, status: result.status },
+          });
+        },
+      }).finally(() => {
+        testController = null;
+      });
+
+      return { success: true, warnings };
+    }
+
     case 'RUN_SELECTED_TESTS': {
       if (testController) return { success: false, error: 'Tests already running' };
 
@@ -742,13 +833,22 @@ async function handleMessage(
           notifySuiteComplete(results, results[0]?.runId ?? 'unknown').catch(() => {});
           // Auto-run HAR impact analysis after suite completes
           try {
-            const harReport = await analyzeHARImpact(results);
+            // The loaded spec, when there is one, is the honest denominator: it
+            // can show an endpoint that exists and was never called, which
+            // observed traffic structurally cannot.
+            const harReport = await analyzeHARImpact(results, undefined, parsedApiSpec ?? undefined);
             broadcastToSidebar({
               type: 'HAR_IMPACT_COMPLETE',
               payload: {
-                coveragePercent: harReport.summary.coveragePercent,
+                // Auto-run: nobody asked, so there is no requestId to echo.
+                scope: await analysisScope(undefined, results[0]?.runId),
+                coveragePercent: harReport.summary.exercisedPercent,
+                verifiedPercent: harReport.summary.verifiedPercent,
                 totalEndpoints: harReport.summary.totalEndpoints,
-                gaps: harReport.summary.uncoveredEndpoints,
+                verified: harReport.summary.verified,
+                exercised: harReport.summary.exercised,
+                gaps: harReport.summary.observedOnly,
+                inventorySource: harReport.summary.inventorySource,
                 report: formatHARImpactReport(harReport),
               },
             });
@@ -760,6 +860,7 @@ async function handleMessage(
                 broadcastToSidebar({
                   type: 'CONTRACT_VALIDATION_COMPLETE',
                   payload: {
+                    scope: await analysisScope(undefined, results[0]?.runId),
                     violations: contractReport.violations.length,
                     errors: contractReport.summary.errors,
                     warnings: contractReport.summary.warnings,
@@ -955,7 +1056,7 @@ async function handleMessage(
       if (!activeTab?.id) return { success: false, error: 'No active tab' };
 
       try {
-        await sendToContentScript(activeTab.id, { type: 'START_RECORDING' } as any);
+        await sendToContentScript(activeTab.id, { type: 'START_RECORDING' });
         isRecording = true;
         recordingTabId = activeTab.id;
         broadcastToSidebar({ type: 'RECORDING_STARTED' });
@@ -971,7 +1072,7 @@ async function handleMessage(
       try {
         const response = await sendToContentScript<{ success: boolean; actions: RecordedAction[] }>(
           recordingTabId,
-          { type: 'STOP_RECORDING' } as any
+          { type: 'STOP_RECORDING' }
         );
 
         isRecording = false;
@@ -999,7 +1100,7 @@ async function handleMessage(
       try {
         const response = await sendToContentScript<{ success: boolean; actions: RecordedAction[] }>(
           recordingTabId,
-          { type: 'GET_RECORDED_ACTIONS' } as any
+          { type: 'GET_RECORDED_ACTIONS' }
         );
         return { success: true, actions: response?.actions ?? [] };
       } catch {
@@ -1206,14 +1307,19 @@ async function handleMessage(
     case 'GET_HAR_IMPACT': {
       try {
         const results = await getRunResults(message.payload?.runId);
-        const report = await analyzeHARImpact(results);
+        const report = await analyzeHARImpact(results, undefined, parsedApiSpec ?? undefined);
         const formatted = formatHARImpactReport(report);
         broadcastToSidebar({
           type: 'HAR_IMPACT_COMPLETE',
           payload: {
-            coveragePercent: report.summary.coveragePercent,
+            scope: await analysisScope(message.payload?.requestId, message.payload?.runId),
+            coveragePercent: report.summary.exercisedPercent,
+            verifiedPercent: report.summary.verifiedPercent,
             totalEndpoints: report.summary.totalEndpoints,
-            gaps: report.summary.uncoveredEndpoints,
+            verified: report.summary.verified,
+            exercised: report.summary.exercised,
+            gaps: report.summary.observedOnly,
+            inventorySource: report.summary.inventorySource,
             report: formatted,
           },
         });
@@ -1233,6 +1339,8 @@ async function handleMessage(
         broadcastToSidebar({
           type: 'A11Y_AUDIT_COMPLETE',
           payload: {
+            // Accessibility is per-page, so the scope names the page inspected.
+            scope: { ...(await analysisScope(message.payload?.requestId)), pageUrl: tab.url },
             totalIssues: result.summary.total,
             critical: result.summary.critical,
             serious: result.summary.serious,
@@ -1266,6 +1374,7 @@ async function handleMessage(
             broadcastToSidebar({
               type: 'CONTRACT_VALIDATION_COMPLETE',
               payload: {
+                scope: await analysisScope(message.payload?.requestId, message.payload?.runId),
                 violations: diff.summary.breaking + diff.summary.additive,
                 errors: diff.summary.breaking,
                 warnings: diff.summary.additive,
@@ -1278,6 +1387,7 @@ async function handleMessage(
           broadcastToSidebar({
             type: 'CONTRACT_VALIDATION_COMPLETE',
             payload: {
+              scope: await analysisScope(message.payload?.requestId, message.payload?.runId),
               violations: observed.findings.length,
               errors: observed.findings.filter((f) => f.severity === 'high').length,
               warnings: observed.findings.filter((f) => f.severity !== 'high').length,
@@ -1291,6 +1401,7 @@ async function handleMessage(
         broadcastToSidebar({
           type: 'CONTRACT_VALIDATION_COMPLETE',
           payload: {
+            scope: await analysisScope(message.payload?.requestId, message.payload?.runId),
             violations: report.violations.length,
             errors: report.summary.errors,
             warnings: report.summary.warnings,
@@ -1339,7 +1450,11 @@ async function handleMessage(
             : undefined },
         settings.model
       );
-      broadcastToSidebar({ type: 'COST_REPORT_COMPLETE', payload: { report } });
+      broadcastToSidebar({
+        type: 'COST_REPORT_COMPLETE',
+        // Cost is session-wide, not per app or run, so only the request is echoed.
+        payload: { report, scope: { requestId: message.payload?.requestId } },
+      });
       return { success: true };
     }
 
@@ -1364,6 +1479,57 @@ function originOfEntries(entries: readonly { url: string }[]): string | undefine
     } catch { /* skip unparseable */ }
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
+/**
+ * Shared setup for the single-test entry points that need a prepared runtime
+ * (stability gate, resume) rather than the fire-and-forget RUN_TEST path.
+ *
+ * Returns either the pieces needed to execute, or the same `{ success: false }`
+ * shape the message handlers return, so the caller can forward it unchanged.
+ */
+async function prepareSingleTestRun(testCaseId: string): Promise<
+  | { testCase: TestCase; tabId: number; services: ExecutionServices; warnings: string[] }
+  | { success: false; error: string; warnings?: string[] }
+> {
+  const settings = await settingsStorage.get();
+  if (!settings.apiKey) {
+    return { success: false, error: 'API key not configured' };
+  }
+
+  const testCase = await testCaseDB.get(testCaseId);
+  if (!testCase) {
+    return { success: false, error: 'Test case not found' };
+  }
+
+  const preflight = await validateExecutionPreflight([testCase]);
+  if (!preflight.ok) {
+    return {
+      success: false,
+      error: summarizePreflightIssues(preflight.blockers).join(' '),
+      warnings: summarizePreflightIssues(preflight.warnings),
+    };
+  }
+
+  const tabId = preflight.activeTabId;
+  if (!tabId) {
+    return { success: false, error: 'No active tab found' };
+  }
+
+  const aiClient = createAIClient({
+    provider: settings.provider,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    embeddingModel: settings.embeddingModel,
+    useLocalEmbeddings: settings.useLocalEmbeddings,
+  });
+
+  return {
+    testCase,
+    tabId,
+    services: createAiExecutionServices(aiClient, { aiAssertions: true }),
+    warnings: summarizePreflightIssues(preflight.warnings),
+  };
 }
 
 async function getSelectedTests(testCaseIds: string[]) {

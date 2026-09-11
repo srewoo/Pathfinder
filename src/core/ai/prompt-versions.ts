@@ -12,9 +12,10 @@
  */
 
 export const PROMPT_VERSIONS: Record<string, string> = {
-  selectorHealing: '1.2.0',
+  selectorHealing: '1.3.0',
+  visualHealing: '1.0.0',
   interactivePlanning: '1.3.0',
-  testPlanning: '1.4.0',
+  testPlanning: '1.5.0',
   testExpansion: '1.1.0',
   flowExtraction: '1.0.0',
   pageExploration: '1.0.0',

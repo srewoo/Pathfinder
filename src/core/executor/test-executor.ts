@@ -1,9 +1,16 @@
-import type { TestCase, TestResult, StepResult, ExecutionStep } from '../../storage/schemas';
+import type {
+  AttemptRecord,
+  TestCase,
+  TestResult,
+  StepResult,
+  ExecutionStep,
+} from '../../storage/schemas';
 import type { PlanningMode } from '../planner/test-planner';
 import type { ExecutionServices } from './execution-ports';
 import { runStep, navigateTab } from './action-runner';
 import { initCDPSession, teardownCDPSession, getAXContext } from '../cdp/cdp-session';
 import { registerHealedSelector } from '../healing/self-healer';
+import { dataRowLabel, rowVariables } from '../test-gen/dataset';
 import { getPageSnapshot } from '../explorer/page-scanner';
 import { testCaseDB, testResultDB, planDB } from '../../storage/indexed-db';
 import { getActiveTabId } from '../../messaging/messenger';
@@ -33,6 +40,15 @@ const log = createLogger('test-executor');
  *   Attempt 1 — same plan, doubled step timeouts (timing fix)
  *   Attempt 2 — fresh plan (selector fix)
  */
+import {
+  authoringConfidence,
+  buildErrorMessage,
+  getPostStepDelay,
+  isMutatingStep,
+  isSubmitStep,
+  recordAttempt,
+} from './execution-decisions';
+
 const MAX_TEST_RETRIES = 2;
 
 export interface ExecutionOptions {
@@ -114,6 +130,23 @@ export interface ExecutionOptions {
    * and any absolute navigate step values — stored data is never modified.
    */
   targetOrigin?: string;
+  /**
+   * Begin at this step order, recording every earlier step as `skipped`.
+   *
+   * For debugging a long scenario: replaying 27 steps to reach step 28 is the
+   * slowest part of the authoring loop. Earlier steps are marked SKIPPED, never
+   * passed — a resumed run must not claim it verified something it did not
+   * execute, or the result is a false green.
+   */
+  startFromStep?: number;
+  /**
+   * Row of `testCase.dataSet` this run uses.
+   *
+   * Its columns are seeded into the captured-variable map before the step walk,
+   * so `{{column}}` resolves through the existing substitution path rather than
+   * a parallel one.
+   */
+  dataRowIndex?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +179,11 @@ export async function executeTest(
   }
 
   try {
+  // Every attempt, kept so a fail-then-pass can explain itself. Only the last
+  // result is returned, and discarding the rest threw away the clearest signal
+  // the run produces about a flaky test.
+  const attemptLedger: AttemptRecord[] = [];
+
   for (let attempt = 0; attempt <= MAX_TEST_RETRIES; attempt++) {
     if (attempt > 0) {
       log.info(`Retrying test "${testCase.title}" (attempt ${attempt + 1}/${MAX_TEST_RETRIES + 1})`);
@@ -158,10 +196,14 @@ export async function executeTest(
     const timeoutMultiplier = attempt === 1 ? 2 : 1;
 
     const result = await attemptExecution(testCase, services, tabId, runId, startedAt, { ...options, cdpActive }, freshPlan, timeoutMultiplier);
+    attemptLedger.push(recordAttempt(result, attempt, freshPlan, timeoutMultiplier));
 
     // Stop on success, after the last attempt, or once aborted (per-test ceiling
     // / user stop) — don't burn further attempts on a test we've abandoned.
     if (result.status === 'passed' || attempt === MAX_TEST_RETRIES || options.signal?.aborted) {
+      // Only when it took more than one go — a first-attempt pass needs no
+      // ledger, and storing a single-entry one on every result is noise.
+      if (attemptLedger.length > 1) result.attempts = attemptLedger;
       // Attach HAR entries to the result for network-level debugging
       if (cdpActive) {
         const harEntries = await teardownCDPSession(tabId);
@@ -268,7 +310,12 @@ export async function executeAllTests(
   }
 
   const allTests = await testCaseDB.getAll();
-  const toRun = selectTestsToRun(allTests, options);
+  const selected = selectTestsToRun(allTests, options);
+  // Selecting a test by id is an explicit choice, so it overrides quarantine.
+  // A suite run does not.
+  const toRun = expandDataDrivenCases(selected, {
+    includeQuarantined: Boolean(options.testCaseIds?.length),
+  });
 
   if (toRun.length === 0) {
     log.info('No pending tests to run');
@@ -276,13 +323,108 @@ export async function executeAllTests(
   }
 
   const effectiveConcurrency = Math.max(1, Math.min(4, concurrency));
-  log.info(`Starting run: ${toRun.length} tests, concurrency=${effectiveConcurrency}`);
+  log.info(`Starting run: ${toRun.length} run(s), concurrency=${effectiveConcurrency}`);
 
   if (effectiveConcurrency === 1) {
     return runSequential(toRun, services, { ...options, runId });
   }
 
   return runParallel(toRun, services, { ...options, runId }, effectiveConcurrency);
+}
+
+/**
+ * Steps below `startFromStep`, recorded as skipped.
+ *
+ * Skipped, never passed. A resumed run that reported its prefix as passing
+ * would be a false green — it would claim to have verified steps it never
+ * executed, which is the one thing a test result must never do.
+ */
+export function skippedPrefix(
+  steps: readonly ExecutionStep[],
+  startFromStep: number
+): StepResult[] {
+  if (startFromStep <= 0) return [];
+  return [...steps]
+    .sort((a, b) => a.order - b.order)
+    .filter((step) => step.order < startFromStep)
+    .map((step) => ({
+      step,
+      status: 'skipped' as const,
+      duration: 0,
+      error: `Skipped — run resumed from step ${startFromStep}`,
+    }));
+}
+
+/**
+ * Placeholder names a step still carries after substitution.
+ *
+ * Only meaningful for a resumed run: in a full run the IR validator has already
+ * guaranteed every placeholder is captured by an earlier step.
+ */
+export function unresolvedPlaceholders(step: ExecutionStep): string[] {
+  const names = new Set<string>();
+  for (const text of [step.value, step.assertExpected]) {
+    if (!text) continue;
+    for (const match of text.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)) {
+      names.add(match[1]);
+    }
+  }
+  return [...names];
+}
+
+// ---------------------------------------------------------------------------
+// Data-driven fan-out
+// ---------------------------------------------------------------------------
+
+export interface DataRun {
+  testCase: TestCase;
+  dataRowIndex?: number;
+  /** Title as it should appear in results — carries the row for a data run. */
+  label: string;
+}
+
+/**
+ * Result title for a run, naming the data row when there is one.
+ *
+ * Three results all called "User can sign in" are indistinguishable in the
+ * results list, which defeats the point of running the scenario per row.
+ */
+function resultTitle(testCase: TestCase, dataRowIndex?: number): string {
+  if (!testCase.dataSet || dataRowIndex === undefined) return testCase.title;
+  return `${testCase.title} [${dataRowLabel(testCase.dataSet, dataRowIndex)}]`;
+}
+
+/**
+ * One entry per actual run: a plain test yields one, a test with N data rows
+ * yields N.
+ *
+ * Quarantined tests are dropped here so every caller of the suite runner
+ * inherits the exclusion rather than each remembering it — except when the user
+ * selected the test explicitly, which is an override, not an oversight.
+ */
+export function expandDataDrivenCases(
+  testCases: readonly TestCase[],
+  opts: { includeQuarantined?: boolean } = {}
+): DataRun[] {
+  const runs: DataRun[] = [];
+
+  for (const testCase of testCases) {
+    if (testCase.quarantined && !opts.includeQuarantined) continue;
+
+    const rowCount = testCase.dataSet?.rows.length ?? 0;
+    if (!testCase.dataSet || rowCount === 0) {
+      runs.push({ testCase, label: testCase.title });
+      continue;
+    }
+    for (let i = 0; i < rowCount; i++) {
+      runs.push({
+        testCase,
+        dataRowIndex: i,
+        label: `${testCase.title} [${dataRowLabel(testCase.dataSet, i)}]`,
+      });
+    }
+  }
+  return runs;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +461,7 @@ async function executeTestBounded(
 // Sequential runner (original behaviour)
 // ---------------------------------------------------------------------------
 async function runSequential(
-  tests: TestCase[],
+  runs: DataRun[],
   services: ExecutionServices,
   options: ExecutionOptions
 ): Promise<TestResult[]> {
@@ -327,10 +469,10 @@ async function runSequential(
   const suiteStartUrl = await getCurrentTabUrl(tabId);
   const results: TestResult[] = [];
 
-  for (let i = 0; i < tests.length; i++) {
+  for (let i = 0; i < runs.length; i++) {
     if (options.signal?.aborted) break;
-    const tc = tests[i];
-    log.info(`[${i + 1}/${tests.length}] Executing: "${tc.title}"`);
+    const { testCase: tc, dataRowIndex, label } = runs[i];
+    log.info(`[${i + 1}/${runs.length}] Executing: "${label}"`);
 
     const rawResetUrl = tc.startUrl ?? suiteStartUrl;
     const resetUrl = (options.targetOrigin && rawResetUrl && tc.startUrl)
@@ -341,11 +483,11 @@ async function runSequential(
     }
 
     try {
-      const result = await executeTestBounded(tc, services, tabId, options);
+      const result = await executeTestBounded(tc, services, tabId, { ...options, dataRowIndex });
       results.push(result);
     } catch (err) {
       if (err instanceof BudgetExceededError) {
-        log.warn(`Budget cap reached — stopping run. Remaining ${tests.length - i - 1} test(s) not executed.`);
+        log.warn(`Budget cap reached — stopping run. Remaining ${runs.length - i - 1} run(s) not executed.`);
         break;
       }
       throw err;
@@ -360,7 +502,7 @@ async function runSequential(
 // Parallel runner — opens N tabs, distributes tests across a shared queue
 // ---------------------------------------------------------------------------
 async function runParallel(
-  tests: TestCase[],
+  runs: DataRun[],
   services: ExecutionServices,
   options: ExecutionOptions,
   concurrency: number
@@ -389,20 +531,24 @@ async function runParallel(
     }
   }
 
-  log.info(`Parallel run: ${tests.length} tests across ${tabIds.length} tabs`);
+  log.info(`Parallel run: ${runs.length} run(s) across ${tabIds.length} tabs`);
 
-  // Shared work queue of (index, test) so results map back to input order
+  // Shared work queue of (index, run) so results map back to input order
   // regardless of which worker finishes first.
-  const queue: Array<{ index: number; tc: TestCase }> = tests.map((tc, index) => ({ index, tc }));
-  const resultsByIndex = new Array<TestResult | undefined>(tests.length);
+  const queue: Array<{ index: number; run: DataRun }> = runs.map((run, index) => ({ index, run }));
+  const resultsByIndex = new Array<TestResult | undefined>(runs.length);
   let budgetStopped = false;
 
   const workers = tabIds.map(async (tabId) => {
-    while (true) {
+    // `for (;;)` rather than `while (true)`: the loop genuinely runs until the
+    // queue drains or the run is stopped, and this is the spelling the
+    // no-constant-condition rule is written to accept.
+    for (;;) {
       if (options.signal?.aborted || budgetStopped) break;
       const item = queue.shift();
       if (!item) break;
-      const { index, tc } = item;
+      const { index, run } = item;
+      const { testCase: tc, dataRowIndex } = run;
 
       const rawResetUrl = tc.startUrl ?? suiteStartUrl;
       const resetUrl = (options.targetOrigin && rawResetUrl && tc.startUrl)
@@ -413,7 +559,10 @@ async function runParallel(
       }
 
       try {
-        resultsByIndex[index] = await executeTestBounded(tc, services, tabId, options);
+        resultsByIndex[index] = await executeTestBounded(tc, services, tabId, {
+          ...options,
+          dataRowIndex,
+        });
       } catch (err) {
         if (err instanceof BudgetExceededError) {
           log.warn('Budget cap reached — stopping parallel run.');
@@ -586,10 +735,32 @@ async function attemptExecution(
     return { ...s, timeout: timeout * timeoutMultiplier };
   });
 
-  const stepResults: StepResult[] = [];
+  const startFromStep = options.startFromStep ?? 0;
+  // A resumed run's skipped prefix is recorded up front so the result reports
+  // every step of the test, not just the tail that ran.
+  const stepResults: StepResult[] = skippedPrefix(steps, startFromStep);
   let aborted = false;
+  /**
+   * Why the attempt failed, when the cause was an assertion this run generated
+   * rather than a step the test author wrote.
+   *
+   * Kept separate so the failure can be named as a generated check: a user
+   * reading "assertion failed" for a step they never wrote would reasonably
+   * treat it as a product defect.
+   */
+  let generatedAssertionFailure: string | undefined;
   let previousStep: ExecutionStep | undefined;
   const capturedValues = new Map<string, string>();
+  // Data columns are seeded BEFORE the walk so `{{column}}` resolves through
+  // `resolveStepVariables` exactly like a captured value — one substitution
+  // path, not two. A later capture step may legitimately shadow a column; the
+  // dataset parser rejects the reserved loop names, so the only collisions
+  // possible are deliberate ones.
+  if (testCase.dataSet && options.dataRowIndex !== undefined) {
+    for (const [name, value] of rowVariables(testCase.dataSet, options.dataRowIndex)) {
+      capturedValues.set(name, value);
+    }
+  }
   const oracleFindings: NonNullable<TestResult['oracleFindings']> = [];
 
   for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
@@ -598,6 +769,10 @@ async function attemptExecution(
       stepResults.push({ step, status: 'skipped', duration: 0 });
       continue;
     }
+    // Resumed run: the prefix was already recorded as skipped before the walk.
+    // `previousStep` is deliberately NOT advanced past it — the post-step settle
+    // delay must be derived from a step that actually ran.
+    if (step.order < startFromStep) continue;
 
     // Capture URL before step for assertion generator context
     const preStepUrl = options.useAIAssertions
@@ -638,6 +813,25 @@ async function attemptExecution(
 
     // Resolve captured variables in step values
     const resolvedStep = resolveStepVariables(step, capturedValues);
+
+    // A resumed run skipped the capture steps that would have produced these
+    // values. Typing the literal "{{orderNo}}" into a field would "pass" while
+    // exercising nothing, so fail the step and say why instead.
+    const unresolved = startFromStep > 0 ? unresolvedPlaceholders(resolvedStep) : [];
+    if (unresolved.length > 0) {
+      stepResults.push({
+        step: resolvedStep,
+        status: 'failed',
+        duration: 0,
+        error:
+          `Cannot resume from step ${startFromStep}: this step needs ` +
+          `${unresolved.map((n) => `{{${n}}}`).join(', ')}, captured by a step that was skipped. ` +
+          `Resume from at or before the capturing step.`,
+      });
+      options.onStepResult?.(testCase.id, step.order, stepResults[stepResults.length - 1]);
+      aborted = true;
+      continue;
+    }
 
     // Use CDP trusted events when available, fall back to synthetic
     const executeStep = runStep;
@@ -694,7 +888,11 @@ async function attemptExecution(
       // Healing is a capability the caller supplies. Absent = a failed step stays
       // failed, which is a supported mode rather than a broken one (§6).
       const healed = services.heal
-        ? await services.heal(step, result.error ?? '', tabId, activeRunner)
+        ? await services.heal(step, result.error ?? '', tabId, activeRunner, {
+            // Captured just above, at the exact moment of failure — the only
+            // view of the page before healing starts perturbing it.
+            screenshot: failScreenshot,
+          })
         : null;
 
       if (healed && healed.success && healed.healedStep) {
@@ -744,6 +942,11 @@ async function attemptExecution(
     }
 
     result.duration = Date.now() - stepStart;
+    // Carried onto the result so a failure can be attributed. Without it, a step
+    // that failed on an element exploration never recorded is indistinguishable
+    // from a genuine regression (T13).
+    const authored = authoringConfidence(testCase, step.order);
+    if (authored !== undefined) result.groundedAtAuthoring = authored;
     stepResults.push(result);
     options.onStepResult?.(testCase.id, step.order, result);
     previousStep = step;
@@ -778,6 +981,10 @@ async function attemptExecution(
       const nextIsAssert = nextStep?.action === 'assert';
       if (!nextIsAssert) {
         // §6: supplied by the caller, not imported. Absent = no auto-assertions.
+        //
+        // Generation being unavailable or failing is a missing capability, not a
+        // test failure: `null` means "no assertion was added", and nothing
+        // downstream may treat that as a check that passed.
         const autoStep = services.suggestAssertion
           ? await services
               .suggestAssertion(tabId, step, preStepUrl)
@@ -786,11 +993,29 @@ async function attemptExecution(
         if (autoStep) {
           autoStep.order = step.order + 0.5;
           const executeStep = runStep;
-          const assertResult = await executeStep(autoStep, tabId).catch(() => null);
-          if (assertResult) {
-            assertResult.duration = assertResult.duration ?? 0;
-            stepResults.push(assertResult);
-            options.onStepResult?.(testCase.id, autoStep.order, assertResult);
+          // An assertion that was generated and then could not be run leaves its
+          // question unanswered. Discarding it reported a clean pass for a check
+          // whose outcome is unknown, so the throw becomes a failed step instead.
+          const assertResult = await executeStep(autoStep, tabId).catch(
+            (err): StepResult => ({
+              step: autoStep,
+              status: 'failed',
+              duration: 0,
+              error: `Generated assertion could not be run: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            })
+          );
+          assertResult.duration = assertResult.duration ?? 0;
+          stepResults.push(assertResult);
+          options.onStepResult?.(testCase.id, autoStep.order, assertResult);
+          // The whole point of running it. Without this the attempt's status is
+          // derived from `aborted` alone, so a failed assertion sat visibly
+          // inside a green result — an assertion that is run and then ignored is
+          // strictly worse than one that was never generated.
+          if (assertResult.status === 'failed') {
+            generatedAssertionFailure = assertResult.error ?? autoStep.description;
+            aborted = true;
           }
         }
       }
@@ -815,7 +1040,7 @@ async function attemptExecution(
   return {
     id: generateId(),
     testCaseId: testCase.id,
-    testCaseTitle: testCase.title,
+    testCaseTitle: resultTitle(testCase, options.dataRowIndex),
     status: finalStatus,
     startedAt,
     completedAt: new Date().toISOString(),
@@ -823,7 +1048,14 @@ async function attemptExecution(
     steps: stepResults,
     screenshot,
     domSnapshot: snapshot?.domCompressed,
-    errorMessage: buildErrorMessage(finalStatus, aborted, signalAborted, stepResults, authWarning),
+    errorMessage: buildErrorMessage(
+      finalStatus,
+      aborted,
+      signalAborted,
+      stepResults,
+      authWarning,
+      generatedAssertionFailure,
+    ),
     healingAttempts: stepResults.filter((r) => r.healingAttempt).map((r) => r.healingAttempt!),
     oracleFindings: oracleFindings.length > 0 ? oracleFindings : undefined,
     runId,
@@ -852,69 +1084,19 @@ async function tryCaptureState(tabId: number): Promise<StateSnapshot | null> {
  * extra snapshots. A `type` changes a field the diff would report as noise on
  * every keystroke.
  */
-function isMutatingStep(step: ExecutionStep): boolean {
-  return step.action === 'click' || step.action === 'double_click' || step.action === 'press_key';
-}
 
-/**
- * Does this step look like a submit?
- *
- * Drives `expectedToWrite`, which flips `missing-persistence` on. Getting it wrong
- * would fire that oracle on every navigation click, so it errs toward silence.
- */
-function isSubmitStep(step: ExecutionStep): boolean {
-  const text = `${step.description} ${step.selector ?? ''}`.toLowerCase();
-  return /submit|save|create|sign\s?in|log\s?in|register|send|confirm|apply|update|delete/.test(text);
-}
 
-// ---------------------------------------------------------------------------
-// Build the result error message, folding in an unverified-auth warning when
-// the test did not pass (so an auth-caused failure isn't misattributed).
-// ---------------------------------------------------------------------------
-function buildErrorMessage(
-  finalStatus: TestResult['status'],
-  aborted: boolean,
-  signalAborted: boolean,
-  stepResults: StepResult[],
-  authWarning: string | undefined,
-): string | undefined {
-  const base = aborted
-    ? stepResults.findLast((r) => r.error)?.error
-    : (signalAborted ? 'Test aborted (per-test time ceiling or run stopped)' : undefined);
-  if (finalStatus !== 'passed' && authWarning) {
-    return base ? `${authWarning} | ${base}` : authWarning;
-  }
-  return base;
-}
 
-// ---------------------------------------------------------------------------
-// Adaptive step delay — returns ms to wait based on previous step type
-// ---------------------------------------------------------------------------
-function getPostStepDelay(previousStep: ExecutionStep | undefined, currentStep: ExecutionStep): number {
-  if (!previousStep) return 400; // first step
 
-  switch (previousStep.action) {
-    case 'navigate':
-      return 1500;
-    case 'click':
-    case 'double_click':
-      // Longer delay before assertions/waits (action result needs to settle)
-      return (currentStep.action === 'assert' || currentStep.action === 'wait') ? 800 : 400;
-    case 'type':
-    case 'clear':
-    case 'check':
-    case 'uncheck':
-    case 'select':
-      return 200;
-    case 'assert':
-    case 'wait':
-    case 'scroll':
-    case 'hover':
-      return 100;
-    default:
-      return 400;
-  }
-}
+
+
+
+
+
+
+
+
+
 
 // ---------------------------------------------------------------------------
 // Helpers

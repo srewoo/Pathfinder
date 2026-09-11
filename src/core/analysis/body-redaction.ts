@@ -18,7 +18,7 @@
  */
 
 /** Key names whose values are never retained, matched case-insensitively as substrings. */
-const SENSITIVE_KEY_RX =
+export const SENSITIVE_KEY_RX =
   /(pass|pwd|secret|token|auth|bearer|session|cookie|credential|apikey|api_key|private|signature|ssn|social|tax|nin|passport|licen[cs]e|dob|birth|salary|compensation|iban|account_?number|routing|card|cvv|pin|otp|mfa|email|phone|mobile|address|postcode|zip)/i;
 
 /** Value shapes that are secrets regardless of the key they sit under. */

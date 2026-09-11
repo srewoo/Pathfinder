@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>Publish</title>
+<style>
+  #publish-banner { display: block; padding: 8px; background: #e6ffe6; }
+  .collapsed { height: 0; overflow: hidden; visibility: hidden; }
+</style>
+<h1>Publish</h1>
+<button id="publish" data-testid="publish">Publish</button>
+<p id="publish-banner" class="collapsed">Published</p>
+<script>
+  document.getElementById('publish').addEventListener('click', function () {
+    // Correct: actually reveal it.
+    document.getElementById('publish-banner').classList.remove('collapsed');
+  });
+</script>

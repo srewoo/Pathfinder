@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>Order — step 2</title>
+<h1>Step 2 of 2: confirm</h1>
+<p>Reference: <span id="carried-ref" data-testid="carried-ref"></span></p>
+<button id="confirm-order" data-testid="confirm-order">Confirm</button>
+<p id="journey-done" hidden>Order confirmed</p>
+<script>
+  document.getElementById('carried-ref').textContent = sessionStorage.getItem('fixture.orderRef') || '';
+  document.getElementById('confirm-order').addEventListener('click', function () {
+    document.getElementById('journey-done').hidden = false;
+  });
+</script>

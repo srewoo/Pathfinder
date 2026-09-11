@@ -412,3 +412,207 @@ describe('executeAllTests — run controls (budget, ordering, ceiling)', () => {
     expect(results[0].errorMessage).toMatch(/aborted/i);
   }, 15000);
 });
+
+describe('data-driven execution', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await testCaseDB.clear();
+    await testResultDB.clear();
+
+    mockAIClient.chat.mockResolvedValue(validAIPlanResponse);
+    mockAIClient.embed.mockResolvedValue([0.1, 0.2, 0.3]);
+    vi.mocked(getPageSnapshot).mockResolvedValue({
+      url: 'https://app.example.com/login',
+      title: 'Login',
+      elements: [],
+      domCompressed: '<form/>',
+      capturedAt: new Date().toISOString(),
+    });
+  });
+
+  /** A test whose stored plan types a value straight from the data row. */
+  function dataDrivenCase(): TestCase {
+    return {
+      ...makeTestCase('tc-data'),
+      dataSet: { columns: ['email'], rows: [['a@b.com'], ['c@d.com']] },
+      preplan: [
+        { order: 1, action: 'type', selector: '#email', value: '{{email}}', description: 'Type the email' },
+        { order: 2, action: 'assert', selector: '.dashboard', assertType: 'visible', description: 'Dashboard visible' },
+      ],
+    };
+  }
+
+  it('given a data-driven test when each row runs then the row value is typed', async () => {
+    const typed: string[] = [];
+    vi.mocked(runStep).mockImplementation(async (step) => {
+      if (step.action === 'type') typed.push(step.value ?? '');
+      return makePassedStep(step);
+    });
+
+    const tc = dataDrivenCase();
+    await executeTest(tc, services(), MOCK_TAB_ID, { dataRowIndex: 0 });
+    await executeTest(tc, services(), MOCK_TAB_ID, { dataRowIndex: 1 });
+
+    expect(typed).toEqual(['a@b.com', 'c@d.com']);
+  });
+
+  it('given a data row when the result is built then its title names the row', async () => {
+    vi.mocked(runStep).mockImplementation(async (step) => makePassedStep(step));
+
+    const result = await executeTest(dataDrivenCase(), services(), MOCK_TAB_ID, {
+      dataRowIndex: 1,
+    });
+
+    expect(result.testCaseTitle).toBe('User can log in [row 2: c@d.com]');
+  });
+
+  // Without a row index there is no data to substitute, and the literal
+  // placeholder would be typed into the field.
+  it('given no data row index when executed then the placeholder is left unresolved', async () => {
+    const typed: string[] = [];
+    vi.mocked(runStep).mockImplementation(async (step) => {
+      if (step.action === 'type') typed.push(step.value ?? '');
+      return makePassedStep(step);
+    });
+
+    await executeTest(dataDrivenCase(), services(), MOCK_TAB_ID);
+
+    expect(typed).toEqual(['{{email}}']);
+  });
+
+  it('given a suite run of a data-driven test then one result per row is produced', async () => {
+    vi.mocked(runStep).mockImplementation(async (step) => makePassedStep(step));
+    await testCaseDB.put(dataDrivenCase());
+
+    const results = await executeAllTests(services(), { rerunAll: true });
+
+    expect(results).toHaveLength(2);
+    expect(results.map((r) => r.testCaseTitle)).toEqual([
+      'User can log in [row 1: a@b.com]',
+      'User can log in [row 2: c@d.com]',
+    ]);
+  });
+
+  it('given a quarantined test in a suite run then it is skipped', async () => {
+    vi.mocked(runStep).mockImplementation(async (step) => makePassedStep(step));
+    await testCaseDB.put({ ...makeTestCase('tc-quarantined'), quarantined: true });
+    await testCaseDB.put(makeTestCase('tc-normal'));
+
+    const results = await executeAllTests(services(), { rerunAll: true });
+
+    expect(results.map((r) => r.testCaseId)).toEqual(['tc-normal']);
+  });
+
+  it('given a quarantined test selected by id then it still runs', async () => {
+    vi.mocked(runStep).mockImplementation(async (step) => makePassedStep(step));
+    await testCaseDB.put({ ...makeTestCase('tc-quarantined'), quarantined: true });
+
+    const results = await executeAllTests(services(), { testCaseIds: ['tc-quarantined'] });
+
+    expect(results.map((r) => r.testCaseId)).toEqual(['tc-quarantined']);
+  });
+});
+
+describe('resume from step', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await testCaseDB.clear();
+    await testResultDB.clear();
+
+    mockAIClient.chat.mockResolvedValue(validAIPlanResponse);
+    mockAIClient.embed.mockResolvedValue([0.1, 0.2, 0.3]);
+    vi.mocked(getPageSnapshot).mockResolvedValue({
+      url: 'https://app.example.com/login',
+      title: 'Login',
+      elements: [],
+      domCompressed: '<form/>',
+      capturedAt: new Date().toISOString(),
+    });
+    vi.mocked(runStep).mockImplementation(async (step) => makePassedStep(step));
+  });
+
+  it('given startFromStep when executed then earlier steps are skipped not dispatched', async () => {
+    const dispatched: number[] = [];
+    vi.mocked(runStep).mockImplementation(async (step) => {
+      dispatched.push(step.order);
+      return makePassedStep(step);
+    });
+
+    // The assertion enricher renumbers every plan 0-based, so the three plan
+    // steps are orders 0, 1, 2 by the time the walk sees them.
+    const result = await executeTest(makeTestCase(), services(), MOCK_TAB_ID, {
+      startFromStep: 2,
+    });
+
+    expect(dispatched).toEqual([2]);
+    expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'skipped', 'passed']);
+    expect(result.steps[0].error).toMatch(/resumed from step 2/);
+  });
+
+  it('given no startFromStep when executed then every step is dispatched', async () => {
+    const dispatched: number[] = [];
+    vi.mocked(runStep).mockImplementation(async (step) => {
+      dispatched.push(step.order);
+      return makePassedStep(step);
+    });
+
+    await executeTest(makeTestCase(), services(), MOCK_TAB_ID);
+
+    expect(dispatched).toEqual([0, 1, 2]);
+  });
+
+});
+
+describe('retry evidence', () => {
+  // The ladder returned only the last result, so a test that failed twice and
+  // passed on the third was indistinguishable from a first-attempt pass.
+  it('given a test that fails then passes when retried then both attempts are preserved', async () => {
+    let call = 0;
+    vi.mocked(runStep).mockImplementation(async (step) => {
+      // Fail every step of the first attempt; pass from then on. Each attempt
+      // walks all three plan steps, so the boundary is the step count.
+      call++;
+      return call <= 3 ? makeFailedStep(step) : makePassedStep(step);
+    });
+    vi.mocked(healStep).mockResolvedValue({
+      success: false,
+      attempt: { stepOrder: 1, originalSelector: '#login-btn', method: 'similarity', success: false },
+    } as never);
+
+    const result = await executeTest(makeTestCase('tc-retry'), services(), MOCK_TAB_ID);
+
+    expect(result.status).toBe('passed');
+    expect(result.attempts?.length).toBeGreaterThan(1);
+    // The first attempt's failure is retained, not overwritten by the pass.
+    expect(result.attempts?.[0].status).toBe('failed');
+    expect(result.attempts?.[0].failedStepOrder).toBeDefined();
+    expect(result.attempts?.at(-1)?.status).toBe('passed');
+  }, 30000);
+
+  it('given a first-attempt pass then no attempt ledger is stored', async () => {
+    vi.mocked(runStep).mockImplementation(async (step) => makePassedStep(step));
+
+    const result = await executeTest(makeTestCase('tc-clean'), services(), MOCK_TAB_ID);
+
+    expect(result.status).toBe('passed');
+    // A single-entry ledger on every result is noise.
+    expect(result.attempts).toBeUndefined();
+  });
+
+  it('given the ladder then the attempts record which fix each one applied', async () => {
+    vi.mocked(runStep).mockImplementation(async (step) => makeFailedStep(step));
+    vi.mocked(healStep).mockResolvedValue({
+      success: false,
+      attempt: { stepOrder: 1, originalSelector: '#login-btn', method: 'similarity', success: false },
+    } as never);
+
+    const result = await executeTest(makeTestCase('tc-ladder'), services(), MOCK_TAB_ID);
+
+    expect(result.status).toBe('failed');
+    const attempts = result.attempts ?? [];
+    expect(attempts).toHaveLength(3);
+    // Attempt 2 doubles timeouts; attempt 3 replans.
+    expect(attempts[1].timeoutMultiplier).toBe(2);
+    expect(attempts[2].freshPlan).toBe(true);
+  }, 40000);
+});

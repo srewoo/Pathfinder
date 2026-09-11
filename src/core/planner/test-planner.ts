@@ -86,6 +86,12 @@ export async function planTest(
         if (validation.issues.length > 0) {
           const repaired = validation.issues.filter((i) => i.fixedSelector).length;
           log.info(`Preplan validation: ${validation.issues.length} selector issues (${repaired} auto-repaired)`);
+          // An unrepaired issue is not cosmetic: it names a step the plan needs
+          // and does not have. Logged at warn with the reason so it is findable,
+          // rather than buried in an info-level count.
+          for (const issue of validation.issues.filter((i) => !i.fixedSelector)) {
+            log.warn(`Preplan step ${issue.stepOrder} unresolved: ${issue.description}`);
+          }
         }
       } catch (err) {
         log.warn(`Preplan validation failed: ${err instanceof Error ? err.message : String(err)} — using captured selectors as-is`);

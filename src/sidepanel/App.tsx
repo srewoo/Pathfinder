@@ -17,7 +17,9 @@ import { useSettingsStore } from './stores/settings-store';
 import { useKnowledgeStore } from './stores/knowledge-store';
 import { useExplorerStore } from './stores/explorer-store';
 import { useTestStore } from './stores/test-store';
+import { useAnalysisStore } from './stores/analysis-store';
 import type { SidebarMessage } from '../messaging/messages';
+import { summarizeVerdicts } from '../core/report/result-adapter';
 
 export function App() {
   const { activeTab, setActiveTab } = useNavigationStore();
@@ -27,10 +29,13 @@ export function App() {
   const knowledge = useKnowledgeStore();
   const explorer = useExplorerStore();
   const tests = useTestStore();
+  const analysis = useAnalysisStore();
   const onboarding = useOnboardingStore();
 
   useEffect(() => {
     settings.load();
+    // Reports outlive the panel, and the panel is unmounted most of the time.
+    analysis.load();
   }, []);
 
   // Auto-start the first-run tour for new users (once settings load, and not
@@ -117,10 +122,20 @@ export function App() {
           tests.setAllTestsComplete();
           setActiveTab('results');
           break;
+        // Handled here, not in AnalysisPanel. App is always mounted; the panel
+        // is not, so a completion that arrived while another tab was open used
+        // to reach nobody at all.
         case 'HAR_IMPACT_COMPLETE':
+          analysis.acceptReport('coverage', message.payload.report, message.payload.scope);
+          break;
         case 'A11Y_AUDIT_COMPLETE':
+          analysis.acceptReport('a11y', message.payload.report, message.payload.scope);
+          break;
         case 'CONTRACT_VALIDATION_COMPLETE':
-          // Analysis results are handled by the AnalysisPanel's own listener
+          analysis.acceptReport('contracts', message.payload.report, message.payload.scope);
+          break;
+        case 'COST_REPORT_COMPLETE':
+          analysis.acceptReport('cost', message.payload.report, message.payload.scope);
           break;
         case 'IMPORT_PROGRESS':
           tests.setImportProgress(message.payload);
@@ -144,6 +159,30 @@ export function App() {
     return () => chrome.runtime.onMessage.removeListener(listener as Parameters<typeof chrome.runtime.onMessage.addListener>[0]);
   }, []);
 
+  // Scoped to what is loaded in this panel, and left as `undefined` — not 0 —
+  // when nothing has been loaded yet, so "none exist" and "not loaded" do not
+  // render identically.
+  const verdicts = tests.results.length > 0 ? summarizeVerdicts(tests.results) : undefined;
+  const tabCounts = {
+    flows: tests.flows?.length,
+    tests: tests.testCases?.length,
+    // Failures plus passes that carry a serious finding: the results a person
+    // has to make a decision about, rather than the total, which is noise.
+    resultsNeedingReview: verdicts ? verdicts.fail + verdicts.needsReview : undefined,
+  };
+
+  // The most specific thing in flight. Ordered by how much it constrains what
+  // the user can do next.
+  const runState = explorer.isExploring
+    ? 'Exploring…'
+    : knowledge.isCrawling
+      ? 'Crawling docs…'
+      : explorer.isLearningFlows
+        ? 'Learning flows…'
+        : tests.isRunning
+          ? `Running ${tests.runningTestIds.length} test${tests.runningTestIds.length === 1 ? '' : 's'}…`
+          : undefined;
+
   const renderPanel = () => {
     switch (activeTab) {
       case 'knowledge': return <KnowledgePanel />;
@@ -161,8 +200,12 @@ export function App() {
       'transition-colors duration-200',
       settings.theme === 'light' ? 'light' : '',
     ].join(' ')}>
-      <Header onSettingsClick={() => setSettingsOpen(true)} onHelpClick={() => onboarding.start()} />
-      <TabNav active={activeTab} onChange={setActiveTab} />
+      <Header
+        onSettingsClick={() => setSettingsOpen(true)}
+        onHelpClick={() => onboarding.start()}
+        runState={runState}
+      />
+      <TabNav active={activeTab} onChange={setActiveTab} counts={tabCounts} />
       <div className="flex-1 overflow-y-auto">
         {renderPanel()}
       </div>

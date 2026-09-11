@@ -19,7 +19,7 @@
  *   api_status      "/api/orders 2xx"
  */
 import type { ExecutionStep, AssertType } from '../../storage/schemas';
-import { getHAREntries, isAttached, type HAREntry } from '../cdp/cdp-client';
+import { getHAREntries, isAttached } from '../cdp/cdp-client';
 
 const NETWORK_ASSERT_TYPES = new Set<AssertType>(['api_called', 'api_not_called', 'api_status']);
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
@@ -34,7 +34,7 @@ export function isNetworkAssertion(step: ExecutionStep): boolean {
   return step.action === 'assert' && !!step.assertType && NETWORK_ASSERT_TYPES.has(step.assertType);
 }
 
-interface AssertionSpec {
+export interface AssertionSpec {
   method?: string;
   urlSubstring: string;
   status?: string;
@@ -73,10 +73,25 @@ function statusMatches(actual: number, expected: string): boolean {
   return Math.floor(actual / 100) === cls;
 }
 
-function entryMatches(entry: HAREntry, spec: AssertionSpec): boolean {
+/**
+ * Does this captured request satisfy the assertion's target?
+ *
+ * Exported so coverage analysis can attribute a *passing* assertion to the
+ * concrete requests it was checking. Reusing the same predicate is the point:
+ * an endpoint is only reported as verified if the assertion that passed would
+ * genuinely have matched that request.
+ */
+export function networkEntryMatches(
+  // Narrowed to what the predicate actually reads, so it works against both the
+  // live HAR entries and the reduced entries persisted on a result.
+  entry: { url: string; method: string },
+  spec: AssertionSpec
+): boolean {
   if (spec.method && entry.method.toUpperCase() !== spec.method) return false;
   return entry.url.includes(spec.urlSubstring);
 }
+
+const entryMatches = networkEntryMatches;
 
 /**
  * Evaluate a network assertion against the tab's captured HAR. Requires an

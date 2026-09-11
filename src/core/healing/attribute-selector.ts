@@ -1,5 +1,6 @@
 import { sendToContentScript } from '../../messaging/messenger';
 import type { InteractiveElement } from '../../storage/schemas';
+import { isHashedClassName, isHashOnlySelector } from './class-stability';
 
 /**
  * Generate a ranked list of valid CSS selectors for the element described
@@ -49,6 +50,7 @@ export async function buildAttributeSelectors(
       seen.add(s);
       return true;
     })
+    .filter((s) => !isHashOnlySelector(s))
     .slice(0, 5);
 }
 
@@ -81,13 +83,15 @@ function deriveSelectors(el: InteractiveElement): string[] {
     selectors.push(`${el.tag}[role="${el.role}"]`);
   }
 
-  // Class-based selectors (stable classes only)
-  if (el.classes && el.classes.length > 0) {
+  // Class-based selectors. "Stable classes only" was the intent from the start;
+  // it is now enforced, because a styled-components or emotion hash changes on
+  // every build and a selector resting on one is a guaranteed future failure.
+  const stableClasses = (el.classes ?? []).filter((cls) => !isHashedClassName(cls));
+  if (stableClasses.length > 0) {
     // Use the most specific class selector
-    const classSelector = `${el.tag}.${el.classes.join('.')}`;
-    selectors.push(classSelector);
+    selectors.push(`${el.tag}.${stableClasses.join('.')}`);
     // Also try individual significant classes
-    for (const cls of el.classes.slice(0, 2)) {
+    for (const cls of stableClasses.slice(0, 2)) {
       selectors.push(`${el.tag}.${cls}`);
     }
   }

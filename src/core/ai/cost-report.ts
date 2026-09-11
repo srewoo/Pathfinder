@@ -12,6 +12,7 @@
  * authoritative and is quietly wrong is worse than one that states its basis.
  */
 import { costBreakdown, type CostBreakdown } from './token-tracker';
+import { PRICING_SOURCES } from './model-pricing';
 
 /** Session-scoped counters plus when the window started. */
 export interface CostSessionMeta {
@@ -56,6 +57,20 @@ export function formatCostReport(meta: CostSessionMeta = {}, model?: string): st
   lines.push(`| **Total** | ${num(u.inputTokens + u.outputTokens + u.embeddingTokens)} | **${usd(b.totalUsd)}** |`);
   lines.push('');
 
+  if (b.pricedAs) {
+    // A rate borrowed from a neighbouring id is a weaker claim than a rate
+    // published for this one, and the difference is invisible in the total.
+    lines.push(
+      `> No rate is published under **${b.model}** itself, so the chat subtotal uses the ` +
+        `published rate for **${b.pricedAs}**.`,
+      ''
+    );
+  }
+
+  if (b.priceNote) {
+    lines.push(`> Rate caveat for **${b.pricedAs ?? b.model}**: ${b.priceNote}`, '');
+  }
+
   if (b.pricingUnknown) {
     // Stated, not hidden behind a zero.
     lines.push(
@@ -81,7 +96,8 @@ export function formatCostReport(meta: CostSessionMeta = {}, model?: string): st
   lines.push('## How this is calculated', '');
   lines.push(
     '- Token counts come from each provider\'s own `usage` field on the response — not estimated from text length.',
-    '- Prices are per-model rates held in `token-tracker.ts`; they are updated by hand and can lag a provider\'s pricing change.',
+    `- Prices are the standard per-model rates in \`model-pricing.ts\`, copied from ${PRICING_SOURCES.map((s) => `${s.provider} (${s.url}, read ${s.retrieved})`).join('; ')}. They are updated by hand and can lag a provider's pricing change.`,
+    '- Standard rates only: prompt caching, batch and other discounts are multipliers on these numbers and are not applied here.',
     '- Cached responses and local embeddings cost nothing and add no tokens, so a cheap run genuinely reads as cheap.',
     '- Counters cover the current session and reset when the extension reloads.'
   );

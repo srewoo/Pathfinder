@@ -31,3 +31,63 @@ export function confidenceFromFlowStep(step: FlowStep, hasKnowledge: boolean): S
 export function confidenceFromText(step: string, hasKnowledge: boolean): StepConfidence {
   return ASSERTION_RE.test(step.trim()) && hasKnowledge ? 'doc_asserted' : 'inferred';
 }
+
+/** How much of a test's steps were backed by capture at authoring time. */
+export interface GroundingSummary {
+  grounded: number;
+  docAsserted: number;
+  inferred: number;
+  total: number;
+  /**
+   * True when no step had a captured selector. These are the tests that fail on
+   * an element that was never observed, which is indistinguishable from a real
+   * regression unless it is labelled.
+   */
+  allInferred: boolean;
+  /**
+   * True when the test has steps but not one of them was backed by
+   * documentation.
+   *
+   * Separate from `allInferred` on purpose: element grounding and documentation
+   * grounding answer different questions. "Can this test find the button" is
+   * not "does anyone claim the button should do this". A test can be perfectly
+   * grounded in captured selectors and still be asserting an outcome nobody
+   * documented — which is exactly the test that passes while the feature is
+   * wrong.
+   */
+  noDocumentationSupport: boolean;
+  /** One line for a card or a preview. */
+  label: string;
+}
+
+/**
+ * Summarise a stored `stepConfidence` array.
+ *
+ * The single place this is computed. The dots and legend already rendered the
+ * per-step values; nothing counted them, so "this whole test is guesswork" was
+ * visible only to someone reading every dot.
+ */
+export function summarizeGrounding(
+  confidences: readonly StepConfidence[] | undefined
+): GroundingSummary {
+  const list = confidences ?? [];
+  const grounded = list.filter((c) => c === 'grounded').length;
+  const docAsserted = list.filter((c) => c === 'doc_asserted').length;
+  const inferred = list.filter((c) => c === 'inferred').length;
+  const total = list.length;
+
+  return {
+    grounded,
+    docAsserted,
+    inferred,
+    total,
+    // An empty list is "not assessed", not "all inferred" — claiming the latter
+    // would flag every test authored before confidence was recorded.
+    allInferred: total > 0 && grounded === 0,
+    noDocumentationSupport: total > 0 && docAsserted === 0,
+    label:
+      total === 0
+        ? 'Grounding not recorded'
+        : `${grounded + docAsserted} of ${total} steps grounded`,
+  };
+}

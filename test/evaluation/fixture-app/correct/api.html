@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>Create order</title>
+<h1>New order</h1>
+<input id="order-qty" data-testid="order-qty" value="1">
+<button id="create-order" data-testid="create-order">Create</button>
+<p id="order-status" hidden>Saved</p>
+<script>
+  document.getElementById('create-order').addEventListener('click', async function () {
+    var res = await fetch('/api/orders', { method: 'POST' });
+    // Correct: the confirmation depends on the response.
+    if (res.ok) document.getElementById('order-status').hidden = false;
+    else document.getElementById('order-status').textContent = 'Could not create the order';
+  });
+</script>

@@ -1,4 +1,5 @@
 import type { TestResult } from '../storage/schemas';
+import { summarizeVerdicts, verdictWithReason } from '../core/report/result-adapter';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,6 +104,10 @@ header .meta{margin-top:6px;color:#9ca3af;font-size:13px}
 .stat-box .value{font-size:28px;font-weight:700;line-height:1}
 .stat-box.passed .value{color:#22c55e}
 .stat-box.failed .value{color:#ef4444}
+.stat-box.review .value{color:#f59e0b}
+details.review{border-left:4px solid #f59e0b;background:#1f1a0f}
+details>summary .icon.review{color:#f59e0b}
+.review-reason{margin:6px 0 0;padding:6px 8px;border-radius:6px;background:rgba(245,158,11,0.1);color:#fbbf24;font-size:12px}
 .stat-box.error  .value{color:#f59e0b}
 .stat-box.total  .value{color:#e5e7eb}
 .stat-box.duration .value{font-size:20px;color:#818cf8}
@@ -151,9 +156,11 @@ details[open]>summary .chevron{transform:rotate(90deg)}
 function buildResultCard(result: TestResult): string {
   const dur = durationSeconds(result.duration);
   const icon = statusIcon(result.status);
+  const verdict = verdictWithReason(result);
   const statusClass = result.status === 'error' ? 'error'
-    : result.status === 'failed' ? 'failed'
-    : result.status === 'passed' ? 'passed'
+    : verdict.verdict === 'FAIL' ? 'failed'
+    : verdict.verdict === 'NEEDS_REVIEW' ? 'review'
+    : verdict.verdict === 'PASS' ? 'passed'
     : 'total';
 
   // Steps list
@@ -167,6 +174,12 @@ function buildResultCard(result: TestResult): string {
   // Error box
   const errorHtml = result.errorMessage
     ? `<div class="error-box">${escapeHtml(result.errorMessage)}</div>`
+    : '';
+
+  // Why a passing test still needs a look. An amber card with no stated reason
+  // is a puzzle, not a report.
+  const reviewHtml = verdict.verdict === 'NEEDS_REVIEW'
+    ? `<p class="review-reason">${escapeHtml(verdict.reason)}</p>`
     : '';
 
   // Healing attempts
@@ -198,7 +211,8 @@ function buildResultCard(result: TestResult): string {
     <ul class="steps-list">
       ${stepsHtml}
     </ul>
-    ${errorHtml}
+    ${reviewHtml}
+  ${errorHtml}
     ${healingHtml}
     ${screenshotHtml}
   </div>
@@ -211,8 +225,13 @@ function buildResultCard(result: TestResult): string {
 
 export function generateHtmlReport(results: TestResult[]): string {
   const total    = results.length;
-  const passed   = results.filter((r) => r.status === 'passed').length;
-  const failed   = results.filter((r) => r.status === 'failed').length;
+  // Verdict counts, not raw statuses — the same numbers the side panel and the
+  // JUnit export show. `errored` stays a raw-status count because it names how
+  // a test ended, which the verdict deliberately does not distinguish.
+  const counts   = summarizeVerdicts(results);
+  const passed   = counts.pass;
+  const review   = counts.needsReview;
+  const failed   = counts.fail;
   const errored  = results.filter((r) => r.status === 'error').length;
 
   const totalDurationMs = results.reduce((sum, r) => sum + (r.duration ?? 0), 0);
@@ -244,6 +263,10 @@ export function generateHtmlReport(results: TestResult[]): string {
       <div class="stat-box passed">
         <div class="label">Passed</div>
         <div class="value">${passed}</div>
+      </div>
+      <div class="stat-box review" title="Passed, but a healed locator or an oracle finding needs a human look.">
+        <div class="label">Needs review</div>
+        <div class="value">${review}</div>
       </div>
       <div class="stat-box failed">
         <div class="label">Failed</div>

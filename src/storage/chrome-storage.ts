@@ -5,6 +5,7 @@ const STORAGE_KEYS = {
   executionPresets: 'pathfinder_execution_presets',
   crawlUrl: 'pathfinder_crawl_url',
   lastExploreUrl: 'pathfinder_last_explore_url',
+  analysisReports: 'pathfinder_analysis_reports',
 } as const;
 
 const DEFAULT_SETTINGS: Settings = {
@@ -113,5 +114,26 @@ export const executionPresetStorage = {
     const next = presets.filter((preset) => preset.id !== id);
     await executionPresetStorage.saveAll(next);
     return next;
+  },
+};
+
+/**
+ * Analysis reports, keyed by what they describe.
+ *
+ * Persisted so closing and reopening the side panel does not silently discard a
+ * report the user has already paid for — an LLM-backed analysis is not cheap to
+ * re-run, and losing it on a panel close reads as the feature being broken.
+ */
+export const analysisReportStorage = {
+  async get<T = Record<string, unknown>>(): Promise<T> {
+    return (await chromeGet<T>(STORAGE_KEYS.analysisReports)) ?? ({} as T);
+  },
+
+  async save(reports: Record<string, unknown>): Promise<void> {
+    await chromeSet(STORAGE_KEYS.analysisReports, reports);
+  },
+
+  async clear(): Promise<void> {
+    await chromeSet(STORAGE_KEYS.analysisReports, {});
   },
 };

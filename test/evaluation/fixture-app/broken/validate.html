@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>Sign up</title>
+<h1>Sign up</h1>
+<form id="signup-form" novalidate>
+  <input id="email" name="email" data-testid="email" type="email">
+  <button id="submit-signup" data-testid="submit-signup" type="submit">Sign up</button>
+</form>
+<p id="email-error" hidden>Enter a valid email address</p>
+<p id="signup-done" hidden>Account created</p>
+<script>
+  document.getElementById('signup-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    // Seeded defect: validation is skipped entirely.
+    document.getElementById('signup-done').hidden = false;
+  });
+</script>

@@ -40,12 +40,13 @@ const SAMPLE_JSON = `{
 }`;
 
 export function TestImportPanel() {
+  const [testRailRunId, setTestRailRunId] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [jsonText, setJsonText] = useState('');
   const [validationError, setValidationError] = useState<string | null>(null);
   const [showSample, setShowSample] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { importTests, isImporting, importProgress } = useTestStore();
+  const { importTests, isImporting, importProgress, importFromTestRail } = useTestStore();
 
   const reset = () => {
     setJsonText('');
@@ -148,6 +149,34 @@ export function TestImportPanel() {
           <Upload size={10} className="mr-1" />
           Upload .json file
         </Button>
+      </div>
+
+      {/* TestRail run import. Sits beside the JSON path because it is the same
+          operation from a different source, and lands through the same store. */}
+      <div className="space-y-1 pt-1 border-t border-border">
+        <label className="block text-2xs font-medium text-text-secondary">
+          Or import a TestRail run
+        </label>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            value={testRailRunId}
+            onChange={(e) => setTestRailRunId(e.target.value)}
+            placeholder="Run id, e.g. 42"
+            className="flex-1 h-7 bg-surface-3 border border-border rounded-lg px-2 text-xs text-text-primary placeholder-text-muted outline-none focus:border-primary transition-colors font-mono"
+          />
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={!Number(testRailRunId) || isImporting}
+            onClick={() => importFromTestRail(Number(testRailRunId))}
+          >
+            Import run
+          </Button>
+        </div>
+        <p className="text-2xs text-text-muted">
+          Needs TestRail credentials in Settings. Cases arrive as pending tests you can run.
+        </p>
       </div>
 
       {/* Paste area */}

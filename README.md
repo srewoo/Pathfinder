@@ -1,14 +1,16 @@
 # Pathfinder
 
-**AI Autonomous QA Engineer in your browser.** Crawl, explore, learn, generate, and execute tests — automatically.
+**An AI test-authoring agent in your browser.** Crawl, explore, learn, generate, and execute browser tests.
 
-Pathfinder is a Chrome extension that turns any web application into a fully tested product. Point it at your app, let it explore, and it generates and runs real end-to-end tests — no test scripts, no infrastructure, no Selenium grid.
+Pathfinder is a Chrome extension that maps a web application, proposes end-to-end tests from what it found, and runs them — without test scripts, CI infrastructure, or a Selenium grid.
+
+It does not produce a fully tested product, and it is not a replacement for a test suite a team owns. It produces a **starting point that is grounded in the application as it actually is**, labelled with how much of each claim was observed rather than inferred. What it covers, what it cannot, and how that is measured are set out in [Measured scope](#measured-scope) — read that before relying on a number from it.
 
 ---
 
 ## Objective
 
-Eliminate the manual effort of writing, maintaining, and debugging browser-based end-to-end tests. Pathfinder gives every team — from solo developers to enterprise QA departments — an autonomous testing agent that lives in the browser, understands the application it's testing, and heals its own tests when the UI changes.
+Reduce the manual effort of writing, maintaining and debugging browser-based end-to-end tests, and make the residual uncertainty visible rather than hidden. Pathfinder explores an application, proposes tests grounded in what it observed, executes them, and reports how much of each result rests on observation versus inference.
 
 ---
 
@@ -38,6 +40,114 @@ Pathfinder is an **AI-native testing agent** that runs entirely inside Chrome. I
 6. **Reports results** with detailed step-by-step breakdowns, screenshots, and CI/CD-compatible exports (Results)
 
 No backend. No cloud infrastructure. No test scripts. Just a Chrome extension and an LLM API key.
+
+
+---
+
+## Measured scope
+
+Every number this product reports carries the thing that makes it readable: a
+denominator, and the tier it was measured on. This section is the reference for
+what those numbers mean — and for what the product does not do.
+
+### Verdicts
+
+A test result has one canonical verdict, computed in `src/core/report/result-adapter.ts`
+and used identically by the panel, the exports and the reports.
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | Every step passed, no high-severity oracle finding, fewer than two locators healed. |
+| `NEEDS_REVIEW` | Passed, but something undermines the pass: a high-severity oracle finding (the UI reported success while the server was never called), or two or more distinct healed locators. |
+| `FAIL` | A step failed, a generated assertion failed, or execution errored. |
+
+`NEEDS_REVIEW` is not a soft failure — it is a pass whose evidence is weaker
+than a pass normally implies, and the reason is always shown alongside it.
+
+### Coverage metrics
+
+Exploration reports three distinct things, which are never merged into one
+percentage:
+
+| Metric | Denominator | Says |
+|---|---|---|
+| Coverage ratio | Pages discovered | How much of what was found was mapped. Self-referential: an explorer that finds one page and maps it scores 100%. |
+| Risk-weighted coverage | Risk units across discovered pages | The same, weighted by forms, sensitive fields, observed mutating endpoints and auth gating — so skipping a checkout page costs more than skipping an about page. |
+| Untested paths | — | Discovered but never visited. Resumable. |
+| Unsupported | — | Structurally unreachable, e.g. cross-origin frames. **Not** resumable, and never added to untested paths. |
+
+Discovery counts are never labelled as executed-test coverage.
+
+### Flow provenance
+
+A flow carries three independent dimensions (`src/core/flow/flow-provenance.ts`):
+
+- **observed** — steps that match actions the explorer actually performed;
+- **documented** — expectations backed by retrieved documentation;
+- **replay-validated** — a generated test was executed and passed.
+
+Generating a test is not evidence of anything. A passing run stops counting as
+validation once the flow is re-learnt into a different shape, and that lapse is
+reported as *out of date* rather than reverting to *never run*.
+
+### Retrieval metrics
+
+Retrieval evaluation runs on two tiers, and a report always names its tier,
+embedding model, corpus version and sample size:
+
+- **`synthetic-index`** — a hand-built index. Tests ranking arithmetic. Says
+  nothing about semantic quality.
+- **`actual-embeddings`** — the real model over the labelled corpus in
+  `test/evaluation/retrieval-corpus.ts`. Needs credentials; **reports as SKIPPED
+  when they are absent, never as a pass**.
+
+### Defect-detection evaluation
+
+`npm run evaluate` (deterministic DOM) and `npm run evaluate:browser` (real
+Chrome, needs a display) run the same scenarios against paired working/broken
+fixture applications and report detection, misses and false positives with
+denominators. See `test/evaluation/README.md` for what each tier entitles you
+to claim. The real-browser tier currently reports 16 of 16 seeded defects
+detected across 8 defect scenarios, 0 false positives over 21 correct-variant
+runs, in roughly 25 seconds of scenario time.
+
+### Retention
+
+Everything is local. Graphs, flows, tests, results, screenshots, screencast
+frames and the vector index live in IndexedDB in the browser profile; settings
+and API keys live in `chrome.storage.local`. Nothing is sent anywhere except to
+the LLM provider you configure. **Nothing is pruned automatically** — screenshots
+and screencast frames dominate storage, and clearing data is a manual action in
+the panel.
+
+### Limitations
+
+- **Cross-origin frames are not scanned.** Same-origin frames are. A page whose
+  sign-in or payment step lives in a third-party iframe is reported as having
+  unsupported coverage, not as fully mapped.
+- **The side panel's own UI is not driven by the evaluation harness.** The
+  engine is exercised through the `Driver` port against a real browser; no
+  scenario clicks through the panel.
+- **A live-model tier does not exist.** No measurement in this repository says
+  anything about the quality of a specific model's generated tests.
+- **Five repeats** on the timing and healing scenarios expose gross
+  instability. They do not prove flake freedom and are not reported as if they
+  did.
+- **Link-derived in-page views are capped at five per page** (configurable via
+  `maxLinkTabsPerPage`). The shortfall is warned about; the per-visit cost has
+  not been measured against a real tabbed application, so the default has not
+  been raised on a guess.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `npm test` | Unit and integration suites |
+| `npm run evaluate` | Defect-detection evaluation, deterministic DOM tier |
+| `npm run evaluate:browser` | The same scenarios in real Chrome with the built extension (needs a display) |
+| `npm run build` | Production extension bundle into `dist/` |
+| `npx eslint .` | Lint |
+| `npx tsc --noEmit` | Typecheck |
 
 ---
 
@@ -200,7 +310,7 @@ Pathfinder expands each line into a detailed, executable test plan with real sel
 |-----------|---------|---------------------|---------------|------------------------------------------|
 | **Test authoring** | AI-generated from one-liners or exploration. Minutes per test. | Hand-written code. 30-60 min per test. | Hand-written code. 30-60 min per test. | Hand-written or recorded. 20-45 min per test. |
 | **Infrastructure** | None. Runs in Chrome. | Local or CI runner. Docker for parallelism. | Selenium Hub + browser nodes. Significant DevOps. | Cloud-hosted. Managed but vendor-locked. |
-| **Maintenance** | Self-healing selectors. Near-zero maintenance. | Manual selector updates on every UI change. | Same as Playwright + grid maintenance. | Manual selector updates + vendor dashboard management. |
+| **Maintenance** | Self-healing selectors recover from renamed attributes and moved elements; a test whose locator had to be healed is flagged for review rather than silently passed. | Manual selector updates on every UI change. | Same as Playwright + grid maintenance. | Manual selector updates + vendor dashboard management. |
 | **CI/CD integration** | JUnit XML export + webhooks. Drop-in. | Native. Excellent CI support. | Native but complex to configure. | API-based. Good but vendor-specific. |
 | **Learning curve** | Paste one-liner. Click run. | Learn Playwright API, async patterns, selectors. | Learn Selenium API + grid setup + Docker. | Learn vendor API + dashboard + plan limits. |
 | **Parallel execution** | 1-4 concurrent tabs (local). | Unlimited with CI workers. | Unlimited with grid nodes. | Unlimited (pay per parallel session). |

@@ -1,4 +1,5 @@
 import { detectInteractiveElements, detectFormFields, extractSameOriginLinks, revealPageContent } from './element-detector';
+import { detectUnscannedFrames } from './frame-coverage';
 import type { FormField, PageAction, DataTable, PageType, FieldError } from '../storage/schemas';
 import { compressDOM, serializeCompressedDOM } from '../utils/dom-compress';
 import { waitForDOMIdle, installNetworkTracker } from './dom-observer';
@@ -148,7 +149,7 @@ function detectPageMetadata(): { breadcrumb?: string; headings: string[] } {
     if (el && el.textContent?.trim()) {
       // Clean up breadcrumb text: normalize whitespace and common separators
       breadcrumb = el.textContent.trim()
-        .replace(/\s*[›»>\/]\s*/g, ' > ')
+        .replace(/\s*[›»>/]\s*/g, ' > ')
         .replace(/\s+/g, ' ')
         .slice(0, 200);
       break;
@@ -758,16 +759,25 @@ function detectConditionalFields(): Array<{ fieldSelector: string; triggerSelect
 }
 
 // Page-inspection messages describe the WHOLE page and must be answered only by
-// the top frame. The content script is injected into every frame (all_frames),
-// so each subframe also receives these; the first sendResponse wins, which means
-// a subframe could return its own partial content instead of the top document's.
-// Subframes decline these (return false, no sendResponse) so the top frame's
-// answer is the one the background receives. Action/health/recorder messages are
-// deliberately NOT gated — an action may target an element inside a subframe.
+// the top frame.
+//
+// The manifest does NOT set `all_frames`, so today only the top frame is
+// injected and the gate below never fires. It is kept deliberately: same-origin
+// frame content already reaches the scan through `walkDOM`'s `contentDocument`
+// traversal, so per-frame injection would buy nothing but would break these
+// messages — `chrome.tabs.sendMessage` without a `frameId` broadcasts to every
+// frame and the first `sendResponse` wins, so a subframe could answer "what is
+// on this page" with its own fragment. Subframes decline (return false, no
+// sendResponse) so the top frame's answer is the one the background receives.
+// Action/health/recorder messages are deliberately NOT gated — an action may
+// target an element inside a subframe.
+//
+// Cross-origin frames stay unreachable either way; `GET_FRAME_COVERAGE` reports
+// them rather than letting coverage quietly overstate itself.
 const TOP_FRAME_ONLY_MESSAGES: ReadonlySet<ContentScriptMessage['type']> = new Set([
   'GET_ELEMENTS', 'GET_FORM_FIELDS', 'GET_LINKS', 'REVEAL_PAGE_CONTENT',
   'GET_DOM_SNAPSHOT', 'SCAN_PAGE', 'WAIT_FOR_IDLE', 'DETECT_FORM_MESSAGES',
-  'GET_PAGE_METADATA', 'DETECT_MODAL', 'GET_PAGE_ACTIONS', 'GET_DATA_TABLES',
+  'GET_PAGE_METADATA', 'GET_FRAME_COVERAGE', 'DETECT_MODAL', 'GET_PAGE_ACTIONS', 'GET_DATA_TABLES',
   'GET_PAGE_TYPE', 'GET_FIELD_ERRORS', 'GET_WIZARD_STEPS', 'GET_CONDITIONAL_FIELDS',
   'VALIDATE_SELECTORS', 'DETECT_SPA_ROUTES',
 ]);
@@ -845,6 +855,11 @@ async function handleMessage(message: ContentScriptMessage): Promise<unknown> {
       return { type: 'PAGE_METADATA', payload: metadata } satisfies ContentScriptResponse;
     }
 
+    case 'GET_FRAME_COVERAGE': {
+      const coverage = detectUnscannedFrames();
+      return { type: 'FRAME_COVERAGE', payload: coverage } satisfies ContentScriptResponse;
+    }
+
     case 'DETECT_MODAL': {
       const modal = detectOpenModal();
       return { type: 'MODAL_DETECTED', payload: modal } satisfies ContentScriptResponse;
@@ -897,7 +912,7 @@ async function handleMessage(message: ContentScriptMessage): Promise<unknown> {
 
     case 'START_RECORDING': {
       // Inject the recording script directly (content script has same page context)
-      if (!(window as any).__pathfinder_recording) {
+      if (!window.__pathfinder_recording) {
         // Import recording script source and inject it
         try {
           const scriptEl = document.createElement('script');
@@ -912,12 +927,12 @@ async function handleMessage(message: ContentScriptMessage): Promise<unknown> {
     }
 
     case 'STOP_RECORDING': {
-      const stopActions = (window as any).__pathfinder_stopRecording?.() ?? [];
+      const stopActions = window.__pathfinder_stopRecording?.() ?? [];
       return { success: true, actions: stopActions };
     }
 
     case 'GET_RECORDED_ACTIONS': {
-      const recordedActions = (window as any).__pathfinder_getRecordedActions?.() ?? [];
+      const recordedActions = window.__pathfinder_getRecordedActions?.() ?? [];
       return { success: true, actions: recordedActions };
     }
 

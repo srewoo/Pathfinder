@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>Report</title>
+<h1>Report</h1>
+<button id="load-report" data-testid="load-report">Load</button>
+<div id="report-body" hidden>Revenue: 42</div>
+<script>
+  document.getElementById('load-report').addEventListener('click', function () {
+    // Correct: arrives after a delay, which a test must wait for.
+    setTimeout(function () { document.getElementById('report-body').hidden = false; }, 250);
+  });
+</script>

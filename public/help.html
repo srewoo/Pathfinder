@@ -208,18 +208,22 @@
     .tool-item .tool-desc { font-size: 11px; color: var(--muted); margin-top: 3px; }
 
     /* ── Cost table ── */
-    table.cost {
+    table.cost, table.ref {
       width: 100%; border-collapse: collapse; font-size: 12px;
       background: var(--card); border-radius: 10px; overflow: hidden;
       border: 1px solid var(--border);
     }
-    table.cost th, table.cost td {
+    table.cost th, table.cost td, table.ref th, table.ref td {
       padding: 10px 12px; text-align: left;
       border-bottom: 1px solid var(--border);
     }
-    table.cost th { background: var(--card-2); font-weight: 600; color: var(--primary-light); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
-    table.cost tr:last-child td { border-bottom: none; }
-    table.cost td.num { font-family: 'JetBrains Mono', monospace; color: var(--text); }
+    table.cost th, table.ref th { background: var(--card-2); font-weight: 600; color: var(--primary-light); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    table.cost tr:last-child td, table.ref tr:last-child td { border-bottom: none; }
+    table.cost td.num, table.ref td.num { font-family: 'JetBrains Mono', monospace; color: var(--text); }
+
+    table.ref td:first-child { font-weight: 600; color: var(--text); white-space: nowrap; }
+    table.ref code { font-size: 11px; }
+    .table-wrap { overflow-x: auto; margin-bottom: 14px; }
 
     /* ── TOC ── */
     .toc {
@@ -263,6 +267,9 @@
       <li><a href="#modes">Two ways to use Pathfinder</a></li>
       <li><a href="#quickstart">Quick start (browser extension)</a></li>
       <li><a href="#tabs">Tab-by-tab guide</a></li>
+      <li><a href="#reliability">Reliability &amp; debugging features</a></li>
+      <li><a href="#integrations">Export &amp; integrations</a></li>
+      <li><a href="#settings">Complete settings reference</a></li>
       <li><a href="#advanced">Advanced features</a></li>
       <li><a href="#mcp">MCP server — for AI agents</a></li>
       <li><a href="#mcp-tools">Full MCP tool reference</a></li>
@@ -426,22 +433,26 @@
         <h3>Generate &amp; run test cases</h3>
         <p>Click <strong>Generate</strong> on any flow. AI writes positive, negative &amp; edge-case tests grounded in observed form fields. Constraint-based boundary tests (max-length+1, required-empty, format violations) are added deterministically.</p>
         <ul>
-          <li>Test personalities — Balanced, Strict, Exploratory, Custom</li>
           <li>Planning modes — pre-plan or live interactive replan</li>
+          <li>Test personalities — 6 presets plus your own custom prompt</li>
           <li>Self-healing selectors with retry &amp; replan</li>
           <li>One-line tests — paste &amp; expand manual checks</li>
-          <li>CSV bulk import / export</li>
+          <li>CSV bulk import / export, and TestRail run import</li>
+          <li><strong>Attach a data set</strong> — run one test once per CSV row</li>
+          <li><strong>Stability check</strong> — run N times to catch flaky tests</li>
         </ul>
       </div>
 
       <div class="step-card">
         <div class="tab-badge c-green">📊 Results</div>
         <h3>Pass / fail with evidence</h3>
-        <p>Per-step status, screenshots on failure, healing attempts, network requests, and full error messages. Export as JSON, HTML, or JUnit XML for CI integration.</p>
+        <p>Per-step status, screenshots on failure, healing attempts, network requests, and full error messages.</p>
         <ul>
           <li>Step-by-step trace with timing</li>
-          <li>Screenshots on failure</li>
-          <li>JUnit XML for CI pipelines</li>
+          <li>Screenshots on failure, plus screen recordings</li>
+          <li>Export JSON, HTML, JUnit XML, or <strong>Playwright <code>.spec.ts</code></strong></li>
+          <li>Push results to <strong>TestRail</strong></li>
+          <li><strong>Resume from any step</strong> instead of replaying the whole test</li>
           <li>Slack / Linear / Jira webhook integrations</li>
         </ul>
       </div>
@@ -462,14 +473,14 @@
         <h3>Provider, models, behavior</h3>
         <ul>
           <li><strong>AI Provider</strong> — OpenAI, Anthropic, or Google AI</li>
-          <li><strong>Model</strong> — GPT-5 / GPT-5-mini / Claude Sonnet 4.6 / Opus 4.7 / Gemini 3 Pro</li>
-          <li><strong>Embedding Model</strong> — provider default or local on-device</li>
+          <li><strong>Test key &amp; load models</strong> — verifies the key and lists the models it can call</li>
+          <li><strong>Model / Embedding Model</strong> — picked from that verified list</li>
           <li><strong>Agent mode</strong> — AI-ranked clicks during explore</li>
-          <li><strong>Planning mode</strong> — auto / preplan / interactive</li>
-          <li><strong>Test concurrency</strong> — parallel test execution</li>
-          <li><strong>Webhook URL</strong> — Slack / Linear / Jira notifications</li>
-          <li><strong>Image describer</strong> — vision model for screenshot understanding (off by default)</li>
+          <li><strong>Planning mode</strong> — auto / single-shot / interactive</li>
+          <li><strong>Test concurrency</strong>, <strong>Explore depth</strong>, <strong>Max crawl pages</strong></li>
+          <li><strong>Webhook</strong> and <strong>TestRail</strong> integrations</li>
         </ul>
+        <p style="margin-top:8px;font-size:12px;color:var(--muted)">Every field is documented in the <a href="#settings" style="color:var(--primary-light)">settings reference</a> below.</p>
       </div>
 
       <div class="step-card">
@@ -478,6 +489,211 @@
         <p>Save named presets bundling planning mode, target origin, headers, and storage state. Apply a preset before "Run All" to switch between staging / prod / sandbox in one click.</p>
       </div>
 
+    </div>
+  </div>
+
+  <!-- ── Reliability & debugging ── -->
+  <div class="section" id="reliability">
+    <div class="section-title">Reliability &amp; debugging features</div>
+    <p style="margin-bottom:18px">Five features that exist for one reason: a test suite you cannot trust is worse than no suite at all. Each one targets a specific way UI tests waste your time.</p>
+
+    <div class="steps-grid">
+
+      <div class="step-card">
+        <div class="tab-badge c-green">🩹 Self-healing selectors</div>
+        <h3>Four tiers, cheapest first</h3>
+        <p>When a step cannot find its element, Pathfinder tries to repair the selector instead of failing:</p>
+        <ul>
+          <li><strong>1. Alternatives</strong> — other selectors generated for the same element</li>
+          <li><strong>2. Similarity</strong> — nearest match in the current DOM by role, text and position</li>
+          <li><strong>3. AI</strong> — the model proposes a selector from the live DOM</li>
+          <li><strong>4. Vision</strong> — the model reads the failure <em>screenshot</em></li>
+        </ul>
+        <p style="margin-top:8px">The vision tier only runs when a screenshot exists and the three cheaper tiers have failed, so it costs nothing on a normal run. It is what rescues icon-only buttons and canvas widgets that have no useful DOM text. Every heal is recorded on the result with the tier that fixed it.</p>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-amber">🔁 Stability check</div>
+        <h3>Catch a flaky test before it costs you a morning</h3>
+        <p><strong>How to use it:</strong> click the <strong>repeat icon</strong> on any test row in the Tests tab. The test runs three times back to back.</p>
+        <ul>
+          <li><strong>Stable</strong> — every attempt passed</li>
+          <li><strong>Unstable</strong> — mixed results → the test is <strong>quarantined</strong> and skipped by "Run all"</li>
+          <li><strong>Failing</strong> — every attempt failed → <em>not</em> quarantined</li>
+        </ul>
+        <p style="margin-top:8px">The last distinction matters: a test that always fails is a real bug report, and hiding it would be the wrong call. Only genuinely non-deterministic tests get quarantined. Clear the badge on the row to bring a test back into normal runs.</p>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-blue">⏭ Resume from step</div>
+        <h3>Stop replaying the first 27 steps</h3>
+        <p><strong>How to use it:</strong> open a failed result. The failure banner offers <strong>Resume from step N</strong>, and every row in the execution timeline has its own resume button — so you can bisect a long flow instead of only retrying the failure point.</p>
+        <ul>
+          <li>Skipped steps are recorded as <strong>skipped</strong>, never as passed</li>
+          <li>Resuming past a step that captured a value fails with a clear message rather than typing a literal <code>{{placeholder}}</code></li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-pink">🧮 Data-driven runs</div>
+        <h3>One test, many rows</h3>
+        <p><strong>How to use it:</strong> expand a test in the Tests tab and paste CSV into <strong>Attach data set</strong>. The header row names the variables; reference them in any step value as <code>{{column_name}}</code>.</p>
+        <pre><code>email,password,expect
+alice@acme.com,hunter2,success
+bad@acme.com,wrong,error</code></pre>
+        <ul>
+          <li>One result per row, each labelled with its row</li>
+          <li>Column names must be valid identifiers; <code>loop_index</code> and <code>loop_iteration</code> are reserved</li>
+          <li>Parse errors list <em>every</em> problem with its line number — you fix the file once, not five times</li>
+        </ul>
+      </div>
+
+      <div class="step-card">
+        <div class="tab-badge c-purple">🧱 Build-hash guard</div>
+        <h3>Selectors that survive a deploy</h3>
+        <p>CSS-in-JS frameworks generate class names that change on every build — <code>sc-1e593sq-0</code>, <code>css-1x2y3z</code>, <code>Button_root__a1b2c</code>, <code>jss42</code>. A selector built on one is guaranteed to break at the next deploy.</p>
+        <p style="margin-top:8px">Pathfinder rejects them at three points: when generating a selector, when healing one, and in the prompts the model is given. Nothing to configure. The <strong>testability report</strong> flags any element that has <em>only</em> a hashed class as a gap that <em>will</em> break, and sorts those to the top — that is your list of elements to give a <code>data-testid</code>.</p>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Exports & integrations ── -->
+  <div class="section" id="integrations">
+    <div class="section-title">Export &amp; integrations</div>
+    <p style="margin-bottom:18px">Everything Pathfinder produces can leave the browser. Exports live on the <strong>Results</strong> tab toolbar.</p>
+
+    <div class="table-wrap">
+    <table class="ref">
+      <thead>
+        <tr><th>Export</th><th>What you get</th><th>Use it for</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>JSON</td><td>Full result objects — steps, timings, healing attempts, network</td><td>Custom dashboards, archival</td></tr>
+        <tr><td>HTML report</td><td>Self-contained page with per-step evidence</td><td>Sharing a run with someone who has no extension</td></tr>
+        <tr><td>JUnit XML</td><td>Standard CI test-report format</td><td>Jenkins, GitLab CI, GitHub Actions test summaries</td></tr>
+        <tr><td>Playwright</td><td>A real <code>.spec.ts</code> file</td><td>Checking tests into your repo and running them in CI</td></tr>
+        <tr><td>Screen recording</td><td>Video of the run</td><td>Bug reports, reproducing a race</td></tr>
+        <tr><td>TestRail</td><td>Status, duration, error and failure screenshot on each case</td><td>Teams whose source of truth is TestRail</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-icon">🎭</div>
+      <div>
+        <strong>Playwright export — how to use it</strong>
+        Run your tests, then click <strong>Playwright</strong> on the Results toolbar. You get a spec built from the steps that <em>actually ran</em> — including any selector that was self-healed mid-run — not from the original plan. Locators map to <code>getByTestId</code>, <code>getByRole</code>, or a CSS locator, following the same preference order the executor uses. No AI is involved, so the same run always produces the same file.
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-icon">⚠️</div>
+      <div>
+        <strong>Dropped items are shown, never hidden</strong>
+        A few things have no Playwright equivalent — API-called / API-status assertions, for example. Rather than silently omitting them, the export lists exactly what was dropped in a banner above the results, so you know what the generated spec does <em>not</em> check.
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">🧾</div>
+      <div>
+        <strong>TestRail — how to use it</strong>
+        Add your host, email and API key under <em>Settings → TestRail</em>, then <strong>Test connection</strong>. Import a run's cases from <em>Tests → Import → TestRail run id</em>; re-importing the same run updates rather than duplicates. After a run, click <strong>TestRail</strong> on the Results toolbar to push status, elapsed time, the error message and the failure screenshot back to each case. If some cases fail to push, the rest still land and you are told exactly which ones did not.
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">🔔</div>
+      <div>
+        <strong>Webhooks</strong>
+        Set a webhook URL and a trigger (<em>every run</em>, <em>on failure only</em>, or <em>off</em>) in Settings. Payloads are formatted for Slack, Linear and Jira.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Settings reference ── -->
+  <div class="section" id="settings">
+    <div class="section-title">Complete settings reference</div>
+    <p style="margin-bottom:18px">Every setting in the panel, what it changes, and what it defaults to.</p>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:8px 0 10px">AI configuration</h3>
+    <div class="table-wrap">
+    <table class="ref">
+      <thead><tr><th>Setting</th><th>What it does</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td>AI Provider</td><td>Which API your key belongs to: OpenAI, Anthropic, or Google AI. Switching it resets the model fields and clears the verified model list.</td><td class="num">OpenAI</td></tr>
+        <tr><td>API Key</td><td>Your own key. Stored in <code>chrome.storage.local</code> and sent only to the provider you chose — never to any Pathfinder server, because there isn't one.</td><td class="num">—</td></tr>
+        <tr><td>Test key &amp; load models</td><td>Asks the provider which models this key can call. Doubles as the key test: a provider that returns its catalogue has accepted the credential. Turns the two model fields into dropdowns of exactly what you are entitled to use.</td><td class="num">—</td></tr>
+        <tr><td>Model</td><td>The chat model used for planning, generation and healing. Free text until you test the key, so proxies and preview models still work.</td><td class="num">gpt-5</td></tr>
+        <tr><td>Embedding mode</td><td><strong>Local</strong> runs all-MiniLM-L6-v2 on your machine — free, no key, ~23 MB once. <strong>API</strong> uses your provider's embedding endpoint.</td><td class="num">Local</td></tr>
+        <tr><td>Embedding Model</td><td>Which embedding model to call in API mode. Anthropic has no embedding API — use Local, or OpenAI/Google.</td><td class="num">text-embedding-3-small</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-icon">📐</div>
+      <div>
+        <strong>Switching embedding mode invalidates your index</strong>
+        Local vectors are 384-dimensional and API vectors are 1536. If you already crawled with one, clear all data and re-crawl after switching — the two cannot be compared.
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 10px">Exploration &amp; crawling</h3>
+    <div class="table-wrap">
+    <table class="ref">
+      <thead><tr><th>Setting</th><th>What it does</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td>AI-Guided Exploration</td><td>Agent mode. The model ranks which elements are worth clicking on each page — one extra AI call per page, noticeably better exploration graphs. Turn it off to explore cheaply.</td><td class="num">On</td></tr>
+        <tr><td>Explore Depth</td><td>How many links deep the crawler follows from the start URL.</td><td class="num">5</td></tr>
+        <tr><td>Max Crawl Pages</td><td>Hard ceiling on pages visited in one crawl — your protection against a site with infinite pagination.</td><td class="num">200</td></tr>
+        <tr><td>Describe Images (Vision AI)</td><td>Sends images found while crawling to a vision model for a text description. Adds AI cost per image, so it is off unless your app's meaning is carried by images.</td><td class="num">Off</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 10px">Test generation &amp; execution</h3>
+    <div class="table-wrap">
+    <table class="ref">
+      <thead><tr><th>Setting</th><th>What it does</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td>Planning mode</td><td><strong>Auto</strong> tries interactive first and falls back to single-shot on retry. <strong>Interactive</strong> walks the live app step by step before writing the plan — slowest, most accurate. <strong>Single-shot</strong> generates every step from one DOM snapshot — fastest, cheapest.</td><td class="num">Auto</td></tr>
+        <tr><td>Test concurrency</td><td>How many tests run at once, each in its own tab. Raise it for speed; keep it at 1 if your app cannot tolerate parallel sessions. Capped at 4.</td><td class="num">1</td></tr>
+        <tr><td>Test personality</td><td>Biases generation toward a style &mdash; balanced, happy path, aggressive edge, security focused, accessibility first, performance minded, or custom. Each changes temperature, the positive/negative/edge ratio and tests generated per flow. <strong>Custom</strong> takes up to 200 characters of your own instructions; empty custom behaves as balanced.</td><td class="num">Balanced</td></tr>
+        <tr><td>Execution presets</td><td>Named run profiles bundling start URL, persona label, setup steps, authentication checks and whether a logged-in session is required. Apply one before a run to switch between staging / prod / sandbox.</td><td class="num">—</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--primary-light);margin:18px 0 10px">Integrations &amp; data</h3>
+    <div class="table-wrap">
+    <table class="ref">
+      <thead><tr><th>Setting</th><th>What it does</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td>Webhook URL / Trigger</td><td>POST run summaries to Slack, Linear or Jira. Trigger on every run, on failures only, or never.</td><td class="num">Off</td></tr>
+        <tr><td>TestRail</td><td>Host, email, API key and a default run id. <strong>Test connection</strong> verifies them before you rely on them.</td><td class="num">—</td></tr>
+        <tr><td>Retain API response bodies</td><td>Debug aid for contract findings: keeps <em>redacted</em> response bodies for 24 hours so you can see why a check fired. Off by default because retention is a decision, not a convenience — switching it off deletes what was already stored.</td><td class="num">Off</td></tr>
+        <tr><td>Theme</td><td>Dark or light. Toggle with the sun/moon icon in the header.</td><td class="num">Light</td></tr>
+        <tr><td>Clear all data</td><td>Wipes crawled pages, flows and results from this browser. Irreversible, and it does not touch your API key.</td><td class="num">—</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="callout tip">
+      <div class="callout-icon">🔐</div>
+      <div>
+        <strong>Where your data lives</strong>
+        Everything is local: settings and knowledge under <code>pathfinder_*</code> in <code>chrome.storage.local</code>, flows and results in the IndexedDB database <code>pathfinder_db</code>. Pathfinder has no backend. The only outbound requests are to the AI provider you chose, the app you are testing, and any integration you configured yourself.
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">🔓</div>
+      <div>
+        <strong>Host permissions are asked for, not assumed</strong>
+        The extension ships with no site access. It asks for a specific origin the first time it needs one — the app you are crawling, your TestRail host, your AI provider when you test a key. You can review and revoke these any time in <code>chrome://extensions</code>.
+      </div>
     </div>
   </div>
 
@@ -521,7 +737,7 @@
       <div class="callout-icon">🛡</div>
       <div>
         <strong>Test personalities</strong>
-        Pick a personality in Settings to bias the LLM toward different test styles: <em>Balanced</em> (default), <em>Strict</em> (tight bounds + many negatives), <em>Exploratory</em> (creative edge cases), or <em>Custom</em> (your own free-text prompt).
+        Pick <em>Settings &rarr; Test Personality</em> to bias generation toward a style. Each one changes the AI temperature, the positive/negative/edge mix, and how many tests a flow yields: <em>Balanced</em> (default), <em>Happy path</em>, <em>Aggressive edge</em>, <em>Security focused</em>, <em>Accessibility first</em>, <em>Performance minded</em>, or <em>Custom</em> &mdash; up to 200 characters of your own instructions, injected into every generation prompt. Leave Custom empty and generation falls back to Balanced.
       </div>
     </div>
   </div>

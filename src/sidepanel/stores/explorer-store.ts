@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import type { InteractionGraph, ExplorationProgress, ExplorationCoverage, Flow } from '../../storage/schemas';
-import { getGraphSnapshots, loadGraph, restoreGraphSnapshot } from '../../core/explorer/interaction-graph';
+import {
+  getGraphSnapshots,
+  loadGraph,
+  restoreGraphSnapshot,
+  deleteGraphSnapshot,
+  clearGraphSnapshots,
+} from '../../core/explorer/interaction-graph';
 import type { GraphSnapshot } from '../../storage/schemas';
 import { getAllFlows } from '../../core/flow/flow-store';
 import { hasPermissionFor, requestPermissionFor } from '../../drivers/host-permissions';
@@ -68,6 +74,10 @@ interface ExplorerState {
   loadData: () => Promise<void>;
   /** Restore a snapshot taken before a destructive operation. */
   restoreSnapshot: (snapshotId: string) => Promise<void>;
+  /** Delete one snapshot. The active graph is untouched. */
+  deleteSnapshot: (snapshotId: string) => Promise<void>;
+  /** Delete every snapshot. The active graph is untouched. */
+  clearSnapshots: () => Promise<void>;
   setProgress: (progress: ExplorationProgress) => void;
   setExplorationComplete: (coverage?: ExplorationCoverage) => void;
   dismissExplorationCompletion: () => void;
@@ -264,6 +274,30 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
       set({ error: err instanceof Error ? err.message : String(err) });
     } finally {
       set({ isRestoring: false });
+    }
+  },
+
+  deleteSnapshot: async (snapshotId: string) => {
+    set({ error: null });
+    try {
+      await deleteGraphSnapshot(snapshotId);
+      // Drop it locally too rather than only re-reading: if the re-read fails
+      // the row would stay on screen and look undeletable.
+      set({ snapshots: get().snapshots.filter((s) => s.id !== snapshotId) });
+      const snapshots = await getGraphSnapshots().catch(() => get().snapshots);
+      set({ snapshots });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  clearSnapshots: async () => {
+    set({ error: null });
+    try {
+      await clearGraphSnapshots();
+      set({ snapshots: [] });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
     }
   },
 

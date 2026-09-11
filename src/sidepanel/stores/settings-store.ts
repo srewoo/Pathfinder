@@ -4,10 +4,41 @@ import { executionPresetStorage, settingsStorage } from '../../storage/chrome-st
 import { clearRetainedBodies } from '../../storage/response-body-store';
 import { getDefaultModel, getDefaultEmbeddingModel } from '../../core/ai/ai-client';
 import { generateId } from '../../utils/hash';
+import { sendToBackground } from '../../messaging/messenger';
+import type { ModelOption } from '../../core/ai/model-catalog';
+import { hasPermissionFor, requestPermissionFor } from '../../drivers/host-permissions';
+
+/**
+ * Host the catalogue is fetched from, per provider.
+ *
+ * Narrow on purpose: testing an OpenAI key must not ask for access to
+ * Anthropic's API. `hasPermissionFor` derives the origin pattern from the URL.
+ */
+const PROVIDER_HOSTS: Record<AIProvider, string> = {
+  openai: 'https://api.openai.com',
+  anthropic: 'https://api.anthropic.com',
+  google: 'https://generativelanguage.googleapis.com',
+};
+
+export interface KeyTestStatus {
+  state: 'idle' | 'testing' | 'ok' | 'error';
+  message?: string;
+}
 
 interface SettingsState extends Settings {
   executionPresets: ExecutionPreset[];
   loaded: boolean;
+  /**
+   * Models the saved key is entitled to call. Empty until the key is tested —
+   * an untested key has no verified catalogue, and guessing one is what made
+   * the old free-text field fail mid-crawl.
+   */
+  modelCatalog: ModelOption[];
+  /** Provider the catalogue belongs to, so a provider switch invalidates it. */
+  modelCatalogProvider?: AIProvider;
+  keyTest: KeyTestStatus;
+  /** Verify the key by listing the models it can call. Never throws. */
+  testApiKey: () => Promise<void>;
   load: () => Promise<void>;
   setProvider: (provider: AIProvider) => Promise<void>;
   setApiKey: (key: string) => Promise<void>;
@@ -37,6 +68,7 @@ interface SettingsState extends Settings {
     logoutIndicatorSelector?: string;
   }) => Promise<void>;
   setWebhook: (webhook: import('../../storage/schemas').WebhookConfig | undefined) => Promise<void>;
+  setTestRail: (testrail: Settings['testrail']) => Promise<void>;
   setTestPersonality: (personality: TestPersonalityId) => Promise<void>;
   setCustomPersonalityPrompt: (prompt: string) => Promise<void>;
   deleteExecutionPreset: (presetId: string) => Promise<void>;
@@ -62,6 +94,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   customPersonalityPrompt: undefined,
   executionPresets: [],
   loaded: false,
+  modelCatalog: [],
+  modelCatalogProvider: undefined,
+  keyTest: { state: 'idle' },
 
   load: async () => {
     const [settings, executionPresets] = await Promise.all([
@@ -74,13 +109,77 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setProvider: async (provider) => {
     const model = getDefaultModel(provider);
     const embeddingModel = getDefaultEmbeddingModel(provider);
-    set({ provider, model, embeddingModel });
+    // The catalogue belongs to the old provider — keeping it would offer models
+    // the new provider cannot run.
+    set({
+      provider,
+      model,
+      embeddingModel,
+      modelCatalog: [],
+      modelCatalogProvider: undefined,
+      keyTest: { state: 'idle' },
+    });
     await get().save();
   },
 
   setApiKey: async (apiKey) => {
-    set({ apiKey });
+    // A new key may have entirely different entitlements, so the catalogue it
+    // was verified against no longer applies.
+    set({ apiKey, modelCatalog: [], modelCatalogProvider: undefined, keyTest: { state: 'idle' } });
     await get().save();
+  },
+
+  testApiKey: async () => {
+    const { provider, apiKey } = get();
+    if (!apiKey.trim()) {
+      set({ keyTest: { state: 'error', message: 'Enter an API key first.' } });
+      return;
+    }
+
+    set({ keyTest: { state: 'testing' } });
+    const host = PROVIDER_HOSTS[provider];
+    try {
+      if (!(await hasPermissionFor([host])) && !(await requestPermissionFor([host]))) {
+        set({
+          keyTest: {
+            state: 'error',
+            message: `Permission to reach ${host} was declined — grant it to test the key.`,
+          },
+        });
+        return;
+      }
+
+      const response = await sendToBackground<{
+        success: boolean;
+        models?: ModelOption[];
+        error?: string;
+      }>({ type: 'LIST_MODELS', payload: { provider, apiKey } });
+
+      if (!response?.success || !response.models) {
+        set({ keyTest: { state: 'error', message: response?.error ?? 'The model list could not be read.' } });
+        return;
+      }
+
+      const models = response.models;
+      const chat = models.filter((m) => m.kind === 'chat');
+      set({
+        modelCatalog: models,
+        modelCatalogProvider: provider,
+        keyTest: {
+          state: 'ok',
+          message: `Key verified — ${chat.length} chat model${chat.length === 1 ? '' : 's'} available.`,
+        },
+      });
+
+      // A saved model the key cannot actually call is the failure this feature
+      // exists to prevent, so correct it rather than leaving it to fail later.
+      const { model } = get();
+      if (chat.length > 0 && !chat.some((m) => m.id === model)) {
+        await get().setModel(chat[0].id);
+      }
+    } catch (err) {
+      set({ keyTest: { state: 'error', message: err instanceof Error ? err.message : String(err) } });
+    }
   },
 
   setModel: async (model) => {
@@ -175,6 +274,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     await get().save();
   },
 
+  setTestRail: async (testrail) => {
+    set({ testrail });
+    await get().save();
+  },
+
   setTestPersonality: async (testPersonality) => {
     set({ testPersonality });
     await get().save();
@@ -189,6 +293,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const {
       executionPresets: _executionPresets,
       loaded: _loaded,
+      // Session-only: the catalogue is re-verified against the live key rather
+      // than persisted, so a revoked key can never look valid on reload.
+      modelCatalog: _mc,
+      modelCatalogProvider: _mcp,
+      keyTest: _kt,
+      testApiKey: _tak,
       load: _load,
       setProvider: _sp,
       setApiKey: _sk,
@@ -204,6 +314,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       setAgentMode: _am,
       setPlanningMode: _pm,
       setWebhook: _sw,
+      setTestRail: _str,
       setTestPersonality: _tp,
       setCustomPersonalityPrompt: _cpp,
       saveExecutionPreset: _sep,
