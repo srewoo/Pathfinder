@@ -8,6 +8,7 @@
  */
 import type { Locator, LocatorTier } from '../locator';
 import { describeLocator, isTestabilityGap, locatorKey } from '../locator';
+import { isHashOnlySelector } from '../healing/class-stability';
 
 export interface HealEvent {
   at: number;
@@ -98,6 +99,15 @@ export interface TestabilityGap {
   urls: string[];
   /** How many steps depended on it — the priority signal. */
   usageCount: number;
+  /**
+   * The element could only be reached through build-generated class names
+   * (styled-components, emotion, CSS modules).
+   *
+   * Strictly worse than an ordinary structural gap: a hand-written CSS selector
+   * *might* survive the next release, a build hash will not. Reported separately
+   * so the remediation list leads with the certainties.
+   */
+  buildHashOnly: boolean;
 }
 
 export interface TestabilityReport {
@@ -140,6 +150,7 @@ export function buildTestabilityReport(usages: readonly LocatorUsage[]): Testabi
         locatorKey: key,
         urls: url ? [url] : [],
         usageCount: 1,
+        buildHashOnly: isHashOnlySelector(locator.structural?.css ?? ''),
       });
     }
   }
@@ -148,8 +159,11 @@ export function buildTestabilityReport(usages: readonly LocatorUsage[]): Testabi
   return {
     totalLocators: total,
     durableLocators: durable,
-    // Most-used gaps first: that ordering is the remediation plan.
-    gaps: [...gaps.values()].sort((a, b) => b.usageCount - a.usageCount),
+    // Build-hash gaps first, then most-used: that ordering is the remediation
+    // plan, and a guaranteed break outranks a merely likely one.
+    gaps: [...gaps.values()].sort(
+      (a, b) => Number(b.buildHashOnly) - Number(a.buildHashOnly) || b.usageCount - a.usageCount
+    ),
     score: total === 0 ? 1 : durable / total,
   };
 }
@@ -173,7 +187,8 @@ export function formatTestabilityReport(report: TestabilityReport): string {
   );
   for (const gap of report.gaps.slice(0, 25)) {
     const where = gap.urls.length ? ` — on ${gap.urls.slice(0, 3).join(', ')}` : '';
-    lines.push(`  • ${gap.target} (used by ${gap.usageCount} step(s))${where}`);
+    const hash = gap.buildHashOnly ? ' [generated class name — will break on the next build]' : '';
+    lines.push(`  • ${gap.target} (used by ${gap.usageCount} step(s))${where}${hash}`);
   }
   if (report.gaps.length > 25) {
     // Never let a cap read as "that was everything".

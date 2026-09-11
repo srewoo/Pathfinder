@@ -56,11 +56,26 @@ export type StepRunner = (step: ExecutionStep, tabId: number) => Promise<StepRes
  * non-reproducible; a caller that wants determinism supplies a healer that only
  * tries the deterministic tiers, or none at all.
  */
+/**
+ * Evidence about the failure that a healer may use.
+ *
+ * The executor already captures a screenshot at the exact moment a step fails —
+ * before healing perturbs the page — and previously only attached it to the
+ * report. Passing it here is what makes a vision healing tier possible at all.
+ *
+ * Optional throughout: a healer that ignores it behaves exactly as before.
+ */
+export interface HealContext {
+  /** Base64 PNG captured at the moment the step failed. */
+  screenshot?: string;
+}
+
 export type StepHealer = (
   step: ExecutionStep,
   error: string,
   tabId: number,
-  runner: StepRunner
+  runner: StepRunner,
+  context?: HealContext
 ) => Promise<HealOutcome>;
 
 /** Suggest an assertion for the state a step just produced. Null = none. */

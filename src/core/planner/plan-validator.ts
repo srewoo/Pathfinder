@@ -16,6 +16,12 @@ import { assessNavigationGrounding, isAbsoluteAppUrl, resolveNavigationTarget } 
 import { loadGraph } from '../explorer/interaction-graph';
 import { sendToContentScript } from '../../messaging/messenger';
 import { createLogger } from '../../utils/logger';
+import {
+  revealPrerequisites,
+  missingPrerequisites,
+  prerequisiteStep,
+  type MissingPrerequisite,
+} from '../test-gen/reveal-prerequisites';
 
 const log = createLogger('plan-validator');
 
@@ -56,6 +62,34 @@ export async function validateAndRepairPlan(
 
   const issues: ValidationIssue[] = [];
   const repairedSteps: ExecutionStep[] = [];
+
+  // ── Reveal prerequisites ──────────────────────────────────────────────────
+  //
+  // A field that only exists after a click is not a broken selector — it is a
+  // missing step. The live-DOM check below cannot tell those apart: the element
+  // genuinely is not there, so the selector "fails to resolve" and auto-repair
+  // goes looking for a semantic alternative that does not exist either. Naming
+  // the missing trigger is the only useful answer, and it has to be computed
+  // from the exploration graph rather than the page.
+  const currentNode = graph?.nodes.find((n) => n.url === snapshot?.url);
+  const prerequisites = revealPrerequisites(currentNode);
+  const gated = missingPrerequisites(steps, prerequisites);
+  for (const miss of gated) {
+    issues.push({
+      stepOrder: miss.stepOrder,
+      description: miss.message,
+      selector: miss.selector,
+    });
+  }
+  if (gated.length > 0) {
+    log.warn(
+      `Plan is missing ${gated.length} reveal prerequisite(s): ` +
+        gated.map((m) => `step ${m.stepOrder} needs "${m.prerequisite.triggerLabel}"`).join('; ')
+    );
+  }
+  // Selectors already explained by a missing prerequisite are not also reported
+  // as unresolvable — two issues for one cause reads as two problems.
+  const gatedSelectors = new Set(gated.map((m) => m.selector));
 
   for (const step of steps) {
     // A navigate step carries a URL, not a selector, so it was skipped entirely —
@@ -112,6 +146,14 @@ export async function validateAndRepairPlan(
       continue;
     }
 
+    // Already explained: the element is absent because a step is missing, not
+    // because the selector is wrong. Auto-repair would hunt for a semantic
+    // alternative that cannot exist and replace a correct selector with a guess.
+    if (gatedSelectors.has(step.selector)) {
+      repairedSteps.push(step);
+      continue;
+    }
+
     // Check if any comma-separated fallback selector matches an element on the page.
     // First try a live DOM querySelector (most reliable), then fall back to snapshot matching.
     const primarySelectors = step.selector.split(',').map((s) => s.trim()).filter(Boolean);
@@ -148,6 +190,19 @@ export async function validateAndRepairPlan(
     }
   }
 
+  // ── Insert the missing reveal steps ──────────────────────────────────────
+  //
+  // Reported AND repaired, which is the same choice this module already makes
+  // for an unresolvable navigate target: "repairing it here is cheaper than
+  // failing the run". The difference from a selector guess is that nothing is
+  // being guessed — the trigger and its selector were observed during
+  // exploration, so the inserted step is as grounded as the rest of the plan.
+  //
+  // A prerequisite that cannot be turned into a step stays reported and
+  // unrepaired, so `valid` goes false and the caller is told what is missing
+  // rather than handed a plan that will fail on a missing element.
+  const withPrerequisites = insertPrerequisiteSteps(repairedSteps, gated, issues);
+
   const unrepairedCount = issues.filter((i) => !i.fixedSelector).length;
   if (issues.length > 0) {
     log.info(`Plan validation: ${issues.length} issues (${issues.length - unrepairedCount} repaired, ${unrepairedCount} unresolved)`);
@@ -156,7 +211,7 @@ export async function validateAndRepairPlan(
   return {
     valid: unrepairedCount === 0,
     issues,
-    repairedSteps,
+    repairedSteps: withPrerequisites,
   };
 }
 
@@ -277,3 +332,46 @@ const COMMON_WORDS = new Set([
   'enter', 'open', 'close', 'submit', 'check', 'uncheck', 'select',
   'the', 'and', 'for', 'with', 'into', 'that', 'this', 'step', 'page',
 ]);
+
+/**
+ * Put each missing trigger step immediately before the step that needs it.
+ *
+ * Orders are renumbered sequentially afterwards so the plan stays contiguous;
+ * this runs at plan time, before any resume offset exists, so renumbering
+ * cannot disturb a resumed run.
+ */
+function insertPrerequisiteSteps(
+  steps: readonly ExecutionStep[],
+  gated: readonly MissingPrerequisite[],
+  issues: ValidationIssue[]
+): ExecutionStep[] {
+  if (gated.length === 0) return [...steps];
+
+  // One insertion per distinct trigger: a single click reveals the whole form,
+  // so inserting it per gated field would click it two or three times.
+  const inserted = new Set<string>();
+  const out: ExecutionStep[] = [];
+
+  for (const step of steps) {
+    const miss = gated.find((m) => m.stepOrder === step.order);
+    if (miss) {
+      const key = miss.prerequisite.triggerSelector ?? miss.prerequisite.tabUrl ?? '';
+      if (!inserted.has(key)) {
+        const prereqStep = prerequisiteStep(miss, step.order);
+        if (prereqStep) {
+          inserted.add(key);
+          out.push(prereqStep);
+          issues.push({
+            stepOrder: step.order,
+            description: `inserted "${prereqStep.description}" — ${miss.selector} does not exist until then`,
+            selector: miss.selector,
+            fixedSelector: prereqStep.selector ?? prereqStep.value ?? '',
+          });
+        }
+      }
+    }
+    out.push(step);
+  }
+
+  return out.map((step, index) => ({ ...step, order: index + 1 }));
+}

@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>Checkout</title>
+<h1>Checkout</h1>
+<!-- Seeded defect: renamed id and testid. The accessible name is unchanged, so
+     healing has a legitimate route to it — which is the point of the scenario. -->
+<button id="place-order" data-testid="place-order">Place order</button>
+<p id="order-placed" hidden>Order placed</p>
+<script>
+  document.getElementById('place-order').addEventListener('click', function () {
+    document.getElementById('order-placed').hidden = false;
+  });
+</script>

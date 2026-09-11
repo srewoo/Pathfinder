@@ -3,6 +3,7 @@ import type { CrawledDocument, CrawlProgress } from '../../storage/schemas';
 import { documentDB, vectorDB } from '../../storage/indexed-db';
 import { sendToBackground } from '../../messaging/messenger';
 import { exportKnowledge, importKnowledge } from '../../storage/knowledge-export';
+import type { KnowledgeQueryResult } from '../../core/knowledge/knowledge-query';
 
 interface KnowledgeState {
   documents: CrawledDocument[];
@@ -25,6 +26,19 @@ interface KnowledgeState {
   /** Set when a crawl just finished — drives the "Continue → Explore" hand-off banner. */
   justCompleted: { docCount: number; vectorCount: number } | null;
 
+  /** Free-text query against the indexed corpus. */
+  searchQuery: string;
+  /** Evidence from the last query — passages, sources, ranks and crawl dates. */
+  searchResult: KnowledgeQueryResult | null;
+  isSearching: boolean;
+  /**
+   * Only for failures that prevented the query from running at all (no key, no
+   * background). A query that ran and matched nothing is a RESULT, reported
+   * through `searchResult.outcome` — conflating the two is how "the docs do not
+   * cover this" ends up looking like a broken feature.
+   */
+  searchError: string | null;
+
   setCrawlUrl: (url: string) => void;
   setRenderJavaScript: (render: boolean) => void;
   startCrawl: () => Promise<void>;
@@ -34,6 +48,8 @@ interface KnowledgeState {
   setCrawlComplete: (docCount: number, vectorCount: number, skippedCount: number) => void;
   setCrawlError: (error: string) => void;
   dismissCompletion: () => void;
+  setSearchQuery: (query: string) => void;
+  runSearch: () => Promise<void>;
   exportKnowledgeBase: () => Promise<void>;
   importKnowledgeBase: (file: File) => Promise<void>;
 }
@@ -50,6 +66,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   error: null,
   exportImportError: null,
   justCompleted: null,
+  searchQuery: '',
+  searchResult: null,
+  isSearching: false,
+  searchError: null,
 
   setCrawlUrl: (url) => set({ crawlUrl: url }),
 
@@ -91,6 +111,29 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   setCrawlError: (error) => set({ isCrawling: false, error }),
 
   dismissCompletion: () => set({ justCompleted: null }),
+
+  setSearchQuery: (searchQuery) => set({ searchQuery }),
+
+  runSearch: async () => {
+    const query = get().searchQuery.trim();
+    if (!query) return;
+    set({ isSearching: true, searchError: null });
+    const resp = await sendToBackground<{
+      success: boolean;
+      error?: string;
+      result?: KnowledgeQueryResult;
+    }>({ type: 'QUERY_KNOWLEDGE', payload: { query } });
+
+    if (!resp?.success || !resp.result) {
+      set({
+        isSearching: false,
+        searchError: resp?.error ?? 'The knowledge query did not complete.',
+        searchResult: null,
+      });
+      return;
+    }
+    set({ isSearching: false, searchResult: resp.result });
+  },
 
   exportKnowledgeBase: async () => {
     set({ isExporting: true, exportImportError: null });

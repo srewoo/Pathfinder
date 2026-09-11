@@ -1,4 +1,5 @@
 import type {
+  AIProvider,
   InteractiveElement,
   FormField,
   CrawlProgress,
@@ -6,6 +7,26 @@ import type {
   ExplorationCoverage,
   PageSnapshot,
 } from '../storage/schemas';
+
+
+/**
+ * What an analysis report actually describes.
+ *
+ * Reports used to arrive with no identity at all, so a slow result for one app
+ * could be displayed as the current result for another. Keying on this — and
+ * echoing the originating `requestId` — is what makes a late or concurrent
+ * completion land in its own place instead of overwriting someone else's.
+ */
+export interface AnalysisScope {
+  /** Origin of the app the report is about. */
+  origin?: string;
+  /** Run the report was computed from, where one applies. */
+  runId?: string;
+  /** The exact page inspected. Accessibility is per-page, not per-app. */
+  pageUrl?: string;
+  /** Echoes the request that asked for this. Absent for an auto-run. */
+  requestId?: string;
+}
 
 // ─── Background → Content Script messages ───────────────────────────────────
 
@@ -19,6 +40,7 @@ export type ContentScriptMessage =
   | { type: 'WAIT_FOR_IDLE'; settleMs?: number }
   | { type: 'DETECT_FORM_MESSAGES' }
   | { type: 'GET_PAGE_METADATA' }
+  | { type: 'GET_FRAME_COVERAGE' }
   | { type: 'DETECT_MODAL' }
   | { type: 'GET_PAGE_ACTIONS' }
   | { type: 'GET_DATA_TABLES' }
@@ -46,6 +68,7 @@ export type ContentScriptResponse =
   | { type: 'IDLE_READY' }
   | { type: 'FORM_MESSAGES'; payload: { hasError: boolean; hasSuccess: boolean; message?: string; selectors?: string[] } }
   | { type: 'PAGE_METADATA'; payload: { breadcrumb?: string; headings: string[] } }
+  | { type: 'FRAME_COVERAGE'; payload: { frames: import('../storage/schemas').UnscannedFrame[]; omitted: number } }
   | { type: 'MODAL_DETECTED'; payload: { found: boolean; title?: string; content?: string; formFields?: import('../storage/schemas').FormField[] } }
   | { type: 'PAGE_ACTIONS'; payload: import('../storage/schemas').PageAction[] }
   | { type: 'DATA_TABLES'; payload: import('../storage/schemas').DataTable[] }
@@ -75,6 +98,16 @@ export type BackgroundMessage =
       };
     }
   | { type: 'STOP_CRAWL' }
+  | {
+      /**
+       * Ask the knowledge base a question and get its evidence back.
+       *
+       * Handled in the background rather than the panel because retrieval needs
+       * the vector index and an embedding client, and the panel has neither.
+       */
+      type: 'QUERY_KNOWLEDGE';
+      payload: { query: string; topK?: number; filterUrl?: string };
+    }
   | { type: 'START_EXPLORATION'; payload: { depth: number; singlePageOnly?: boolean; singlePageStrict?: boolean; includeDangerous?: boolean; submitForms?: boolean; freshRescan?: boolean } }
   | { type: 'STOP_EXPLORATION' }
   | { type: 'STOP_TESTS' }
@@ -84,6 +117,15 @@ export type BackgroundMessage =
   | { type: 'RUN_TEST'; payload: { testCaseId: string; targetOrigin?: string } }
   | { type: 'RUN_SELECTED_TESTS'; payload: { testCaseIds: string[]; concurrency?: number; targetOrigin?: string } }
   | { type: 'RUN_ALL_TESTS'; payload?: { rerunAll?: boolean; concurrency?: number; targetOrigin?: string } }
+  | {
+      type: 'CHECK_STABILITY';
+      payload: { testCaseId: string; attempts?: number; targetOrigin?: string };
+    }
+  | {
+      type: 'RESUME_TEST';
+      payload: { testCaseId: string; startFromStep: number; targetOrigin?: string };
+    }
+  | { type: 'LIST_MODELS'; payload: { provider: AIProvider; apiKey: string } }
   | { type: 'PREVIEW_TESTS'; payload: { tests: unknown[] } }
   | { type: 'EXPORT_PLANS' }
   | { type: 'IMPORT_TESTS'; payload: { tests: unknown[] } }
@@ -115,11 +157,11 @@ export type BackgroundMessage =
   // Webhook
   | { type: 'TEST_WEBHOOK'; payload: { url: string; headers?: Record<string, string> } }
   // Analysis features
-  | { type: 'GET_HAR_IMPACT'; payload?: { runId?: string } }
-  | { type: 'RUN_A11Y_AUDIT' }
-  | { type: 'VALIDATE_API_CONTRACTS'; payload?: { runId?: string } }
+  | { type: 'GET_HAR_IMPACT'; payload?: { runId?: string; requestId?: string } }
+  | { type: 'RUN_A11Y_AUDIT'; payload?: { requestId?: string } }
+  | { type: 'VALIDATE_API_CONTRACTS'; payload?: { runId?: string; requestId?: string } }
   /** What this session spent on AI calls, as an estimate from published prices. */
-  | { type: 'GET_COST_REPORT' }
+  | { type: 'GET_COST_REPORT'; payload?: { requestId?: string } }
   | { type: 'RESET_COST_COUNTERS' }
   /** Record the API shapes seen in the last run as the baseline to compare against. */
   | { type: 'CAPTURE_API_BASELINE' }
@@ -166,9 +208,29 @@ export type SidebarMessage =
   | { type: 'RECORDING_STARTED' }
   | { type: 'RECORDING_STOPPED'; payload: { actionCount: number } }
   // Analysis results
-  | { type: 'HAR_IMPACT_COMPLETE'; payload: { coveragePercent: number; totalEndpoints: number; gaps: number; report: string } }
-  | { type: 'A11Y_AUDIT_COMPLETE'; payload: { totalIssues: number; critical: number; serious: number; report: string } }
-  | { type: 'CONTRACT_VALIDATION_COMPLETE'; payload: { violations: number; errors: number; warnings: number; report: string } }
-  | { type: 'COST_REPORT_COMPLETE'; payload: { report: string } };
+  | {
+      type: 'HAR_IMPACT_COMPLETE';
+      payload: {
+        /** Absent when the inventory is empty — there is no coverage to report. */
+        coveragePercent?: number;
+        verifiedPercent?: number;
+        totalEndpoints: number;
+        verified: number;
+        exercised: number;
+        gaps: number;
+        inventorySource: 'observed-traffic' | 'specification';
+        report: string;
+        scope?: AnalysisScope;
+      };
+    }
+  | {
+      type: 'A11Y_AUDIT_COMPLETE';
+      payload: { totalIssues: number; critical: number; serious: number; report: string; scope?: AnalysisScope };
+    }
+  | {
+      type: 'CONTRACT_VALIDATION_COMPLETE';
+      payload: { violations: number; errors: number; warnings: number; report: string; scope?: AnalysisScope };
+    }
+  | { type: 'COST_REPORT_COMPLETE'; payload: { report: string; scope?: AnalysisScope } };
 
 export type AnyMessage = BackgroundMessage | ContentScriptMessage | SidebarMessage;

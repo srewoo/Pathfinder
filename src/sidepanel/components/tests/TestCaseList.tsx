@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { Play, Trash2, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import { Play, Trash2, ChevronDown, ChevronRight, RefreshCw, Repeat, Table2 } from 'lucide-react';
 import type { TestCase } from '../../../storage/schemas';
 import { Badge } from '../shared/Badge';
 import { StatusIndicator } from '../shared/StatusIndicator';
 import { Button } from '../shared/Button';
 import { StepConfidenceDot, StepConfidenceLegend } from '../shared/StepConfidence';
+import { summarizeGrounding } from '../../../core/test-gen/step-confidence';
 import { RetryTestModal } from './RetryTestModal';
-import type { LiveStepResult } from '../../stores/test-store';
+import { useTestStore, type LiveStepResult } from '../../stores/test-store';
 
 interface TestCaseListProps {
   testCases: TestCase[];
@@ -39,6 +40,7 @@ export function TestCaseList({
 }: TestCaseListProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [regenerateTarget, setRegenerateTarget] = useState<{id: string, name: string} | null>(null);
+  const { checkStability, setQuarantined, stabilitySummaries } = useTestStore();
   const [confirmingBulkDelete, setConfirmingBulkDelete] = useState(false);
 
   const toggle = (id: string) =>
@@ -149,6 +151,16 @@ export function TestCaseList({
                         {tc.executionPresetName}
                       </Badge>
                     )}
+                    {tc.dataSet && tc.dataSet.rows.length > 0 && (
+                      <Badge variant="neutral" className="flex-shrink-0">
+                        {tc.dataSet.rows.length} rows
+                      </Badge>
+                    )}
+                    {tc.quarantined && (
+                      <Badge variant="warning" className="flex-shrink-0">
+                        Quarantined
+                      </Badge>
+                    )}
                     {isExpanded ? (
                       <ChevronDown size={10} className="text-text-muted flex-shrink-0" />
                     ) : (
@@ -163,6 +175,14 @@ export function TestCaseList({
                       onClick={() => onRun(tc.id)}
                       disabled={runningTestIds.length > 0}
                       title="Run this test"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      icon={<Repeat size={10} />}
+                      onClick={() => checkStability(tc.id)}
+                      disabled={runningTestIds.length > 0}
+                      title="Run 3× and quarantine it if the outcome changes between runs"
                     />
                     <Button
                       variant="ghost"
@@ -195,6 +215,30 @@ export function TestCaseList({
                     {tc.startUrl && (
                       <p className="text-2xs text-text-muted font-mono mt-2 truncate">{tc.startUrl}</p>
                     )}
+
+                    {stabilitySummaries[tc.id] && (
+                      <p className="text-2xs text-text-muted mt-2">
+                        Stability: {stabilitySummaries[tc.id]}
+                      </p>
+                    )}
+
+                    {tc.quarantined && (
+                      <div className="mt-2 flex items-start justify-between gap-2 rounded-lg border border-warning/30 bg-warning/10 p-2.5">
+                        <p className="text-2xs text-warning-text">
+                          Excluded from suite runs — this test produced different outcomes across
+                          identical runs. Running it directly still works.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setQuarantined(tc.id, false)}
+                          className="text-2xs text-text-muted hover:text-text-primary flex-shrink-0"
+                        >
+                          Release
+                        </button>
+                      </div>
+                    )}
+
+                    <DataSetEditor testCase={tc} />
 
                     {tc.setupSteps && tc.setupSteps.length > 0 && (
                       <div className="mt-2 rounded-lg border border-info/20 bg-info/5 p-2.5">
@@ -231,8 +275,34 @@ export function TestCaseList({
                     {tc.steps && tc.steps.length > 0 && (
                       <>
                         {tc.stepConfidence && tc.stepConfidence.length > 0 && (
-                          <div className="mt-2">
+                          <div className="mt-2 space-y-1">
                             <StepConfidenceLegend confidences={tc.stepConfidence} />
+                            {(() => {
+                              // Counted, not just dotted. "Every step here is a
+                              // guess" was visible only to someone reading each
+                              // dot individually.
+                              const grounding = summarizeGrounding(tc.stepConfidence);
+                              return grounding.allInferred ? (
+                                <p className="text-2xs text-warning-text">
+                                  No step targets an element exploration recorded. If this fails,
+                                  it is likely the test, not the app — explore this page and
+                                  regenerate.
+                                </p>
+                              ) : (
+                                <>
+                                  <p className="text-2xs text-text-muted">{grounding.label}</p>
+                                  {/* Kept separate from element grounding: a
+                                      test can find every control and still be
+                                      asserting an outcome nobody documented. */}
+                                  {grounding.noDocumentationSupport && (
+                                    <p className="text-2xs text-text-muted">
+                                      No documentation backs this test's expectations — they were
+                                      inferred from what the app did, not from what it should do.
+                                    </p>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </div>
                         )}
                         <ol className="mt-1.5 space-y-0.5">
@@ -269,6 +339,87 @@ export function TestCaseList({
           }
         }}
       />
+    </div>
+  );
+}
+
+
+/**
+ * Paste CSV to run this test once per row.
+ *
+ * Parse errors are rendered here rather than swallowed: the parser is
+ * deliberately strict (a column name that is not a valid placeholder would
+ * silently type "{{user email}}" into a field), and strictness that fails
+ * quietly is indistinguishable from a broken feature.
+ */
+function DataSetEditor({ testCase }: { testCase: TestCase }) {
+  const { attachDataSet, clearDataSet, datasetErrors } = useTestStore();
+  const [open, setOpen] = useState(false);
+  const [csv, setCsv] = useState(() =>
+    testCase.dataSet
+      ? [testCase.dataSet.columns.join(','), ...testCase.dataSet.rows.map((r) => r.join(','))].join('\n')
+      : ''
+  );
+  const errors = datasetErrors[testCase.id] ?? [];
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 text-2xs text-text-muted hover:text-text-primary"
+      >
+        <Table2 size={10} />
+        Test data (CSV)
+        {testCase.dataSet ? ` — ${testCase.dataSet.rows.length} rows` : ''}
+      </button>
+
+      {open && (
+        <div className="mt-1.5 space-y-1.5">
+          <textarea
+            value={csv}
+            onChange={(e) => setCsv(e.target.value)}
+            rows={4}
+            placeholder={'email,password\na@b.com,secret\nc@d.com,hunter2'}
+            className="w-full bg-surface-3 border border-border rounded-lg px-2 py-1.5 text-2xs text-text-primary placeholder-text-muted outline-none focus:border-primary transition-colors resize-none font-mono"
+          />
+          <p className="text-2xs text-text-muted">
+            First row is the header. Reference a column in any step value as{' '}
+            <span className="font-mono">{'{{column}}'}</span>.
+          </p>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="secondary"
+              size="xs"
+              disabled={!csv.trim()}
+              onClick={() => attachDataSet(testCase.id, csv)}
+            >
+              Attach
+            </Button>
+            {testCase.dataSet && (
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => {
+                  setCsv('');
+                  void clearDataSet(testCase.id);
+                }}
+              >
+                Remove
+              </Button>
+            )}
+          </div>
+          {errors.length > 0 && (
+            <ul className="space-y-0.5">
+              {errors.map((e, i) => (
+                <li key={i} className="text-2xs text-error-text">
+                  • {e}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

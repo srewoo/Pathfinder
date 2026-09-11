@@ -59,7 +59,8 @@ export function createAiExecutionServices(
   const heal: StepHealer | undefined =
     opts.aiHealing === false
       ? undefined
-      : (step, error, tabId, runner) => healStep(step, error, tabId, aiClient, runner);
+      : (step, error, tabId, runner, context) =>
+          healStep(step, error, tabId, aiClient, runner, context);
 
   const suggestAssertion: AssertionSuggester | undefined = opts.aiAssertions
     ? async (tabId, step, previousUrl) => {

@@ -4,6 +4,15 @@ import type { TestCase, TestResult, Flow } from '../../storage/schemas';
 import { testCaseDB, testResultDB } from '../../storage/indexed-db';
 import { getAllFlows } from '../../core/flow/flow-store';
 import { createUserTestCase } from '../../core/test-gen/test-generator';
+import { parseDataSet } from '../../core/test-gen/dataset';
+import { settingsStorage } from '../../storage/chrome-storage';
+import { createTestRailClient } from '../../core/integrations/testrail-client';
+import {
+  caseIdFromTestCaseId,
+  importRunAsTestCases,
+  pushResultsToTestRail,
+  testRailConfigFrom,
+} from '../../core/integrations/testrail-sync';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('test-store');
@@ -42,6 +51,17 @@ interface TestState {
   error: string | null;
   /** When set, rewrite the explored app's origin to this URL before running tests. */
   targetOrigin: string;
+  /**
+   * Why a pasted CSV was rejected, keyed by test case id.
+   *
+   * Rendered next to the input: strict validation that fails silently is
+   * indistinguishable from a broken feature.
+   */
+  datasetErrors: Record<string, string[] | undefined>;
+  /** Latest stability-gate verdict per test case, for display. */
+  stabilitySummaries: Record<string, string | undefined>;
+  /** Outcome of the last TestRail import or push, for display. */
+  testRailStatus: { message: string; failures: string[] } | null;
 
   loadAll: () => Promise<void>;
   addUserTest: (title: string, description: string, options?: { type?: 'positive' | 'negative' | 'edge'; steps?: string[]; startUrl?: string; executionPresetId?: string }) => Promise<void>;
@@ -52,6 +72,14 @@ interface TestState {
   regenerateTestCase: (testCaseId: string, additionalContext: string) => Promise<void>;
   importTests: (tests: unknown[], options?: { runAfterImport?: boolean }) => Promise<void>;
   setTargetOrigin: (url: string) => void;
+  attachDataSet: (testCaseId: string, csv: string) => Promise<void>;
+  clearDataSet: (testCaseId: string) => Promise<void>;
+  setQuarantined: (testCaseId: string, value: boolean) => Promise<void>;
+  checkStability: (testCaseId: string, attempts?: number) => Promise<void>;
+  resumeTest: (testCaseId: string, startFromStep: number) => Promise<void>;
+  importFromTestRail: (runId: number) => Promise<void>;
+  setTestRailRunId: (runId: number) => Promise<void>;
+  pushResultsToTestRail: (runId: number) => Promise<void>;
   runTest: (testCaseId: string) => Promise<void>;
   runSelectedTests: (testCaseIds: string[]) => Promise<void>;
   runAllTests: (options?: { rerunAll?: boolean }) => Promise<void>;
@@ -93,8 +121,213 @@ export const useTestStore = create<TestState>((set, get) => ({
   isExpanding: false,
   error: null,
   targetOrigin: '',
+  datasetErrors: {},
+  stabilitySummaries: {},
+  testRailStatus: null,
 
   setTargetOrigin: (url) => set({ targetOrigin: url }),
+
+  /**
+   * Pull a TestRail run's cases in as Pathfinder test cases.
+   *
+   * Called from the side panel rather than the worker: this is `fetch` plus an
+   * IndexedDB write, and routing it through a message would add a hop for no
+   * capability. The host permission is requested first — the user grants their
+   * own TestRail instance, not a blanket origin.
+   */
+  importFromTestRail: async (runId) => {
+    set({ error: null, testRailStatus: null, isImporting: true });
+    try {
+      const settings = await settingsStorage.get();
+      const config = testRailConfigFrom(settings);
+      if (!config) {
+        set({ error: 'Add your TestRail host, email and API key in Settings first.' });
+        return;
+      }
+      if (!(await hasPermissionFor([config.host]))) {
+        const granted = await requestPermissionFor([config.host]);
+        if (!granted) {
+          set({ error: `Permission to reach ${config.host} was declined.` });
+          return;
+        }
+      }
+
+      const client = createTestRailClient(config);
+      const imported = importRunAsTestCases(await client.getTests(runId), runId);
+      if (imported.length === 0) {
+        set({ testRailStatus: { message: `Run ${runId} has no tests.`, failures: [] } });
+        return;
+      }
+
+      await Promise.all(imported.map((tc) => testCaseDB.put(tc)));
+      await get().setTestRailRunId(runId);
+      await get().loadAll();
+      set({
+        testRailStatus: {
+          message: `Imported ${imported.length} case(s) from run ${runId}.`,
+          failures: [],
+        },
+      });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      set({ isImporting: false });
+    }
+  },
+
+  /**
+   * Push the current results back to a TestRail run.
+   *
+   * A partial push is reported in full: knowing that 48 of 50 landed, and which
+   * two did not, is recoverable. A silent partial push is not.
+   */
+  pushResultsToTestRail: async (runId) => {
+    set({ error: null, testRailStatus: null });
+    try {
+      const settings = await settingsStorage.get();
+      const config = testRailConfigFrom(settings);
+      if (!config) {
+        set({ error: 'Add your TestRail host, email and API key in Settings first.' });
+        return;
+      }
+      if (!(await hasPermissionFor([config.host]))) {
+        const granted = await requestPermissionFor([config.host]);
+        if (!granted) {
+          set({ error: `Permission to reach ${config.host} was declined.` });
+          return;
+        }
+      }
+
+      const summary = await pushResultsToTestRail({
+        runId,
+        results: get().results,
+        client: createTestRailClient(config),
+        caseIdFor: (r) => caseIdFromTestCaseId(r.testCaseId),
+      });
+
+      await get().setTestRailRunId(runId);
+      set({
+        testRailStatus: {
+          message: `Pushed ${summary.pushed} result(s), attached ${summary.attached} screenshot(s).`,
+          failures: summary.failures.map((f) =>
+            f.caseId ? `C${f.caseId}: ${f.error}` : f.error
+          ),
+        },
+      });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  /**
+   * Re-run a test from a given step.
+   *
+   * Uses the same live-progress plumbing as a normal single-test run, so the UI
+   * behaves identically; only the starting point differs.
+   */
+  resumeTest: async (testCaseId, startFromStep) => {
+    set({ error: null });
+    const resp = await sendToBackground<{ success: boolean; error?: string }>({
+      type: 'RESUME_TEST',
+      payload: { testCaseId, startFromStep, targetOrigin: get().targetOrigin || undefined },
+    });
+    if (!resp?.success) set({ error: resp?.error ?? 'Failed to resume the test' });
+  },
+
+  /** Remember the run so the next import or push does not re-ask. */
+  setTestRailRunId: async (runId: number) => {
+    const settings = await settingsStorage.get();
+    if (!settings.testrail) return;
+    await settingsStorage.save({ ...settings, testrail: { ...settings.testrail, lastRunId: runId } });
+  },
+
+
+  /**
+   * Attach pasted CSV as this test's data set.
+   *
+   * Parse errors are stored, not thrown: the user pasted a sheet and needs to
+   * see which line or column is wrong, in place.
+   */
+  attachDataSet: async (testCaseId, csv) => {
+    const { dataSet, errors } = parseDataSet(csv);
+    if (!dataSet) {
+      set((s) => ({ datasetErrors: { ...s.datasetErrors, [testCaseId]: errors } }));
+      return;
+    }
+    const testCase = get().testCases.find((tc) => tc.id === testCaseId);
+    if (!testCase) return;
+
+    const updated: TestCase = { ...testCase, dataSet };
+    await testCaseDB.put(updated);
+    set((s) => ({
+      testCases: s.testCases.map((tc) => (tc.id === testCaseId ? updated : tc)),
+      datasetErrors: { ...s.datasetErrors, [testCaseId]: undefined },
+    }));
+  },
+
+  clearDataSet: async (testCaseId) => {
+    const testCase = get().testCases.find((tc) => tc.id === testCaseId);
+    if (!testCase) return;
+
+    const updated: TestCase = { ...testCase };
+    delete updated.dataSet;
+    await testCaseDB.put(updated);
+    set((s) => ({
+      testCases: s.testCases.map((tc) => (tc.id === testCaseId ? updated : tc)),
+      datasetErrors: { ...s.datasetErrors, [testCaseId]: undefined },
+    }));
+  },
+
+  setQuarantined: async (testCaseId, value) => {
+    const testCase = get().testCases.find((tc) => tc.id === testCaseId);
+    if (!testCase) return;
+
+    const updated: TestCase = { ...testCase, quarantined: value };
+    await testCaseDB.put(updated);
+    set((s) => ({
+      testCases: s.testCases.map((tc) => (tc.id === testCaseId ? updated : tc)),
+    }));
+  },
+
+  /**
+   * Run a test several times back to back and quarantine it if it disagrees
+   * with itself.
+   *
+   * The gate runs in the background worker — it drives real execution, which
+   * the side panel cannot do — so this action only dispatches and applies the
+   * verdict it gets back.
+   */
+  checkStability: async (testCaseId, attempts) => {
+    set((s) => ({
+      error: null,
+      runningTestIds: [...s.runningTestIds, testCaseId],
+    }));
+    try {
+      const resp = await sendToBackground<{
+        success: boolean;
+        error?: string;
+        verdict?: string;
+        summary?: string;
+        quarantine?: boolean;
+      }>({ type: 'CHECK_STABILITY', payload: { testCaseId, attempts } });
+
+      if (!resp?.success) {
+        set({ error: resp?.error ?? 'Stability check failed' });
+        return;
+      }
+      if (resp.quarantine) await get().setQuarantined(testCaseId, true);
+      set((s) => ({
+        stabilitySummaries: { ...s.stabilitySummaries, [testCaseId]: resp.summary },
+      }));
+      await get().loadAll();
+    } catch (err) {
+      set({ error: String(err) });
+    } finally {
+      set((s) => ({
+        runningTestIds: s.runningTestIds.filter((id) => id !== testCaseId),
+      }));
+    }
+  },
 
   loadAll: async () => {
     const [testCases, results, flows] = await Promise.all([

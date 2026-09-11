@@ -23,7 +23,49 @@ export interface EvalQuery {
 export interface EvalDataset {
   name: string;
   description?: string;
+  /**
+   * Version of the labelled corpus these queries were labelled against.
+   *
+   * A metric is comparable only to another taken on the same corpus, so
+   * changing a document means bumping this and re-measuring rather than
+   * comparing across the change.
+   */
+  version?: string;
   queries: EvalQuery[];
+}
+
+/**
+ * Where the numbers came from, and therefore what they are worth.
+ *
+ * `synthetic-index` is a hand-built index whose vectors were chosen to make
+ * the ranking arithmetic checkable. It tests the retrieval mechanics and says
+ * nothing about semantic quality — a stubbed embedder cannot tell you whether
+ * a real model finds the right passage.
+ *
+ * `actual-embeddings` is the real embedding model over the labelled corpus.
+ * Only this tier supports a claim about retrieval QUALITY, and it needs
+ * credentials, so it is reported as SKIPPED when they are absent — never as a
+ * pass, and never quietly omitted.
+ */
+export type EvalTier = 'synthetic-index' | 'actual-embeddings';
+
+export interface EvalProvenance {
+  tier: EvalTier;
+  /**
+   * The embedding model identifier. On the synthetic tier this is the literal
+   * string 'synthetic' rather than a model name, because no model ran.
+   */
+  embeddingModel: string;
+  corpus: { name: string; version: string; queries: number };
+  /** Queries actually evaluated. Differs from `corpus.queries` if any errored. */
+  sampleSize: number;
+}
+
+/** A tier that could not run. Never a pass, never silent. */
+export interface SkippedEval {
+  skipped: true;
+  tier: EvalTier;
+  reason: string;
 }
 
 export interface QueryMetrics {
@@ -37,6 +79,8 @@ export interface QueryMetrics {
 }
 
 export interface AggregateMetrics {
+  /** What produced these numbers. Required — a metric without it is unreadable. */
+  provenance: EvalProvenance;
   /** Mean precision across all queries. */
   precisionAtK: number;
   /** Mean recall across all queries. */
@@ -55,6 +99,14 @@ export interface RunEvalOptions extends SearchOptions {
   /** Top-K results to consider when computing metrics. Default 5. */
   k?: number;
   aiClient: AIClientInterface;
+  /**
+   * Which tier this run is. Required, because the same code path produces both
+   * a mechanical check and a quality measurement, and only the caller knows
+   * which one it set up.
+   */
+  tier: EvalTier;
+  /** Model identifier for the report. 'synthetic' on the synthetic tier. */
+  embeddingModel: string;
 }
 
 export async function runRetrievalEval(
@@ -81,6 +133,16 @@ export async function runRetrievalEval(
   }
 
   return {
+    provenance: {
+      tier: opts.tier,
+      embeddingModel: opts.embeddingModel,
+      corpus: {
+        name: dataset.name,
+        version: dataset.version ?? 'unversioned',
+        queries: dataset.queries.length,
+      },
+      sampleSize: perQuery.length,
+    },
     k,
     precisionAtK: mean(perQuery.map((q) => q.precisionAtK)),
     recallAtK: mean(perQuery.map((q) => q.recallAtK)),
@@ -146,9 +208,69 @@ function mean(xs: number[]): number {
   return xs.reduce((a, b) => a + b, 0) / xs.length;
 }
 
+/**
+ * Run the actual-embedding tier, or say why it did not run.
+ *
+ * The tier that supports a semantic-quality claim needs a real embedding model,
+ * which needs credentials this repository does not and must not carry. The
+ * failure mode worth designing against is a run that quietly falls back to the
+ * synthetic tier and reports its numbers as quality — so absence of credentials
+ * returns a SkippedEval and never a metric.
+ */
+export async function runActualEmbeddingEval(
+  dataset: EvalDataset,
+  opts: {
+    aiClient?: AIClientInterface;
+    embeddingModel?: string;
+    k?: number;
+  } & Omit<SearchOptions, 'topK'>
+): Promise<AggregateMetrics | SkippedEval> {
+  if (!opts.aiClient) {
+    return {
+      skipped: true,
+      tier: 'actual-embeddings',
+      reason: 'no embedding client configured',
+    };
+  }
+  if (!opts.embeddingModel) {
+    return {
+      skipped: true,
+      tier: 'actual-embeddings',
+      reason: 'no embedding model identified — a metric that cannot name its model is not comparable',
+    };
+  }
+
+  try {
+    return await runRetrievalEval(dataset, {
+      ...opts,
+      aiClient: opts.aiClient,
+      tier: 'actual-embeddings',
+      embeddingModel: opts.embeddingModel,
+    });
+  } catch (err) {
+    return {
+      skipped: true,
+      tier: 'actual-embeddings',
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** A skipped tier, rendered so it cannot be mistaken for a result. */
+export function formatSkipped(s: SkippedEval): string {
+  return `Retrieval eval — ${s.tier}: SKIPPED (${s.reason}). No quality claim can be made from this run.`;
+}
+
 export function formatMetricsTable(m: AggregateMetrics): string {
+  const { provenance: p } = m;
   const lines = [
-    `Retrieval eval — k=${m.k}, ${m.perQuery.length} queries`,
+    `Retrieval eval — ${p.tier}, model ${p.embeddingModel}`,
+    `Corpus ${p.corpus.name} ${p.corpus.version} · ${p.sampleSize} of ${p.corpus.queries} queries evaluated`,
+    p.tier === 'synthetic-index'
+      ? 'Mechanics only: a synthetic index tests ranking arithmetic, not semantic quality.'
+      : 'Semantic quality against the labelled corpus.',
+    '',
+    `k=${m.k}, ${m.perQuery.length} queries`,
     `  P@k:   ${m.precisionAtK.toFixed(3)}`,
     `  R@k:   ${m.recallAtK.toFixed(3)}`,
     `  MRR:   ${m.mrr.toFixed(3)}`,

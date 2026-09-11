@@ -885,7 +885,9 @@ async function fetchBatchRenderedParallel(
 
   /** Wait for a free tab and return its ID. */
   async function acquireTab(): Promise<number> {
-    while (true) {
+    // Polls until a tab frees up; see the note in test-executor.ts on the
+    // `for (;;)` spelling.
+    for (;;) {
       for (const [tid, busy] of tabBusy) {
         if (!busy) {
           tabBusy.set(tid, true);

@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>Team</title>
+<h1>Team</h1>
+<button id="invite-member" data-testid="invite-member">Invite member</button>
+<div id="invite-modal" role="dialog" aria-modal="true" hidden>
+  <h2>Invite a member</h2>
+  <div id="invite-fields"></div>
+</div>
+<script>
+  document.getElementById('invite-member').addEventListener('click', function () {
+    // Seeded defect: the dialog opens empty, so nothing can be filled in.
+    document.getElementById('invite-modal').hidden = false;
+  });
+</script>

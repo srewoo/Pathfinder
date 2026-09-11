@@ -362,7 +362,13 @@ export function deriveConstraintTests(
 export async function saveConstraintTests(
   specs: ConstraintTestSpec[],
   sourceFlowId: string,
-  startUrl?: string
+  startUrl?: string,
+  /**
+   * The source flow's signature. Pinned on each test so a passing run stops
+   * counting as validation of the flow once the flow is re-learnt into a
+   * different shape.
+   */
+  flowSignature?: string
 ): Promise<TestCase[]> {
   const saved: TestCase[] = [];
   for (const spec of specs) {
@@ -372,6 +378,7 @@ export async function saveConstraintTests(
       description: spec.description,
       type: spec.type,
       sourceFlowId,
+      flowSignature,
       source: 'generated',
       steps: buildStepsFromSpec(spec),
       startUrl,

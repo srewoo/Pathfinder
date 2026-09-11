@@ -239,7 +239,15 @@ function CoverageBar({ coverage }: { coverage: ExplorationCoverage }) {
  *  links it discovered as next-step hints rather than coverage gaps. */
 function CoverageSummary({ coverage }: { coverage: ExplorationCoverage }) {
   const [showWarnings, setShowWarnings] = useState(false);
-  const clean = coverage.pagesFailed === 0 && coverage.brokenLinks === 0 && coverage.warnings.length === 0;
+  const frames = coverage.unsupported?.crossOriginFrames;
+  // A run that could not see into a third-party checkout is not a clean run.
+  // Without this the summary said "everything discovered was mapped" over a
+  // page whose entire payment step was unreachable.
+  const clean =
+    coverage.pagesFailed === 0 &&
+    coverage.brokenLinks === 0 &&
+    coverage.warnings.length === 0 &&
+    !frames;
   const { singlePage } = coverage;
   return (
     <div className="p-3 bg-surface-2 border border-border rounded-lg space-y-2">
@@ -269,6 +277,13 @@ function CoverageSummary({ coverage }: { coverage: ExplorationCoverage }) {
         <p className="text-2xs text-success-text">✓ Clean run — this page was mapped fully.</p>
       )}
       {clean && !singlePage && <p className="text-2xs text-success-text">✓ Clean run — everything discovered was mapped.</p>}
+      {frames && (
+        <p className="text-2xs text-warning-text">
+          {frames.frames} cross-origin frame{frames.frames === 1 ? '' : 's'} on {frames.pages} page
+          {frames.pages === 1 ? '' : 's'} could not be read — their contents are not covered, and
+          re-running will not reach them.
+        </p>
+      )}
       {coverage.warnings.length > 0 && (
         <div className="border-t border-border pt-1.5">
           <button

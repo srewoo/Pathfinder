@@ -179,6 +179,13 @@ CRITICAL RULES FOR SELECTORS — LOCATOR QUALITY:
   6. button[type="submit"], input[type="submit"] (form submission)
   7. .specific-semantic-class (only if stable, unique, and NOT a utility/Tailwind class)
   8. tag:nth-of-type(n) — LAST RESORT only when NO other attribute or identifier exists
+- **NEVER use build-generated class names — they change on every deploy and the test will break:**
+  styled-components (sc-1e593sq-0, beZfZu), emotion (css-1x2y3z), JSS (jss42),
+  CSS modules (Button_root__a1b2c). Prefer a class that reads as English and describes
+  purpose (btn-primary, nav-link). If an element's only classes are generated, use a
+  stable ancestor plus role or text instead of the class.
+- When several elements match, disambiguate by scoping to a stable ancestor or adding a
+  text filter — not by index.
 - **If the DOM context shows data-testid, data-test, data-cy, id, name, or aria-label attributes on an element, you MUST use those. Never ignore available stable attributes in favour of positional selectors.**
 
 STEP EFFICIENCY — REDUCING REDUNDANCY:
@@ -615,6 +622,34 @@ Respond with JSON:
 }`,
   },
 
+  visualHealing: {
+    version: '1.0',
+    system: `You locate a UI element in a screenshot and return CSS selectors for it.
+
+You are given a screenshot taken at the exact moment a test step failed, the
+step's intent, the selector that no longer matches, and the page's DOM.
+
+Return ONLY a JSON array of 1-3 CSS selector strings, best first. No prose.
+
+Rules:
+- The selector MUST exist in the DOM you are given. Never invent an attribute.
+- Prefer in this order: [data-testid] / [data-test] / [data-cy] -> #id -> [aria-label] -> [name] -> [placeholder] -> [role] -> a class that reads as English.
+- NEVER use build-generated class names — they change on every deploy: styled-components (sc-1e593sq-0, beZfZu), emotion (css-1x2y3z), JSS (jss42), CSS modules (Button_root__a1b2c).
+- NEVER use :has-text(), :contains(), or any Playwright/jQuery pseudo-selector — they throw SyntaxError in a browser.
+- Use the screenshot for what the DOM cannot tell you: which icon, which row, which of several identical-looking controls the step meant.
+- If the element is genuinely not visible in the screenshot, return [].`,
+    user: (description: string, failedSelector: string, error: string, domContext: string) => `
+The test step was: ${description}
+
+This selector no longer matches: ${failedSelector}
+Failure: ${error}
+
+Find the element in the screenshot that the step intended, then give selectors for it from this DOM:
+${domContext}
+
+Respond with a JSON array only, e.g. ["[aria-label='Share']", "button.share-action"]`,
+  },
+
   selectorHealing: {
     version: '3.0',
     system: `You are an expert at CSS selectors and DOM analysis.
@@ -625,6 +660,10 @@ CRITICAL: Only suggest selectors valid for document.querySelector():
 - NEVER suggest positional chain selectors like "div > div > div > span" or "div:nth-of-type(2) > div:nth-of-type(1)" — these are fragile and will break again
 - Use standard CSS: attribute selectors, :nth-of-type (only on semantic tags like li, tr, td — not on div/span)
 - Prefer in this order: #id → [data-testid] / [data-test] / [data-cy] → [aria-label] → [name] → [placeholder] → [role] → .unique-class → tag:nth-of-type(n)
+- NEVER suggest build-generated class names — they change on every deploy, so the healed
+  selector breaks again on the next build: styled-components (sc-1e593sq-0, beZfZu),
+  emotion (css-1x2y3z), JSS (jss42), CSS modules (Button_root__a1b2c). A class is only
+  usable if it reads as English and describes the element's purpose.
 - Check if the element is inside an iframe — if so, the selector must be valid inside the iframe's document
 - Look for ANY identifying attribute on the element or its nearest meaningful ancestor (form, section, nav, fieldset)
 

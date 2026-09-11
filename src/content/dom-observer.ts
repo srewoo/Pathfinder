@@ -59,15 +59,43 @@ export function installNetworkTracker(): void {
 
   // Intercept XMLHttpRequest
   const OrigXHR = window.XMLHttpRequest;
-  const origOpen = OrigXHR.prototype.open;
-  const origSend = OrigXHR.prototype.send;
+  // Annotated with the prototype method types so the captured references keep
+  // their OVERLOADS. Inferred, they collapse to a single widest signature, and
+  // forwarding the 2-argument `open` or a `Document` body then fails to
+  // typecheck even though both are legal calls.
+  const origOpen: XMLHttpRequest['open'] = OrigXHR.prototype.open;
+  const origSend: XMLHttpRequest['send'] = OrigXHR.prototype.send;
 
-  OrigXHR.prototype.open = function (this: XMLHttpRequest & { __pathfinder_url?: string }, ...args: any[]) {
+  /** The two fields the patch adds to each request it tracks. */
+  type TrackedXHR = XMLHttpRequest & { __pathfinder_url?: string; __pathfinder_tracked?: boolean };
+
+  // Signatures written out rather than widened to `any[]`. `open` is overloaded
+  // (2-arg and 5-arg forms), so `Parameters<typeof open>` resolves to only the
+  // widest one and is not assignable back to the property — the single
+  // optional-parameter form below satisfies both. Naming the parameters also
+  // makes the URL read below honest: it is the declared `url`, not `args[1]`
+  // asserted to be a string.
+  OrigXHR.prototype.open = function (
+    this: TrackedXHR,
+    method: string,
+    url: string | URL,
+    async?: boolean,
+    username?: string | null,
+    password?: string | null
+  ): void {
     this.__pathfinder_tracked = true;
-    this.__pathfinder_url = args[1] as string;
-    return origOpen.apply(this, args as any);
+    this.__pathfinder_url = String(url);
+    // Always forwarded in the 5-argument form. `Function.prototype.call` on an
+    // overloaded type only sees the last overload, so the 2-argument shape is
+    // not callable here — and `async ?? true` is not a behaviour change,
+    // because `open(method, url)` already defaults `async` to true. A caller
+    // that passed `false` still gets `false`.
+    origOpen.call(this, method, url, async ?? true, username, password);
   };
-  OrigXHR.prototype.send = function (this: XMLHttpRequest & { __pathfinder_url?: string }, ...args: any[]) {
+  OrigXHR.prototype.send = function (
+    this: TrackedXHR,
+    body?: Parameters<XMLHttpRequest['send']>[0]
+  ): void {
     if (this.__pathfinder_tracked) {
       const isCritical = !isAnalyticsRequest(this.__pathfinder_url ?? '');
       if (isCritical) _pendingCritical++;
@@ -75,7 +103,7 @@ export function installNetworkTracker(): void {
         if (isCritical) _pendingCritical--;
       }, { once: true });
     }
-    return origSend.apply(this, args as any);
+    return origSend.call(this, body);
   };
 }
 

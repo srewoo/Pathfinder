@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Save settings</title>
+<h1>Settings</h1>
+<form id="settings-form">
+  <label for="display-name">Display name</label>
+  <input id="display-name" name="displayName" data-testid="display-name" value="">
+  <button id="save-settings" data-testid="save-settings" type="submit">Save</button>
+</form>
+<p id="save-banner" hidden>Saved</p>
+<script>
+  var STORE = 'fixture.displayName';
+  document.getElementById('display-name').value = localStorage.getItem(STORE) || '';
+  document.getElementById('settings-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    // Correct: persist, then confirm.
+    localStorage.setItem(STORE, document.getElementById('display-name').value);
+    document.getElementById('save-banner').hidden = false;
+  });
+</script>

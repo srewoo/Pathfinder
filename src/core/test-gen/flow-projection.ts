@@ -140,6 +140,9 @@ export function projectFlowToTestCases(flow: Flow): Array<Omit<TestCase, 'status
       description: `${flow.description}${grounded}`.trim(),
       type: coverageTypeToTestType(flow.coverageType),
       sourceFlowId: flow.flowId,
+      // Pinned so a passing run stops counting as validation once the flow is
+      // re-learnt into a different shape.
+      flowSignature: flow.signature,
       source: 'generated',
       steps,
       stepConfidence,

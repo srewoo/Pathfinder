@@ -23,16 +23,25 @@ vi.mock('../../src/messaging/messenger', () => ({
   getActiveTabId: vi.fn().mockResolvedValue(1),
 }));
 
-vi.mock('../../src/core/explorer/page-scanner', () => {
+vi.mock('../../src/core/explorer/page-scanner', async (importActual) => {
+  // The union helper is the thing under test in the agent-mode cases below, so
+  // the REAL implementation is kept rather than stubbed — a stub would make
+  // those tests assert against themselves.
+  const actual = await importActual<typeof import('../../src/core/explorer/page-scanner')>();
   // The explorer calls partitionExplorationTargets; these tests drive
   // selectExplorationTargets. Delegating keeps one stub as the single source of
   // truth for "what is on this page" instead of two that can disagree.
   const selectExplorationTargets = vi.fn().mockReturnValue([]);
   return {
+  unionWithRevealCandidates: actual.unionWithRevealCandidates,
+  MAX_REVEAL_CANDIDATES_ADDED: actual.MAX_REVEAL_CANDIDATES_ADDED,
   scanPage: vi.fn().mockResolvedValue([]),
   scanFormFields: vi.fn().mockResolvedValue([]),
   scanPageLinks: vi.fn().mockResolvedValue([]),
   scanPageMetadata: vi.fn().mockResolvedValue({ headings: [] }),
+  // Cross-origin frame reporting: none by default, so these tests describe a
+  // page with nothing structurally out of reach.
+  scanUnscannedFrames: vi.fn().mockResolvedValue([]),
   // Returns the elements seen during the reveal sweep — an ARRAY, always.
   revealPageContent: vi.fn().mockResolvedValue([]),
   getPageSnapshot: vi.fn().mockResolvedValue({ url: START, title: 'Home' }),
@@ -150,6 +159,7 @@ function clickedSelectors(): string[] {
     .filter(([step]) => step?.action === 'click')
     .map(([step]) => step.selector ?? '');
 }
+const { getAgentActions } = await import('../../src/core/explorer/action-ranker');
 const graphMod = await import('../../src/core/explorer/interaction-graph');
 const checkpointStore = await import('../../src/storage/checkpoint-storage');
 const { createCheckpoint, hashOptions } = await import('../../src/core/explorer/exploration-checkpoint');
@@ -289,6 +299,123 @@ describe('exploreApp — single-page vs full-app coverage', () => {
     expect(clicked).toContain('#copy-all');      // revealed menu item
   }, 20000);
 
+  // Measured on a live login page: "Sign in with your username" is a plain
+  // <button type="button"> that swaps username/password into the page — no URL
+  // change, no dialog. The reveal pass kept only clickable elements, so the
+  // fields were discarded and generation invented a "username input field".
+  it('given a click that reveals form fields in place then they are recorded with their trigger', async () => {
+    const trigger = el({ selector: '#reveal-login', tag: 'button', text: 'Sign in with your username' });
+    vi.mocked(scanner.scanPage).mockResolvedValue([trigger]);
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([
+      { selector: '#reveal-login', text: 'Sign in with your username' } as never,
+    ]);
+    // Nothing before the click; the form exists only afterwards.
+    vi.mocked(scanner.scanFormFields)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        { selector: 'input[name="username"]', name: 'username', type: 'text', required: true } as never,
+        { selector: 'input[name="password"]', name: 'password', type: 'password', required: true } as never,
+      ]);
+
+    const { graph } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    expect(clickedSelectors()).toContain('#reveal-login');
+    const reveal = graph.nodes.find((n) => n.url === START)?.revealedForms?.[0];
+    expect(reveal).toBeDefined();
+    expect(reveal!.triggerSelector).toBe('#reveal-login');
+    expect(reveal!.formFields?.map((f) => f.selector)).toEqual([
+      'input[name="username"]',
+      'input[name="password"]',
+    ]);
+  }, 20000);
+
+  // The three scopes in the UI map to different option sets; the reveal capture
+  // must hold in all of them, since "This page only" on a login screen is the
+  // most common way anyone will hit this.
+  it.each([
+    ['This page only', { maxDepth: 0, maxPages: 1, reexplorePage: true, exhaustiveStartPage: true, fresh: false }],
+    ['From here outward', { maxDepth: 2, maxPages: 20, exhaustiveStartPage: true, fresh: true }],
+    ['Whole app', { maxDepth: 2, maxPages: 20, exhaustiveStartPage: false, fresh: true }],
+  ] as const)('given the %s scope then a click-revealed form is still captured', async (_name, opts) => {
+    const trigger = el({ selector: '#reveal-login', tag: 'button', text: 'Sign in with your username' });
+    vi.mocked(scanner.scanPage).mockResolvedValue([trigger]);
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([
+      { selector: '#reveal-login', text: 'Sign in with your username' } as never,
+    ]);
+    vi.mocked(scanner.scanFormFields)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        { selector: 'input[name="username"]', name: 'username', type: 'text', required: true } as never,
+      ]);
+
+    const { graph } = await exploreApp({
+      startUrl: START, agentMode: false, useDedicatedTab: false, ...opts,
+    });
+
+    const reveal = graph.nodes.find((n) => n.url === START)?.revealedForms?.[0];
+    expect(reveal?.triggerSelector).toBe('#reveal-login');
+    expect(reveal?.formFields?.[0].selector).toBe('input[name="username"]');
+  }, 30000);
+
+  // A tab used to be recorded as a label and a URL only: the explorer opened it,
+  // noted it existed, and navigated straight back out.
+  it('given a click that opens an in-page view then the contents of that view are captured', async () => {
+    const trigger = el({ selector: '#tab-profile', tag: 'button', text: 'Profile' });
+    vi.mocked(scanner.scanPage).mockResolvedValue([trigger]);
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([{ selector: '#tab-profile' } as never]);
+    // First snapshot = base page; after the click the URL gains a query param.
+    vi.mocked(scanner.getPageSnapshot)
+      .mockResolvedValueOnce({ url: START, title: 'Home' } as never)
+      .mockResolvedValue({ url: `${START}?tab=profile`, title: 'Home' } as never);
+    vi.mocked(scanner.scanFormFields)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        { selector: '#display-name', name: 'displayName', type: 'text', required: true } as never,
+      ]);
+
+    const { graph } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    const tab = graph.nodes.find((n) => n.url === START)?.tabs?.[0];
+    expect(tab).toBeDefined();
+    expect(tab!.formFields?.map((f) => f.selector)).toEqual(['#display-name']);
+  }, 20000);
+
+  it('given an in-page link then the view is opened and its contents captured', async () => {
+    vi.mocked(scanner.scanPage).mockResolvedValue([]);
+    vi.mocked(scanner.scanPageLinks).mockResolvedValue([
+      { url: `${START}?tab=billing`, text: 'Billing' } as never,
+    ]);
+    vi.mocked(scanner.scanFormFields)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        { selector: '#card', name: 'card', type: 'text', required: true } as never,
+      ]);
+
+    const { graph } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    const tab = graph.nodes.find((n) => n.url === START)?.tabs?.[0];
+    expect(tab?.label).toBe('Billing');
+    expect(tab?.formFields?.map((f) => f.selector)).toEqual(['#card']);
+  }, 20000);
+
+  it('given a click that reveals nothing new then no revealed form is recorded', async () => {
+    vi.mocked(scanner.scanPage).mockResolvedValue([el({ selector: '#noop', tag: 'button', text: 'Noop' })]);
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([{ selector: '#noop' } as never]);
+    vi.mocked(scanner.scanFormFields).mockResolvedValue([]);
+
+    const { graph } = await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+
+    expect(graph.nodes.find((n) => n.url === START)?.revealedForms).toBeUndefined();
+  }, 20000);
+
   it('given read-only default when a form is present then it is NOT submitted', async () => {
     vi.mocked(scanner.scanPage).mockResolvedValue([el({ selector: '#submit', tag: 'button', type: 'submit' })]);
     vi.mocked(scanner.scanFormFields).mockResolvedValue([
@@ -408,19 +535,20 @@ describe('exploreApp — fresh re-scan, stale pruning, change detection', () => 
     expect(vi.mocked(graphMod.saveGraphSnapshot)).toHaveBeenCalled(); // reversible
   });
 
-  it('given fresh=true and an unchanged structure then click/form interaction is SKIPPED', async () => {
+  // The skip-unchanged fast path is an interior-page optimisation (unit-tested
+  // in skip-unchanged.test.ts). The page the run was aimed at is exempt: a login
+  // screen's structure never varies, so it matched its stored fingerprint every
+  // run and was skipped without a single click — "explore does nothing".
+  it('given fresh=true and an unchanged START page then it is STILL interacted with', async () => {
     const elements = [el({ selector: '#open', text: 'New' })];
     const hash = computeStructureFingerprint(elements, []);
     vi.mocked(graphMod.loadGraph).mockResolvedValue(seedGraph([{ url: START, title: 'Home', structureHash: hash }]));
     vi.mocked(scanner.scanPage).mockResolvedValue(elements);
-    // If interaction ran, this target would be clicked.
     vi.mocked(scanner.selectExplorationTargets).mockReturnValue([{ selector: '#open' } as never]);
 
     await exploreApp({ startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false, fresh: true });
 
-    // No click action dispatched because the structure fingerprint matched.
-    const clicked = clickedSelectors().length > 0;
-    expect(clicked).toBe(false);
+    expect(clickedSelectors()).toContain('#open');
   });
 
   it('given re-explore of an existing page (maxDepth 0) then it refreshes that node WITHOUT re-walking or duplicating neighbors', async () => {
@@ -712,4 +840,97 @@ describe('exploreApp — never ends the session', () => {
     });
     expect(graph.edges.map((e) => e.to)).toContain(`${ORIGIN}/blog/logout-best-practices`);
   });
+});
+
+describe('agent mode cannot drop a reveal trigger', () => {
+  // The measured failure: the model's picks REPLACED the deterministic target
+  // list, so a `<button>` it did not happen to rank was never clicked — and on
+  // a login page whose form is behind exactly such a button, that is the whole
+  // test. A ranker deciding what is interesting is a fair cost control;
+  // deciding what exists is not.
+  it('given the ranker omits a stay-on-page button then it is still clicked', async () => {
+    const reveal = el({ selector: '#reveal-login', tag: 'button', text: 'Sign in with your username' });
+    const other = el({ selector: '#ranked-thing', tag: 'button', text: 'Something else' });
+    vi.mocked(scanner.scanPage).mockResolvedValue([other, reveal]);
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([other, reveal] as never);
+    // The model ranks only the other button.
+    vi.mocked(getAgentActions).mockResolvedValue([
+      { selector: '#ranked-thing', description: 'Click something else' },
+    ] as never);
+
+    await exploreApp({
+      startUrl: START,
+      maxDepth: 0,
+      maxPages: 1,
+      agentMode: true,
+      aiClient: { chat: vi.fn().mockResolvedValue('{}'), embed: vi.fn() } as never,
+      useDedicatedTab: false,
+    });
+
+    const clicked = clickedSelectors();
+    expect(clicked).toContain('#ranked-thing');
+    expect(clicked).toContain('#reveal-login');
+  }, 20000);
+
+  // Links navigate; the explorer already reaches them through the link path, and
+  // adding them back would double the work agent mode exists to avoid.
+  it('given the ranker omits a link then it is NOT added to the click set', async () => {
+    const link = el({ selector: '#a-link', tag: 'a', text: 'Go elsewhere' });
+    const button = el({ selector: '#ranked-thing', tag: 'button', text: 'Something else' });
+    vi.mocked(scanner.scanPage).mockResolvedValue([button, link]);
+    vi.mocked(scanner.selectExplorationTargets).mockReturnValue([button, link] as never);
+    vi.mocked(getAgentActions).mockResolvedValue([
+      { selector: '#ranked-thing', description: 'Click something else' },
+    ] as never);
+
+    await exploreApp({
+      startUrl: START,
+      maxDepth: 0,
+      maxPages: 1,
+      agentMode: true,
+      aiClient: { chat: vi.fn().mockResolvedValue('{}'), embed: vi.fn() } as never,
+      useDedicatedTab: false,
+    });
+
+    expect(clickedSelectors()).not.toContain('#a-link');
+  }, 20000);
+
+  // Agent mode's whole purpose is to click LESS than the exhaustive path, and
+  // the union must not erode that. Measured against the same scenario without
+  // agent mode rather than against a fixed number, because the deterministic
+  // path legitimately clicks an element more than once through its other passes
+  // (the selection probe, the reveal sweep) — which is not what this asserts.
+  it('given the union then agent mode never costs more clicks than the deterministic path', async () => {
+    const reveal = el({ selector: '#reveal-login', tag: 'button', text: 'Sign in with your username' });
+    const setup = () => {
+      vi.mocked(scanner.scanPage).mockResolvedValue([reveal]);
+      vi.mocked(scanner.selectExplorationTargets).mockReturnValue([reveal] as never);
+    };
+
+    setup();
+    vi.mocked(getAgentActions).mockResolvedValue([] as never);
+    await exploreApp({
+      startUrl: START, maxDepth: 0, maxPages: 1, agentMode: false, useDedicatedTab: false,
+    });
+    const withoutAgentMode = clickedSelectors().filter((s) => s === '#reveal-login').length;
+
+    vi.clearAllMocks();
+    setup();
+    vi.mocked(getAgentActions).mockResolvedValue([
+      { selector: '#reveal-login', description: 'Reveal the sign-in form' },
+    ] as never);
+    await exploreApp({
+      startUrl: START,
+      maxDepth: 0,
+      maxPages: 1,
+      agentMode: true,
+      aiClient: { chat: vi.fn().mockResolvedValue('{}'), embed: vi.fn() } as never,
+      useDedicatedTab: false,
+    });
+    const withAgentMode = clickedSelectors().filter((s) => s === '#reveal-login').length;
+
+    expect(withoutAgentMode).toBeGreaterThan(0);
+    expect(withAgentMode).toBeGreaterThan(0);
+    expect(withAgentMode).toBeLessThanOrEqual(withoutAgentMode);
+  }, 30000);
 });

@@ -1,6 +1,7 @@
 import React from 'react';
-import { CheckCircle, XCircle, MinusCircle, Wrench, Clock, ChevronDown, ChevronRight } from 'lucide-react';
+import { CheckCircle, XCircle, MinusCircle, Wrench, Clock, ChevronDown, ChevronRight, SkipForward } from 'lucide-react';
 import type { TestResult, StepResult } from '../../../storage/schemas';
+import { useTestStore } from '../../stores/test-store';
 
 interface Props {
   result: TestResult;
@@ -8,8 +9,19 @@ interface Props {
 
 export function ExecutionTimeline({ result }: Props) {
   const [expanded, setExpanded] = React.useState(true);
+  const { resumeTest, isRunning } = useTestStore();
 
   const totalDuration = result.duration ?? 0;
+
+  /**
+   * Re-run from any step, not just the first failure.
+   *
+   * The first failing step is the obvious guess and `FailureDetail` offers it,
+   * but it is often the wrong resume point: the state that actually broke was
+   * set up earlier, and the failure is just where it surfaced. Making every
+   * step a resume point is what lets the user bisect.
+   */
+  const resumeFrom = (order: number) => resumeTest(result.testCaseId, order);
 
   return (
     <div className="bg-surface-2 border border-border rounded-lg overflow-hidden">
@@ -56,7 +68,13 @@ export function ExecutionTimeline({ result }: Props) {
             <div className="absolute left-[9px] top-3 bottom-3 w-px bg-border" />
 
             {result.steps.map((step, i) => (
-              <TimelineStep key={i} step={step} isLast={i === result.steps.length - 1} />
+              <TimelineStep
+                key={i}
+                step={step}
+                isLast={i === result.steps.length - 1}
+                onResume={() => resumeFrom(step.step.order)}
+                resumeDisabled={isRunning}
+              />
             ))}
           </div>
 
@@ -78,7 +96,17 @@ export function ExecutionTimeline({ result }: Props) {
   );
 }
 
-function TimelineStep({ step, isLast }: { step: StepResult; isLast: boolean }) {
+function TimelineStep({
+  step,
+  isLast,
+  onResume,
+  resumeDisabled,
+}: {
+  step: StepResult;
+  isLast: boolean;
+  onResume: () => void;
+  resumeDisabled: boolean;
+}) {
   const [showDetails, setShowDetails] = React.useState(step.status === 'failed');
 
   return (
@@ -92,9 +120,13 @@ function TimelineStep({ step, isLast }: { step: StepResult; isLast: boolean }) {
 
       {/* Content */}
       <div className="flex-1 min-w-0 pb-1">
+        {/* The disclosure toggle and the resume action are SIBLINGS, not nested:
+            an interactive element inside a <button> is invalid markup and makes
+            the inner control unreachable by keyboard. */}
+        <div className="flex items-start gap-1.5">
         <button
           onClick={() => setShowDetails(!showDetails)}
-          className="w-full text-left"
+          className="flex-1 min-w-0 text-left"
         >
           <div className="flex items-center gap-1.5">
             <span className="text-2xs font-medium text-text-primary truncate">
@@ -109,6 +141,17 @@ function TimelineStep({ step, isLast }: { step: StepResult; isLast: boolean }) {
             <span className="ml-auto">{formatDuration(step.duration)}</span>
           </div>
         </button>
+        <button
+          type="button"
+          disabled={resumeDisabled}
+          onClick={onResume}
+          title={`Re-run this test from step ${step.step.order + 1}, skipping everything before it`}
+          className="flex items-center gap-0.5 flex-shrink-0 text-2xs text-text-muted hover:text-primary-text disabled:text-text-faint disabled:cursor-not-allowed transition-colors"
+        >
+          <SkipForward size={9} />
+          resume
+        </button>
+        </div>
 
         {/* Expanded details */}
         {showDetails && (

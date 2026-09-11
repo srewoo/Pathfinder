@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><title>Create order</title>
+<h1>New order</h1>
+<input id="order-qty" data-testid="order-qty" value="1">
+<button id="create-order" data-testid="create-order">Create</button>
+<p id="order-status" hidden>Saved</p>
+<script>
+  document.getElementById('create-order').addEventListener('click', async function () {
+    // Seeded defect: the response is ignored, so a 500 still reads as success.
+    fetch('/api/orders', { method: 'POST' });
+    document.getElementById('order-status').hidden = false;
+  });
+</script>

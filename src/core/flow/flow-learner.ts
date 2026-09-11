@@ -401,11 +401,18 @@ async function extractFlowsBatched(
   aiClient: AIClientInterface
 ): Promise<Array<Omit<Flow, 'flowId' | 'createdAt' | 'updatedAt'>>> {
   // Split actionable pages into batches; include all nav-only pages compactly in each batch
-  const actionable = graph.nodes.filter((n) =>
-    (n.formFields && n.formFields.length > 0) ||
-    (n.modals && n.modals.length > 0) ||
-    (n.formOutcomes && n.formOutcomes.length > 0)
-  );
+  // A page whose only form appears after a click counts as actionable: a login
+  // screen is otherwise batched as nav-only and learned as a page with nothing
+  // to do on it.
+  const isActionable = (n: (typeof graph.nodes)[number]): boolean =>
+    (!!n.formFields && n.formFields.length > 0) ||
+    (!!n.modals && n.modals.length > 0) ||
+    (!!n.revealedForms && n.revealedForms.length > 0) ||
+    // A page whose forms live inside its tabs is actionable too.
+    (!!n.tabs && n.tabs.some((t) => t.formFields && t.formFields.length > 0)) ||
+    (!!n.formOutcomes && n.formOutcomes.length > 0);
+
+  const actionable = graph.nodes.filter(isActionable);
 
   const batches: typeof actionable[] = [];
   for (let i = 0; i < actionable.length; i += BATCH_ACTIONABLE_PAGES) {
@@ -416,11 +423,7 @@ async function extractFlowsBatched(
   log.info(`Batching ${actionable.length} actionable pages into ${batches.length} AI calls`);
 
   // Pre-compute chunks for each batch so we can retry on failure
-  const navOnly = graph.nodes.filter((n) =>
-    !(n.formFields && n.formFields.length > 0) &&
-    !(n.modals && n.modals.length > 0) &&
-    !(n.formOutcomes && n.formOutcomes.length > 0)
-  );
+  const navOnly = graph.nodes.filter((n) => !isActionable(n));
   const batchChunks = batches.map((batch, idx) => {
     const batchGraph = { ...graph, nodes: [...batch, ...navOnly] };
     const chunk = serializeGraphForFlowLearning(batchGraph);
@@ -727,6 +730,8 @@ export function synthesizeCoverageFillers(
 
   const TARGET_FLOWS_PER_PAGE = 2;
   const fillers: Array<Omit<Flow, 'flowId' | 'createdAt' | 'updatedAt'>> = [];
+  /** Pages that got only one filler because nothing on them justified a second. */
+  const withoutSecondJourney: string[] = [];
 
   for (const node of graph.nodes) {
     if (node.isErrorPage) continue;
@@ -771,18 +776,54 @@ export function synthesizeCoverageFillers(
             },
           ],
         });
-      } else {
-        // No captured action — fall back to a second inspect flow that
-        // checks a different signal (e.g. URL match or page-load network call)
+      } else if (node.formFields && node.formFields.length > 0) {
+        // A form is a real second journey: the page renders inputs a user has
+        // to be able to reach and fill.
+        const named = node.formFields.filter((f) => f.label || f.name).slice(0, 3);
+        if (named.length > 0) {
+          fillers.push({
+            name: `Form on ${pageLabel}`,
+            description: `Open ${pageLabel} and confirm its form is usable — the fields a user must fill are present and enabled.`,
+            source: 'exploration',
+            steps: [
+              { order: 1, action: 'navigate', value: node.url, description: `Open ${pageLabel}`, target: node.url },
+              ...named.map((field, i) => ({
+                order: i + 2,
+                action: 'verify' as const,
+                target: field.selector,
+                description: `Verify the "${field.label || field.name}" field is present`,
+                expectedOutcome: `A user can enter a value for "${field.label || field.name}"`,
+              })),
+            ],
+          });
+        }
+      } else if (node.dataTables && node.dataTables.length > 0) {
+        const table = node.dataTables[0];
         fillers.push({
-          name: `Load: ${pageLabel}`,
-          description: `Navigate to ${pageLabel} and confirm the page URL matches and finishes loading. Auto-generated coverage filler.`,
+          name: `Data on ${pageLabel}`,
+          description: `Open ${pageLabel} and confirm its listing renders ${table.rowCount > 0 ? 'rows' : ''} rather than an empty shell.`.replace('  ', ' '),
           source: 'exploration',
           steps: [
             { order: 1, action: 'navigate', value: node.url, description: `Open ${pageLabel}`, target: node.url },
-            { order: 2, action: 'verify', target: 'page-url', value: node.url, description: `Verify the current URL equals ${node.url}`, expectedOutcome: `Browser URL bar shows ${node.url}` },
+            {
+              order: 2,
+              action: 'verify',
+              target: table.selector,
+              description: `Verify the ${table.columns?.[0] ? `"${table.columns[0]}" listing` : 'listing'} is populated`,
+              expectedOutcome: 'The listing shows data rather than an empty or errored state',
+            },
           ],
         });
+      } else {
+        // Deliberately nothing.
+        //
+        // The previous fallback navigated to a URL and then asserted the URL
+        // was that URL. It always passed, it could not fail for any reason a
+        // user would care about, and it doubled the flow count for every page
+        // in the graph — quantity masquerading as coverage. A page with no
+        // action, no form and no listing has nothing worth a second journey,
+        // and saying so is more useful than manufacturing one.
+        withoutSecondJourney.push(node.url);
       }
     }
   }
@@ -812,6 +853,14 @@ export function synthesizeCoverageFillers(
         ],
       });
     }
+  }
+
+  if (withoutSecondJourney.length > 0) {
+    log.info(
+      `${withoutSecondJourney.length} page(s) got one coverage filler rather than two — ` +
+        `they have no action, form or listing worth a second journey. ` +
+        `A tautological "the URL is the URL" flow would raise the count without raising coverage.`
+    );
   }
 
   return fillers;

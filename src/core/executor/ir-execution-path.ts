@@ -13,7 +13,7 @@
  * loss. So the IR path is opted into, and `explainPathChoice` says which ran and
  * why.
  */
-import type { ExecutionPlan, StepResult, TestCase, TestResult } from '../../storage/schemas';
+import type { ExecutionPlan, HealingAttempt, StepResult, TestCase, TestResult } from '../../storage/schemas';
 import { describeDropped, testCaseToIR } from '../ir/ir-bridge';
 import type { TestIR } from '../ir/test-ir';
 import { executeIR, type IRTestResult } from './ir-executor';
@@ -93,17 +93,45 @@ export async function executeViaIr(
     testCaseId: testCase.id,
     testCaseTitle: testCase.title,
     // NEEDS_REVIEW is not a storage status, so it maps to `passed` and the heal
-    // count carries the nuance. Mapping it to `failed` would break the build over
-    // a test that did pass.
+    // evidence below carries the nuance — the verdict is recomputed from that
+    // evidence on read, so it must actually be stored. Mapping it to `failed`
+    // would break the build over a test that did pass.
     status: irResult.verdict === 'FAIL' ? 'failed' : 'passed',
     startedAt,
     completedAt: new Date().toISOString(),
     duration: irResult.durationMs,
     steps,
     errorMessage: irResult.errorMessage,
-    healingAttempts: [],
+    // Reconstructed rather than dropped. This was `[]`, which meant an IR-path
+    // NEEDS_REVIEW stored as `passed` with no heal evidence — so the verdict
+    // recomputed to a clean PASS and the review was lost everywhere downstream.
+    healingAttempts: healingAttemptsFrom(irResult),
     runId: opts.runId,
   };
+}
+
+/**
+ * Heal evidence in the legacy shape, so the verdict survives storage.
+ *
+ * The IR result records a heal per step as `{ from, to }`. Only successful heals
+ * appear there — a failed heal leaves the step failed — so every reconstructed
+ * attempt is `success: true`. The method is `similarity` because the IR result
+ * does not record which tier won; the selectors are the reviewable part, and
+ * claiming a specific tier we did not observe would be worse than a generic one.
+ */
+export function healingAttemptsFrom(result: IRTestResult): HealingAttempt[] {
+  const out: HealingAttempt[] = [];
+  for (const s of [...result.steps, ...result.assertions]) {
+    if (!s.healed) continue;
+    out.push({
+      stepOrder: s.order,
+      originalSelector: s.healed.from,
+      healedSelector: s.healed.to,
+      method: 'similarity',
+      success: true,
+    });
+  }
+  return out;
 }
 
 /**

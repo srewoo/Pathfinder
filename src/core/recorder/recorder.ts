@@ -40,6 +40,28 @@ export interface RecordingSession {
   startUrl: string;
 }
 
+/**
+ * The globals the injected recording script installs on `window`.
+ *
+ * Declared here, beside the script that defines them, so the content script can
+ * read them without an `as any` cast. The recorder's own references live inside
+ * a template literal and are therefore never typechecked — which is exactly why
+ * the contract needs stating somewhere that is.
+ *
+ * All three are optional: the script is injected on demand, so before that the
+ * page has none of them.
+ */
+declare global {
+  interface Window {
+    /** True while a recording session is active in the page. */
+    __pathfinder_recording?: boolean;
+    /** Returns everything captured so far, without ending the session. */
+    __pathfinder_getRecordedActions?: () => RecordedAction[];
+    /** Ends the session and returns what it captured. */
+    __pathfinder_stopRecording?: () => RecordedAction[];
+  }
+}
+
 // ── Recording Script (injected into content script) ─────────────────────────
 
 /**

@@ -137,6 +137,16 @@ export const TestIRSchema = z
     steps: z.array(StepSchema),
     assertions: z.array(AssertionSchema),
     tags: z.array(z.string()).default([]),
+    /**
+     * Names supplied externally per run — data-driven columns.
+     *
+     * They satisfy a `{{placeholder}}` reference without an earlier capture
+     * step, because the value comes from the data row rather than from the page.
+     * Optional rather than defaulted: a default makes the field REQUIRED in the
+     * inferred output type, which would break every existing construction site
+     * of `TestIR` for a field almost none of them care about.
+     */
+    dataKeys: z.array(z.string()).optional(),
   })
   .superRefine((ir, ctx) => {
     // A test that asserts nothing always passes, which is worse than no test —
@@ -182,7 +192,7 @@ export const TestIRSchema = z
 
     // Every {{placeholder}} must be captured by an EARLIER step. A forward
     // reference silently types the literal "{{token}}" into the field.
-    const captured = new Set<string>();
+    const captured = new Set<string>(ir.dataKeys ?? []);
     for (const step of [...ir.steps].sort((a, b) => a.order - b.order)) {
       for (const ref of placeholdersIn(step.value)) {
         if (!captured.has(ref)) {

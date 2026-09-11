@@ -3,6 +3,7 @@ import { Database, Layers } from 'lucide-react';
 import { CrawlForm } from './CrawlForm';
 import { KnowledgeList } from './KnowledgeList';
 import { KnowledgeExportImport } from './KnowledgeExportImport';
+import { KnowledgeSearch } from './KnowledgeSearch';
 import { NextStepBanner } from '../shared/NextStepBanner';
 import { useKnowledgeStore } from '../../stores/knowledge-store';
 import { useNavigationStore } from '../../stores/navigation-store';
@@ -53,6 +54,15 @@ export function KnowledgePanel() {
           onContinue={() => { store.dismissCompletion(); goTo('explore'); }}
           onDismiss={store.dismissCompletion}
         />
+      )}
+
+      {store.documents.length > 0 && (
+        <div className="border-t border-border pt-3">
+          <h3 className="text-2xs font-medium text-text-muted uppercase tracking-wide mb-2">
+            Query the index
+          </h3>
+          <KnowledgeSearch />
+        </div>
       )}
 
       <div className="border-t border-border pt-3">

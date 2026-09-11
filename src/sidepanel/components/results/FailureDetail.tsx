@@ -1,7 +1,10 @@
 import { useState, useEffect } from "react";
-import { AlertTriangle, Camera, Code2, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
+import { AlertTriangle, Camera, Code2, ChevronDown, ChevronRight, Wrench, SkipForward } from 'lucide-react';
 import type { TestResult } from '../../../storage/schemas';
 import { StatusIndicator } from '../shared/StatusIndicator';
+import { Button } from '../shared/Button';
+import { useTestStore } from '../../stores/test-store';
+import { firstFailingStepOrder } from '../../../core/report/result-adapter';
 
 /**
  * Convert a base64 data URL to a blob URL that works under MV3 CSP.
@@ -40,14 +43,36 @@ interface FailureDetailProps {
 }
 
 export function FailureDetail({ result }: FailureDetailProps) {
+  const { resumeTest, isRunning } = useTestStore();
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showDOM, setShowDOM] = useState(false);
   const screenshotUrl = useDataUrlAsBlobUrl(result.screenshot);
 
   const failedSteps = result.steps.filter((s) => s.status === 'failed' || s.status === 'skipped');
+  const resumeAt = firstFailingStepOrder(result);
 
   return (
     <div className="space-y-3 mt-2 pb-2">
+      {/* Re-run from the failing step instead of replaying its whole prefix —
+          the slowest part of debugging a long scenario. Skipped steps are
+          recorded as skipped, so the re-run cannot report a false green. */}
+      {resumeAt !== undefined && (
+        <div className="flex items-center justify-between gap-2 p-2.5 bg-surface-2 border border-border rounded-lg">
+          <p className="text-2xs text-text-secondary">
+            Re-run from step {resumeAt + 1} without replaying the earlier steps.
+          </p>
+          <Button
+            variant="secondary"
+            size="xs"
+            icon={<SkipForward size={10} />}
+            disabled={isRunning}
+            onClick={() => resumeTest(result.testCaseId, resumeAt)}
+          >
+            Resume here
+          </Button>
+        </div>
+      )}
+
       {result.errorMessage && (
         <div className="flex items-start gap-2 p-2.5 bg-error/10 border border-error/20 rounded-lg">
           <AlertTriangle size={12} className="text-error-text flex-shrink-0 mt-0.5" />

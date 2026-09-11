@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>Profile</title>
+<h1>Profile</h1>
+<input id="bio" data-testid="bio" value="">
+<button id="save-profile" data-testid="save-profile">Save</button>
+<p id="profile-saved" hidden>Profile saved</p>
+<p id="session-expired" hidden>Your session has expired. Sign in again.</p>
+<script>
+  var signedIn = true;
+  setTimeout(function () { signedIn = false; }, 150);
+  document.getElementById('save-profile').addEventListener('click', function () {
+    // Seeded defect: success is claimed whether or not the session survived.
+    document.getElementById('profile-saved').hidden = false;
+  });
+</script>

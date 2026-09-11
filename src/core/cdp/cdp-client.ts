@@ -51,11 +51,59 @@ export function isAttached(tabId: number): boolean {
   return attachedTabs.has(tabId);
 }
 
-async function sendCommand<T = unknown>(tabId: number, method: string, params?: Record<string, unknown>): Promise<T> {
+/**
+ * Ceiling on any single CDP command.
+ *
+ * `chrome.debugger.sendCommand` has no timeout of its own: if the renderer is
+ * blocked, or the page navigates while a command is in flight, the promise
+ * never settles. A `Runtime.evaluate` whose script carries its own internal
+ * deadline is no protection — that deadline only applies once the script runs.
+ * An exploration that hit this stalled for minutes with nothing in the log
+ * between "CDP attached" and whatever came next.
+ */
+const CDP_COMMAND_TIMEOUT_MS = 30_000;
+
+/** Headroom over a settle script's own deadline for dispatch and the round trip. */
+const DOM_SETTLE_GRACE_MS = 2_000;
+
+export class CDPTimeoutError extends Error {
+  constructor(
+    readonly method: string,
+    readonly tabId: number,
+    readonly timeoutMs: number
+  ) {
+    super(`CDP ${method} on tab ${tabId} did not respond within ${timeoutMs}ms`);
+    this.name = 'CDPTimeoutError';
+  }
+}
+
+async function sendCommand<T = unknown>(
+  tabId: number,
+  method: string,
+  params?: Record<string, unknown>,
+  timeoutMs: number = CDP_COMMAND_TIMEOUT_MS
+): Promise<T> {
   if (!attachedTabs.has(tabId)) {
     await attach(tabId);
   }
-  return chrome.debugger.sendCommand({ tabId }, method, params) as Promise<T>;
+
+  const command = chrome.debugger.sendCommand({ tabId }, method, params) as Promise<T>;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new CDPTimeoutError(method, tabId, timeoutMs)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([command, guard]);
+  } finally {
+    // Always cleared: a pending timer would keep the service worker alive and
+    // fire a rejection nobody is listening for.
+    if (timer !== undefined) clearTimeout(timer);
+    // The losing command promise may still reject later; swallow it so it does
+    // not surface as an unhandled rejection.
+    void command.catch(() => undefined);
+  }
 }
 
 // Clean up when tab is closed
@@ -525,6 +573,8 @@ export async function waitForNetworkIdle(
  */
 export async function waitForDomSettle(tabId: number, timeoutMs = 3_000): Promise<void> {
   try {
+    // The script's own deadline only applies once the script runs. The outer
+    // budget is what covers a renderer that never gets to run it.
     await evaluate<boolean>(tabId, `
       (async () => {
         const deadline = Date.now() + ${timeoutMs};
@@ -535,9 +585,9 @@ export async function waitForDomSettle(tabId: number, timeoutMs = 3_000): Promis
         await new Promise((r) => requestAnimationFrame(() => r(null)));
         return true;
       })()
-    `);
+    `, timeoutMs + DOM_SETTLE_GRACE_MS);
   } catch {
-    /* non-fatal — settle is best-effort */
+    /* non-fatal — settle is best-effort, including when it times out */
   }
 }
 
@@ -649,15 +699,24 @@ chrome.debugger.onEvent.addListener((source, method, rawParams) => {
  * Execute JavaScript in the page context via CDP Runtime.evaluate.
  * Returns the evaluated result as a serializable value.
  */
-export async function evaluate<T = unknown>(tabId: number, expression: string): Promise<T> {
+export async function evaluate<T = unknown>(
+  tabId: number,
+  expression: string,
+  timeoutMs?: number
+): Promise<T> {
   const result = await sendCommand<{
     result: { type: string; value?: T; description?: string };
     exceptionDetails?: { text: string };
-  }>(tabId, 'Runtime.evaluate', {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
-  });
+  }>(
+    tabId,
+    'Runtime.evaluate',
+    {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    },
+    timeoutMs
+  );
 
   if (result.exceptionDetails) {
     throw new Error(`CDP eval error: ${result.exceptionDetails.text}`);

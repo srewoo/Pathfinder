@@ -84,7 +84,7 @@ describe('runRetrievalEval', () => {
           { query: 'q2', relevantUrls: ['docY'] },
         ],
       },
-      { aiClient: ai as never, k: 2 },
+      { aiClient: ai as never, k: 2, tier: 'synthetic-index', embeddingModel: 'synthetic' },
     );
 
     expect(result.k).toBe(2);
@@ -97,7 +97,7 @@ describe('runRetrievalEval', () => {
     vi.mocked(searchByText).mockResolvedValue([mockResult('zzz')] as never);
     const result = await runRetrievalEval(
       { name: 't', queries: [{ query: 'q', relevantUrls: ['aaa'] }] },
-      { aiClient: ai as never, k: 5 },
+      { aiClient: ai as never, k: 5, tier: 'synthetic-index', embeddingModel: 'synthetic' },
     );
     expect(result.mrr).toBe(0);
     expect(result.precisionAtK).toBe(0);
@@ -107,6 +107,12 @@ describe('runRetrievalEval', () => {
 describe('formatMetricsTable', () => {
   it('given metrics when formatting then includes headline metrics', () => {
     const out = formatMetricsTable({
+      provenance: {
+        tier: 'synthetic-index',
+        embeddingModel: 'synthetic',
+        corpus: { name: 't', version: '1.0.0', queries: 0 },
+        sampleSize: 0,
+      },
       k: 5,
       precisionAtK: 0.8, recallAtK: 0.9, mrr: 0.85, ndcgAtK: 0.92,
       perQuery: [],

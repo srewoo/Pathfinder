@@ -1,10 +1,12 @@
 import type { ExecutionStep, HealingAttempt } from '../../storage/schemas';
 import type { AIClientInterface } from '../ai/ai-client';
 import { findSimilarElements } from './dom-similarity';
-import { generateAlternativeSelectors } from './selector-generator';
+import { generateAlternativeSelectors, getDOMContext } from './selector-generator';
 import { buildAttributeSelectors } from './attribute-selector';
+import { proposeSelectorFromScreenshot } from './visual-locator';
 import { runStep } from '../executor/action-runner';
 import { createLogger } from '../../utils/logger';
+import type { HealContext } from '../executor/execution-ports';
 
 const log = createLogger('self-healer');
 
@@ -94,7 +96,12 @@ export async function healStep(
    * trusted events when a CDP session is live) so healing validates selectors
    * under the same event model the test actually uses.
    */
-  stepRunner: typeof runStep = runStep
+  stepRunner: typeof runStep = runStep,
+  /**
+   * Failure evidence. When it carries a screenshot, the vision tier becomes
+   * available after the DOM strategies have all declined.
+   */
+  context?: HealContext
 ): Promise<HealingResult> {
   const originalSelector = step.selector ?? '';
 
@@ -152,6 +159,34 @@ export async function healStep(
     if (await candidateResolves(step, selector, tabId, stepRunner)) {
       log.info(`Healed via AI: ${selector}`);
       return makeResult(true, { ...step, selector }, step.order, originalSelector, 'ai', selector);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Strategy 4: Vision — read the failure screenshot
+  // -------------------------------------------------------------------------
+  // Last, and only with an image in hand. Every strategy above reasons over
+  // text, so an icon-only button, a canvas widget, or two DOM-identical rows
+  // are unreachable by all of them. A vision call costs several times a text
+  // call, which is why it is paid only once the cheap tiers have declined.
+  if (context?.screenshot) {
+    log.info(`Strategy 4 (vision) for: ${originalSelector}`);
+    const visualSelectors = await proposeSelectorFromScreenshot({
+      description: step.description,
+      failedSelector: originalSelector,
+      error,
+      screenshot: context.screenshot,
+      domContext: await getDOMContext(tabId),
+      aiClient,
+    });
+
+    for (const selector of visualSelectors.slice(0, MAX_CANDIDATES_PER_STRATEGY)) {
+      if (await candidateResolves(step, selector, tabId, stepRunner)) {
+        log.info(`Healed via vision: ${selector}`);
+        // Registration is the executor's job (it registers on every successful
+        // heal); doing it here too would double-write the registry.
+        return makeResult(true, { ...step, selector }, step.order, originalSelector, 'visual', selector);
+      }
     }
   }
 

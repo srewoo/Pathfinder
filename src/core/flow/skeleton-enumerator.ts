@@ -73,7 +73,7 @@ function normalizeFullUrl(url: string): string {
   try {
     const u = new URL(url);
     u.searchParams.sort();
-    let path = u.pathname.replace(/\/+$/, '') || '/';
+    const path = u.pathname.replace(/\/+$/, '') || '/';
     const q = u.searchParams.toString();
     return `${u.origin}${path}${q ? `?${q}` : ''}${u.hash}`;
   } catch {
@@ -401,21 +401,94 @@ function enumerateModalFlows(node: PageNode): FlowDraft[] {
   });
 }
 
+/**
+ * Revealed-form skeletons: click the trigger, then fill what it brought in.
+ *
+ * The click is step 2 and not optional. A plan that types into these fields
+ * without it targets an element that is not in the DOM yet — which is the
+ * failure this capture exists to prevent.
+ */
+function enumerateRevealedFormFlows(node: PageNode): FlowDraft[] {
+  const reveals = node.revealedForms ?? [];
+  if (reveals.length === 0) return [];
+  const label = pageLabel(node);
+
+  return reveals.map((reveal): FlowDraft => {
+    const steps: FlowStep[] = [
+      { order: 1, action: 'navigate', value: node.url, target: node.url, description: `Open ${label}` },
+      {
+        order: 2,
+        action: 'click',
+        target: reveal.triggerLabel,
+        selector: reveal.triggerSelector,
+        description: `Click "${reveal.triggerLabel}" to reveal the form`,
+        expectedOutcome: 'The form fields appear on the page',
+      },
+    ];
+    let order = 3;
+    // Required first, then optional, so a short cap still yields a fillable form.
+    const fields = reveal.formFields ?? [];
+    const ordered = [...fields.filter((f) => f.required), ...fields.filter((f) => !f.required)];
+    for (const f of ordered.slice(0, MAX_OPTIONAL_FIELDS_TO_FILL)) {
+      steps.push({
+        order: order++,
+        action: fillActionFor(f),
+        target: fieldLabel(f),
+        selector: f.selector,
+        value: exampleValue(f),
+        description: `Enter ${fieldLabel(f)}`,
+      });
+    }
+    return {
+      name: `Reveal and fill: ${reveal.triggerLabel} (${label})`,
+      description:
+        `Click "${reveal.triggerLabel}" on ${label} to reveal its form, then fill it. ` +
+        `Auto-generated from a form that only exists after the click.`,
+      source: 'exploration',
+      coverageType: 'exploratory',
+      steps,
+    };
+  });
+}
+
 /** Feature-tab skeletons: open each in-page view and verify it renders. */
 function enumerateTabFlows(node: PageNode): FlowDraft[] {
   const tabs = node.tabs ?? [];
   if (tabs.length === 0) return [];
   const label = pageLabel(node);
-  return tabs.map((tab): FlowDraft => ({
-    name: `Open ${tab.label} (${label})`,
-    description: `Open the "${tab.label}" view and verify it loads. Auto-generated feature-tab coverage.`,
-    source: 'exploration',
-    coverageType: 'exploratory',
-    steps: [
+  return tabs.map((tab): FlowDraft => {
+    const steps: FlowStep[] = [
       { order: 1, action: 'navigate', value: tab.url, target: tab.url, description: `Open ${tab.label}` },
       { order: 2, action: 'verify', target: tab.label, description: `Verify the "${tab.label}" view is shown`, expectedOutcome: `The "${tab.label}" view is displayed` },
-    ],
-  }));
+    ];
+    // A tab with a form in it deserves a flow that fills the form, not one that
+    // only asserts the tab rendered. Required fields first, so a short cap still
+    // leaves a submittable form.
+    const fields = tab.formFields ?? [];
+    const ordered = [...fields.filter((f) => f.required), ...fields.filter((f) => !f.required)];
+    let order = 3;
+    for (const f of ordered.slice(0, MAX_OPTIONAL_FIELDS_TO_FILL)) {
+      steps.push({
+        order: order++,
+        action: fillActionFor(f),
+        target: fieldLabel(f),
+        selector: f.selector,
+        value: exampleValue(f),
+        description: `Enter ${fieldLabel(f)} in the "${tab.label}" view`,
+      });
+    }
+    return {
+      name: fields.length > 0
+        ? `Fill the ${tab.label} form (${label})`
+        : `Open ${tab.label} (${label})`,
+      description: fields.length > 0
+        ? `Open the "${tab.label}" view on ${label} and fill its form. Auto-generated from fields captured inside the view.`
+        : `Open the "${tab.label}" view and verify it loads. Auto-generated feature-tab coverage.`,
+      source: 'exploration',
+      coverageType: 'exploratory',
+      steps,
+    };
+  });
 }
 
 /** Data-table row-action skeletons: exercise a captured row action (Edit/View/…). */
@@ -470,6 +543,7 @@ export function enumerateSkeletons(graph: InteractionGraph | undefined): FlowDra
     if (node.isErrorPage) continue;
     all.push(...enumerateFormFlows(node));
     all.push(...enumerateModalFlows(node));
+    all.push(...enumerateRevealedFormFlows(node));
     all.push(...enumerateTabFlows(node));
     all.push(...enumerateTableFlows(node));
   }

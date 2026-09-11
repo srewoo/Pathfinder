@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>Team</title>
+<h1>Team</h1>
+<button id="invite-member" data-testid="invite-member">Invite member</button>
+<div id="invite-modal" role="dialog" aria-modal="true" hidden>
+  <h2>Invite a member</h2>
+  <div id="invite-fields"></div>
+</div>
+<script>
+  document.getElementById('invite-member').addEventListener('click', function () {
+    var modal = document.getElementById('invite-modal');
+    // Correct: the modal opens WITH its form.
+    document.getElementById('invite-fields').innerHTML =
+      '<input id="invite-email" data-testid="invite-email" name="inviteEmail">' +
+      '<button id="send-invite" data-testid="send-invite">Send</button>';
+    modal.hidden = false;
+  });
+</script>
